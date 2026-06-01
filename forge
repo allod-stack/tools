@@ -162,6 +162,22 @@ pr_view() {
   fi
 }
 
+pr_edit() {
+  require_repo
+  local number="$1"
+  local title="${2:-}"
+  local body="${3:-}"
+  local payload
+  payload=$(jq -n \
+    --arg title "$title" \
+    --arg body "$body" \
+    '{} | if $title != "" then . + {title: $title} else . end
+        | if $body  != "" then . + {body: $body}  else . end')
+  local url
+  url=$(api PATCH "/repos/$REPO/pulls/$number" -d "$payload" | jq -r '.html_url')
+  echo "PR updated: $url"
+}
+
 pr_comment() {
   require_repo
   local number="$1"
@@ -253,6 +269,7 @@ Resources:
 PR commands:
   forge pr list                              List open pull requests
   forge pr view <number>                     Show PR details and comments
+  forge pr edit <number> [title] [body]      Update PR title and/or description
   forge pr comment <number> <body>           Post a comment
   forge pr create <title> <head> [base]      Create a pull request
 
@@ -276,6 +293,7 @@ case "$RESOURCE" in
     case "$COMMAND" in
       list)    pr_list ;;
       view)    pr_view "${1:?usage: forge pr view <number>}" ;;
+      edit)    pr_edit "${1:?usage: forge pr edit <number> [title] [body]}" "${2:-}" "${3:-}" ;;
       comment) pr_comment "${1:?usage: forge pr comment <number> <body>}" \
                            "${2:?usage: forge pr comment <number> <body>}" ;;
       create)  pr_create "${1:?usage: forge pr create <title> <head> [base]}" \
