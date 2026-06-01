@@ -1,0 +1,281 @@
+#!/usr/bin/env bash
+# forge - Forgejo CLI, like gh but for Forgejo
+#
+# Usage: forge [-R owner/repo] <resource> <command> [args]
+#
+# Resources:  pr, issue
+#
+# pr commands:
+#   forge pr list                     List open pull requests
+#   forge pr view <number>            Show PR details and comments
+#   forge pr comment <number> <body>  Post a comment on a PR
+#
+# issue commands:
+#   forge issue list                  List open issues
+#   forge issue view <number>         Show issue details and comments
+#
+# Config (env vars):
+#   FORGE_URL          Base URL of Forgejo instance (default: https://forge.anarch.diy)
+#   FORGEJO_TOKEN      API token (default: read from ~/.config/git/forgejo-token)
+
+set -euo pipefail
+
+FORGE_URL="${FORGE_URL:-https://forge.anarch.diy}"
+FORGE_TOKEN_FILE="${FORGE_TOKEN_FILE:-$HOME/.config/git/forgejo-token}"
+
+# --- Dependencies ---
+
+if ! command -v jq &>/dev/null; then
+  echo "forge: jq is required but not installed" >&2
+  exit 1
+fi
+if ! command -v curl &>/dev/null; then
+  echo "forge: curl is required but not installed" >&2
+  exit 1
+fi
+
+# --- Auth ---
+
+if [ -n "${FORGEJO_TOKEN:-}" ]; then
+  TOKEN="$FORGEJO_TOKEN"
+elif [ -r "$FORGE_TOKEN_FILE" ]; then
+  TOKEN="$(cat "$FORGE_TOKEN_FILE")"
+else
+  echo "forge: no token found — set FORGEJO_TOKEN or ensure $FORGE_TOKEN_FILE exists" >&2
+  exit 1
+fi
+
+# --- Repo inference ---
+
+infer_repo() {
+  local url
+  url=$(git remote get-url origin 2>/dev/null) || {
+    echo "forge: not in a git repo and --repo not specified" >&2
+    exit 1
+  }
+  # Strip .git suffix, then extract last two path components (owner/repo)
+  # Handles: ssh://git@host:port/owner/repo.git  git@host:owner/repo.git  https://host/owner/repo.git
+  url="${url%.git}"
+  echo "$url" | grep -oE '[^/:]+/[^/:]+$'
+}
+
+# --- Arg parsing ---
+
+REPO=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -R|--repo) REPO="$2"; shift 2 ;;
+    -h|--help) RESOURCE="help"; shift ;;
+    *) break ;;
+  esac
+done
+
+RESOURCE="${1:-help}"; [[ $# -gt 0 ]] && shift
+COMMAND="${1:-}";       [[ $# -gt 0 ]] && shift
+
+require_repo() {
+  [ -n "$REPO" ] || REPO=$(infer_repo)
+}
+
+# --- API helper ---
+
+api() {
+  local method="$1"; shift
+  local path="$1"; shift
+  curl -sf -X "$method" \
+    "$FORGE_URL/api/v1$path" \
+    -H "Authorization: token $TOKEN" \
+    -H "Content-Type: application/json" \
+    "$@"
+}
+
+# --- PR commands ---
+
+pr_list() {
+  require_repo
+  local result
+  result=$(api GET "/repos/$REPO/pulls?state=open&limit=50")
+  local count
+  count=$(echo "$result" | jq 'length')
+  if [ "$count" -eq 0 ]; then
+    echo "No open pull requests in $REPO"
+    return
+  fi
+  echo "$result" | jq -r '.[] | "\(.number)\t\(.title)\t\(.user.login)\t\(.head.label) → \(.base.label)"' \
+    | column -t -s $'\t'
+}
+
+pr_view() {
+  require_repo
+  local number="$1"
+  local pr comments
+
+  pr=$(api GET "/repos/$REPO/pulls/$number")
+  comments=$(api GET "/repos/$REPO/issues/$number/comments")
+
+  local title state author head base
+  title=$(echo "$pr" | jq -r '.title')
+  state=$(echo "$pr" | jq -r '.state')
+  author=$(echo "$pr" | jq -r '.user.login')
+  head=$(echo "$pr" | jq -r '.head.label')
+  base=$(echo "$pr" | jq -r '.base.label')
+
+  echo "PR #$number: $title"
+  echo "  State:  $state"
+  echo "  Author: $author"
+  echo "  Branch: $head → $base"
+  echo ""
+
+  local body
+  body=$(echo "$pr" | jq -r '.body // ""')
+  if [ -n "$body" ]; then
+    echo "$body"
+    echo ""
+  fi
+
+  local count
+  count=$(echo "$comments" | jq 'length')
+  if [ "$count" -gt 0 ]; then
+    echo "--- $count comment(s) ---"
+    echo "$comments" | jq -r '.[] | "[\(.created_at[:10])] \(.user.login):\n\(.body)\n"'
+  fi
+}
+
+pr_comment() {
+  require_repo
+  local number="$1"
+  local body="$2"
+  local url
+  url=$(api POST "/repos/$REPO/issues/$number/comments" \
+    -d "{\"body\": $(echo "$body" | jq -Rs .)}" | jq -r '.html_url')
+  echo "Comment posted: $url"
+}
+
+pr_create() {
+  require_repo
+  local title="${1:?pr create requires a title}"
+  local head="${2:?pr create requires a head branch}"
+  local base="${3:-main}"
+  local body="${4:-}"
+
+  local url
+  url=$(api POST "/repos/$REPO/pulls" \
+    -d "$(jq -n \
+      --arg title "$title" \
+      --arg head "$head" \
+      --arg base "$base" \
+      --arg body "$body" \
+      '{title: $title, head: $head, base: $base, body: $body}')" \
+    | jq -r '.html_url')
+  echo "PR created: $url"
+}
+
+# --- Issue commands ---
+
+issue_list() {
+  require_repo
+  local result
+  result=$(api GET "/repos/$REPO/issues?type=issues&state=open&limit=50")
+  local count
+  count=$(echo "$result" | jq 'length')
+  if [ "$count" -eq 0 ]; then
+    echo "No open issues in $REPO"
+    return
+  fi
+  echo "$result" | jq -r '.[] | "\(.number)\t\(.title)\t\(.user.login)"' \
+    | column -t -s $'\t'
+}
+
+issue_view() {
+  require_repo
+  local number="$1"
+  local issue comments
+
+  issue=$(api GET "/repos/$REPO/issues/$number")
+  comments=$(api GET "/repos/$REPO/issues/$number/comments")
+
+  local title state author
+  title=$(echo "$issue" | jq -r '.title')
+  state=$(echo "$issue" | jq -r '.state')
+  author=$(echo "$issue" | jq -r '.user.login')
+
+  echo "Issue #$number: $title"
+  echo "  State:  $state"
+  echo "  Author: $author"
+  echo ""
+
+  local body
+  body=$(echo "$issue" | jq -r '.body // ""')
+  if [ -n "$body" ]; then
+    echo "$body"
+    echo ""
+  fi
+
+  local count
+  count=$(echo "$comments" | jq 'length')
+  if [ "$count" -gt 0 ]; then
+    echo "--- $count comment(s) ---"
+    echo "$comments" | jq -r '.[] | "[\(.created_at[:10])] \(.user.login):\n\(.body)\n"'
+  fi
+}
+
+# --- Usage ---
+
+usage() {
+  cat <<EOF
+Usage: forge [-R owner/repo] <resource> <command> [args]
+
+Resources:
+  pr      Pull requests
+  issue   Issues
+
+PR commands:
+  forge pr list                              List open pull requests
+  forge pr view <number>                     Show PR details and comments
+  forge pr comment <number> <body>           Post a comment
+  forge pr create <title> <head> [base]      Create a pull request
+
+Issue commands:
+  forge issue list                           List open issues
+  forge issue view <number>                  Show issue details and comments
+
+Flags:
+  -R, --repo <owner/repo>   Target repo (default: inferred from git remote)
+
+Config:
+  FORGE_URL       Forgejo base URL (default: https://forge.anarch.diy)
+  FORGEJO_TOKEN   API token (default: ~/.config/git/forgejo-token)
+EOF
+}
+
+# --- Dispatch ---
+
+case "$RESOURCE" in
+  pr)
+    case "$COMMAND" in
+      list)    pr_list ;;
+      view)    pr_view "${1:?usage: forge pr view <number>}" ;;
+      comment) pr_comment "${1:?usage: forge pr comment <number> <body>}" \
+                           "${2:?usage: forge pr comment <number> <body>}" ;;
+      create)  pr_create "${1:?usage: forge pr create <title> <head> [base]}" \
+                         "${2:?usage: forge pr create <title> <head> [base]}" \
+                         "${3:-main}" "${4:-}" ;;
+      *)       usage; exit 1 ;;
+    esac
+    ;;
+  issue)
+    case "$COMMAND" in
+      list)  issue_list ;;
+      view)  issue_view "${1:?usage: forge issue view <number>}" ;;
+      *)     usage; exit 1 ;;
+    esac
+    ;;
+  help|--help|-h|"")
+    usage
+    ;;
+  *)
+    echo "forge: unknown resource '$RESOURCE'" >&2
+    usage >&2
+    exit 1
+    ;;
+esac
