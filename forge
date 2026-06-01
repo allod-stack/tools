@@ -108,10 +108,11 @@ pr_list() {
 pr_view() {
   require_repo
   local number="$1"
-  local pr comments
+  local pr comments reviews
 
   pr=$(api GET "/repos/$REPO/pulls/$number")
   comments=$(api GET "/repos/$REPO/issues/$number/comments")
+  reviews=$(api GET "/repos/$REPO/pulls/$number/reviews")
 
   local title state author head base
   title=$(echo "$pr" | jq -r '.title')
@@ -138,6 +139,26 @@ pr_view() {
   if [ "$count" -gt 0 ]; then
     echo "--- $count comment(s) ---"
     echo "$comments" | jq -r '.[] | "[\(.created_at[:10])] \(.user.login):\n\(.body)\n"'
+  fi
+
+  local review_ids
+  review_ids=$(echo "$reviews" | jq -r '.[] | select(.comments_count > 0) | .id')
+  if [ -n "$review_ids" ]; then
+    local total_inline=0
+    local inline_output=""
+    while IFS= read -r rid; do
+      local rc
+      rc=$(api GET "/repos/$REPO/pulls/$number/reviews/$rid/comments")
+      local rc_count
+      rc_count=$(echo "$rc" | jq 'length')
+      total_inline=$((total_inline + rc_count))
+      inline_output+=$(echo "$rc" | jq -r '.[] | "[\(.created_at[:10])] \(.user.login) on \(.path):\n\(.body)\n"')
+      inline_output+=$'\n'
+    done <<< "$review_ids"
+    if [ "$total_inline" -gt 0 ]; then
+      echo "--- $total_inline inline comment(s) ---"
+      printf '%s\n' "$inline_output"
+    fi
   fi
 }
 
