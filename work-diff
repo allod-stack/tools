@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+WORK_DIR="${HOME}/work"
+
+usage() {
+    cat <<'EOF'
+Usage: work-diff [--all | <repo-name>]
+
+  (no args)       show all git repos in ~/work
+  --all           same as above
+  <repo-name>     show only ~/work/<repo-name>
+  -h, --help      this message
+EOF
+    exit 0
+}
+
+sep() { printf '%.0s═' $(seq 1 60); echo; }
+
+show_repo() {
+    local dir="$1"
+    [[ -d "$dir/.git" ]] || return 0
+
+    local name status staged unstaged
+    name=$(basename "$dir")
+    status=$(git -C "$dir" status --porcelain 2>/dev/null)
+
+    echo
+    sep
+    printf '  %s\n' "$name"
+    sep
+
+    if [[ -z "$status" ]]; then
+        echo "  (clean)"
+        return 0
+    fi
+
+    echo "$status"
+
+    staged=$(git -C "$dir" diff --cached 2>/dev/null)
+    unstaged=$(git -C "$dir" diff 2>/dev/null)
+
+    [[ -n "$staged" ]]   && printf '\n--- staged ---\n%s\n' "$staged"
+    [[ -n "$unstaged" ]] && printf '\n--- unstaged ---\n%s\n' "$unstaged"
+}
+
+show_all() {
+    local found=0
+    for dir in "$WORK_DIR"/*/; do
+        [[ -d "$dir/.git" ]] || continue
+        found=1
+        show_repo "$dir"
+    done
+    (( found )) || echo "No git repos found in $WORK_DIR"
+}
+
+case "${1:-}" in
+    -h|--help) usage ;;
+    --all|"")  show_all ;;
+    -*)        echo "Unknown option: $1" >&2; usage; exit 1 ;;
+    *)
+        [[ -d "$WORK_DIR/$1" ]] || { echo "Error: '$1' not found in $WORK_DIR" >&2; exit 1; }
+        show_repo "$WORK_DIR/$1"
+        ;;
+esac
