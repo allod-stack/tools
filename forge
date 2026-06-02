@@ -235,6 +235,10 @@ pr_reply() {
     fi
   done <<< "$review_ids"
 
+  # TODO: starting a new inline thread (no existing comment to reply to) requires
+  # POST /reviews with a comment containing path + new_position. Add a
+  # `forge pr inline <number> <path> <line> <body>` command when agentic review is needed.
+
   if [ -z "$orig_review_id" ]; then
     echo "forge: comment $comment_id not found on PR #$number" >&2
     exit 1
