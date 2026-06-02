@@ -44,14 +44,20 @@ show_repo() {
     [[ -n "$unstaged" ]] && printf '\n--- unstaged ---\n%s\n' "$unstaged"
 }
 
-show_all() {
-    local found=0
-    for dir in "$WORK_DIR"/*/; do
-        [[ -d "$dir/.git" ]] || continue
-        found=1
+walk() {
+    local dir="$1"
+    if [[ -d "$dir/.git" ]]; then
         show_repo "$dir"
+        return
+    fi
+    for sub in "$dir"/*/; do
+        [[ -d "$sub" ]] || continue
+        walk "$sub"
     done
-    (( found )) || echo "No git repos found in $WORK_DIR"
+}
+
+show_all() {
+    walk "$WORK_DIR"
 }
 
 case "${1:-}" in
