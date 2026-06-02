@@ -22,7 +22,8 @@ show_repo() {
     [[ -d "$dir/.git" ]] || return 0
 
     local name status staged unstaged
-    name=$(basename "$dir")
+    name="${dir#"$WORK_DIR"/}"
+    name="${name%/}"
     status=$(git -C "$dir" status --porcelain 2>/dev/null)
 
     echo
