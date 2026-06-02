@@ -21,14 +21,15 @@ show_repo() {
     local dir="$1"
     [[ -d "$dir/.git" ]] || return 0
 
-    local name status staged unstaged
+    local name branch status staged unstaged
     name="${dir#"$WORK_DIR"/}"
     name="${name%/}"
+    branch=$(git -C "$dir" branch --show-current 2>/dev/null)
     status=$(git -C "$dir" status --porcelain 2>/dev/null)
 
     echo
     sep
-    printf '  %s\n' "$name"
+    printf '  %s  [%s]\n' "$name" "$branch"
     sep
 
     if [[ -z "$status" ]]; then
