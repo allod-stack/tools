@@ -153,7 +153,7 @@ pr_view() {
       local rc_count
       rc_count=$(echo "$rc" | jq 'length')
       total_inline=$((total_inline + rc_count))
-      inline_output+=$(echo "$rc" | jq -r '.[] | "[\(.created_at[:10])] \(.user.login) on \(.path):\n\(.body)\n"')
+      inline_output+=$(echo "$rc" | jq -r '.[] | "[\(.created_at[:10])] \(.user.login) on \(.path) line \(.line // "?"):\n\(.diff_hunk)\n> \(.body)\n"')
       inline_output+=$'\n'
     done <<< "$review_ids"
     if [ "$total_inline" -gt 0 ]; then
