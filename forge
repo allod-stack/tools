@@ -215,12 +215,38 @@ pr_reply() {
   local number="$1"
   local comment_id="$2"
   local body="$3"
+
+  # Find the review containing the original comment.
+  # Replies must go to POST /reviews/{id}/comments — posting to a new review
+  # doesn't thread correctly regardless of path/position/in_reply_to fields.
+  local reviews review_ids orig_review_id="" orig_path="" orig_position=0
+  reviews=$(api GET "/repos/$REPO/pulls/$number/reviews")
+  review_ids=$(echo "$reviews" | jq -r '.[] | select(.comments_count > 0) | .id')
+
+  while IFS= read -r rid; do
+    local rc match
+    rc=$(api GET "/repos/$REPO/pulls/$number/reviews/$rid/comments")
+    match=$(echo "$rc" | jq -r --argjson cid "$comment_id" 'first(.[] | select(.id == $cid)) // empty')
+    if [ -n "$match" ]; then
+      orig_review_id="$rid"
+      orig_path=$(echo "$match"     | jq -r '.path')
+      orig_position=$(echo "$match" | jq -r '.position // 0')
+      break
+    fi
+  done <<< "$review_ids"
+
+  if [ -z "$orig_review_id" ]; then
+    echo "forge: comment $comment_id not found on PR #$number" >&2
+    exit 1
+  fi
+
   local url
-  url=$(api POST "/repos/$REPO/pulls/$number/reviews" \
+  url=$(api POST "/repos/$REPO/pulls/$number/reviews/$orig_review_id/comments" \
     -d "$(jq -n \
-      --argjson in_reply_to "$comment_id" \
+      --arg path "$orig_path" \
+      --argjson new_position "$orig_position" \
       --arg body "$body" \
-      '{event: "COMMENT", comments: [{in_reply_to: $in_reply_to, body: $body}]}')" \
+      '{path: $path, new_position: $new_position, body: $body}')" \
     | jq -r '.html_url')
   echo "Reply posted: $url"
 }
