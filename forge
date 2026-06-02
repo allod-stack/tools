@@ -6,9 +6,10 @@
 # Resources:  pr, issue
 #
 # pr commands:
-#   forge pr list                     List open pull requests
-#   forge pr view <number>            Show PR details and comments
-#   forge pr comment <number> <body>  Post a comment on a PR
+#   forge pr list                              List open pull requests
+#   forge pr view <number>                     Show PR details and comments
+#   forge pr create <title> <head> [base] [body]  Create a pull request
+#   forge pr comment <number> <body>           Post a comment on a PR
 #
 # issue commands:
 #   forge issue list                  List open issues
@@ -271,7 +272,7 @@ PR commands:
   forge pr view <number>                     Show PR details and comments
   forge pr edit <number> [title] [body]      Update PR title and/or description
   forge pr comment <number> <body>           Post a comment
-  forge pr create <title> <head> [base]      Create a pull request
+  forge pr create <title> <head> [base] [body]   Create a pull request
 
 Issue commands:
   forge issue list                           List open issues
