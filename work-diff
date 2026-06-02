@@ -46,7 +46,7 @@ show_repo() {
 }
 
 walk() {
-    local dir="$1"
+    local dir="${1%/}"
     if [[ -d "$dir/.git" ]]; then
         show_repo "$dir"
         return
