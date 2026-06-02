@@ -57,7 +57,7 @@ show_all() {
 case "${1:-}" in
     -h|--help) usage ;;
     --all|"")  show_all ;;
-    -*)        echo "Unknown option: $1" >&2; usage; exit 1 ;;
+    -*)        echo "Unknown option: $1" >&2; exit 1 ;;
     *)
         [[ -d "$WORK_DIR/$1" ]] || { echo "Error: '$1' not found in $WORK_DIR" >&2; exit 1; }
         show_repo "$WORK_DIR/$1"
