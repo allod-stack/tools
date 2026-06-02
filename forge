@@ -8,6 +8,8 @@
 # pr commands:
 #   forge pr list                              List open pull requests
 #   forge pr view <number>                     Show PR details and comments
+#   forge pr review-comments <number>          List inline comments with IDs
+#   forge pr reply <number> <id> <body>        Reply to an inline comment thread
 #   forge pr create <title> <head> [base] [body]  Create a pull request
 #   forge pr comment <number> <body>           Post a comment on a PR
 #
@@ -163,6 +165,25 @@ pr_view() {
   fi
 }
 
+pr_review_comments() {
+  require_repo
+  local number="$1"
+  local reviews review_ids
+  reviews=$(api GET "/repos/$REPO/pulls/$number/reviews")
+  review_ids=$(echo "$reviews" | jq -r '.[] | select(.comments_count > 0) | .id')
+
+  if [ -z "$review_ids" ]; then
+    echo "No inline comments on PR #$number"
+    return
+  fi
+
+  while IFS= read -r rid; do
+    local rc
+    rc=$(api GET "/repos/$REPO/pulls/$number/reviews/$rid/comments")
+    echo "$rc" | jq -r '.[] | "id \(.id) [\(.created_at[:10])] \(.user.login) on \(.path) line \(.line // "?"):\n\(.diff_hunk)\n> \(.body)\n"'
+  done <<< "$review_ids"
+}
+
 pr_edit() {
   require_repo
   local number="$1"
@@ -187,6 +208,21 @@ pr_comment() {
   url=$(api POST "/repos/$REPO/issues/$number/comments" \
     -d "{\"body\": $(echo "$body" | jq -Rs .)}" | jq -r '.html_url')
   echo "Comment posted: $url"
+}
+
+pr_reply() {
+  require_repo
+  local number="$1"
+  local comment_id="$2"
+  local body="$3"
+  local url
+  url=$(api POST "/repos/$REPO/pulls/$number/reviews" \
+    -d "$(jq -n \
+      --argjson in_reply_to "$comment_id" \
+      --arg body "$body" \
+      '{event: "COMMENT", comments: [{in_reply_to: $in_reply_to, body: $body}]}')" \
+    | jq -r '.html_url')
+  echo "Reply posted: $url"
 }
 
 pr_create() {
@@ -272,6 +308,10 @@ PR commands:
       List open pull requests
   forge pr view <number>
       Show PR details and comments
+  forge pr review-comments <number>
+      List inline review comments with IDs (for use with reply)
+  forge pr reply <number> <comment-id> <body>
+      Reply to an inline review comment thread
   forge pr edit <number> [title] [body]
       Update PR title and/or description
   forge pr comment <number> <body>
@@ -301,6 +341,10 @@ case "$RESOURCE" in
     case "$COMMAND" in
       list)    pr_list ;;
       view)    pr_view "${1:?usage: forge pr view <number>}" ;;
+      review-comments) pr_review_comments "${1:?usage: forge pr review-comments <number>}" ;;
+      reply)   pr_reply "${1:?usage: forge pr reply <number> <comment-id> <body>}" \
+                        "${2:?usage: forge pr reply <number> <comment-id> <body>}" \
+                        "${3:?usage: forge pr reply <number> <comment-id> <body>}" ;;
       edit)    pr_edit "${1:?usage: forge pr edit <number> [title] [body]}" "${2:-}" "${3:-}" ;;
       comment) pr_comment "${1:?usage: forge pr comment <number> <body>}" \
                            "${2:?usage: forge pr comment <number> <body>}" ;;
