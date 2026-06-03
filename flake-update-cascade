@@ -277,7 +277,7 @@ for repo in "${REPOS[@]}"; do
     fi
 
     # Evaluation check against temp lock
-    if ! nix flake metadata --json --flake "$dir" --reference-lock-file "$tmp_lock" > /dev/null 2>&1; then
+    if ! nix flake metadata --json "$dir" --reference-lock-file "$tmp_lock" > /dev/null 2>&1; then
       echo "  broken evaluation with updated lock, skipping"
       rm -f "$tmp_lock"
       continue
@@ -307,7 +307,7 @@ for repo in "${REPOS[@]}"; do
     fi
 
     # Step 3: Evaluation check — don't commit a broken lock
-    if ! nix flake metadata --json --flake "$dir" > /dev/null 2>&1; then
+    if ! nix flake metadata --json "$dir" > /dev/null 2>&1; then
       echo "  broken evaluation after update — reverting flake.lock"
       git -C "$dir" checkout -- flake.lock
       overall_exit=1
