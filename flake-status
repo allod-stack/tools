@@ -1,0 +1,341 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+WORK_DIR="${HOME}/work"
+
+REPOS=(
+  machine-profiles
+  dev-vm-config
+  host-config
+  hashpool
+  identity-config
+  nvim-config
+  allodium/tools
+)
+
+usage() {
+  cat <<'EOF'
+Usage: flake-status [input-name] [--check-upstream]
+
+  (no args)          show all inputs for all repos
+  <input-name>       show only that input across all repos
+  --check-upstream   compare pins against upstream remote HEAD (network)
+
+Examples:
+  flake-status
+  flake-status dev-vm-config
+  flake-status nixpkgs --check-upstream
+EOF
+}
+
+# --- Arg parsing ---
+
+INPUT_NAME=""
+CHECK_UPSTREAM=false
+
+for arg in "$@"; do
+  case "$arg" in
+    --check-upstream) CHECK_UPSTREAM=true ;;
+    -h|--help) usage; exit 0 ;;
+    -*) echo "flake-status: unknown option: $arg" >&2; usage >&2; exit 1 ;;
+    *)
+      if [[ -n "$INPUT_NAME" ]]; then
+        echo "flake-status: unexpected argument: $arg" >&2; exit 1
+      fi
+      INPUT_NAME="$arg"
+      ;;
+  esac
+done
+
+# --- jq helpers ---
+
+# Get rev (7-char) and date (YYYY-MM-DD) for a named direct-pin input.
+# Outputs "rev\tdate" or nothing if absent/uses follows.
+get_input_pin() {
+  local lockfile="$1" name="$2"
+  jq -r --arg name "$name" '
+    . as $root
+    | .nodes.root.inputs[$name]
+    | if . == null or type != "string" then empty
+      else . as $k
+      | $root.nodes[$k].locked
+      | select(.rev != null)
+      | [.rev[0:7], (.lastModified | todate | .[0:10])]
+      | @tsv
+      end
+  ' "$lockfile"
+}
+
+# Get all directly-pinned root inputs (excludes follows).
+# Outputs "name\trev\tdate" per line.
+get_all_inputs() {
+  local lockfile="$1"
+  jq -r '
+    . as $root
+    | .nodes.root.inputs
+    | to_entries[]
+    | select(.value | type == "string")
+    | .key as $name
+    | .value as $k
+    | $root.nodes[$k].locked
+    | select(.rev != null)
+    | [$name, .rev[0:7], (.lastModified | todate | .[0:10])]
+    | @tsv
+  ' "$lockfile"
+}
+
+# Get upstream URL for a named input (github or git type only).
+get_upstream_url() {
+  local lockfile="$1" name="$2"
+  jq -r --arg name "$name" '
+    . as $root
+    | .nodes.root.inputs[$name]
+    | if . == null or type != "string" then empty
+      else . as $k
+      | $root.nodes[$k].original
+      | if .type == "github" then "https://github.com/\(.owner)/\(.repo)"
+        elif .type == "git" then .url
+        else empty
+        end
+      end
+  ' "$lockfile"
+}
+
+# --- Git helpers ---
+
+# Return the default branch from the local remote-tracking ref (no network).
+repo_default_branch() {
+  local dir="$1"
+  git -C "$dir" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null \
+    | sed 's|refs/remotes/origin/||' \
+    || echo "master"
+}
+
+# Output health warning strings for a repo (space-separated, may be empty).
+repo_health_warnings() {
+  local dir="$1"
+  local -a warnings=()
+
+  local branch
+  branch=$(git -C "$dir" branch --show-current 2>/dev/null || true)
+  local default_branch
+  default_branch=$(repo_default_branch "$dir")
+  if [[ -n "$branch" && "$branch" != "$default_branch" ]]; then
+    warnings+=("[on branch $branch, not $default_branch]")
+  fi
+
+  if ! git -C "$dir" diff --cached --quiet 2>/dev/null; then
+    warnings+=("[dirty: staged changes]")
+  elif ! git -C "$dir" diff --quiet 2>/dev/null; then
+    warnings+=("[dirty: unstaged changes]")
+  fi
+
+  local unpushed=0
+  unpushed=$(git -C "$dir" rev-list "HEAD...@{u}" --count 2>/dev/null || echo 0)
+  if [[ "$unpushed" -gt 0 ]]; then
+    if [[ "$unpushed" -eq 1 ]]; then
+      warnings+=("[1 unpushed commit]")
+    else
+      warnings+=("[$unpushed unpushed commits]")
+    fi
+  fi
+
+  if [[ ${#warnings[@]} -gt 0 ]]; then
+    printf '%s' "${warnings[*]}"
+  fi
+}
+
+# --- Named input mode ---
+
+show_named_input() {
+  local input_name="$1"
+  local -a names=() revs=() dates=() statuses=() healths=()
+
+  for repo in "${REPOS[@]}"; do
+    local dir="${WORK_DIR}/${repo}"
+    [[ -d "$dir" ]] || continue
+
+    local health=""
+    health=$(repo_health_warnings "$dir")
+
+    if [[ ! -f "${dir}/flake.lock" ]]; then
+      names+=("$repo"); revs+=(""); dates+=("")
+      statuses+=("no-lock"); healths+=("$health")
+      continue
+    fi
+
+    local pin=""
+    pin=$(get_input_pin "${dir}/flake.lock" "$input_name")
+
+    if [[ -z "$pin" ]]; then
+      names+=("$repo"); revs+=(""); dates+=("")
+      statuses+=("not-input"); healths+=("$health")
+    else
+      local rev date
+      rev=$(printf '%s' "$pin" | cut -f1)
+      date=$(printf '%s' "$pin" | cut -f2)
+      names+=("$repo"); revs+=("$rev"); dates+=("$date")
+      statuses+=("ok"); healths+=("$health")
+    fi
+  done
+
+  if [[ ${#names[@]} -eq 0 ]]; then
+    echo "No repos found in ${WORK_DIR}"
+    return
+  fi
+
+  # Find majority rev (most common among "ok" entries)
+  local -A rev_counts=()
+  local majority_rev="" max_count=0 ok_count=0
+
+  for i in "${!statuses[@]}"; do
+    if [[ "${statuses[$i]}" == "ok" ]]; then
+      ok_count=$(( ok_count + 1 ))
+      local r="${revs[$i]}"
+      rev_counts["$r"]=$(( ${rev_counts["$r"]:-0} + 1 ))
+      if [[ "${rev_counts[$r]}" -gt "$max_count" ]]; then
+        max_count="${rev_counts[$r]}"
+        majority_rev="$r"
+      fi
+    fi
+  done
+
+  local diff_count=0
+  for i in "${!statuses[@]}"; do
+    if [[ "${statuses[$i]}" == "ok" && "${revs[$i]}" != "$majority_rev" ]]; then
+      diff_count=$(( diff_count + 1 ))
+    fi
+  done
+
+  # Header
+  if [[ "$ok_count" -eq 0 ]]; then
+    echo "${input_name} — no repos have this input"
+  elif [[ "$diff_count" -gt 0 ]]; then
+    if [[ "$diff_count" -eq 1 ]]; then
+      echo "${input_name} — INCONSISTENT (1 repo differs)"
+    else
+      echo "${input_name} — INCONSISTENT (${diff_count} repos differ)"
+    fi
+  else
+    local majority_date=""
+    for i in "${!statuses[@]}"; do
+      if [[ "${statuses[$i]}" == "ok" ]]; then
+        majority_date="${dates[$i]}"
+        break
+      fi
+    done
+    echo "${input_name} — all repos consistent at ${majority_rev} (${majority_date})"
+  fi
+
+  echo ""
+
+  # Per-repo rows
+  for i in "${!names[@]}"; do
+    local name="${names[$i]}" status="${statuses[$i]}" health="${healths[$i]}"
+    local health_str=""
+    [[ -n "$health" ]] && health_str="  ${health}"
+
+    case "$status" in
+      no-lock)
+        printf '  %-20s  %s\n' "$name" "(no flake.lock)"
+        ;;
+      not-input)
+        printf '  %-20s  %s\n' "$name" "(not an input)"
+        ;;
+      ok)
+        local rev="${revs[$i]}" date="${dates[$i]}" stale=""
+        [[ -n "$majority_rev" && "$rev" != "$majority_rev" ]] && stale="  ← stale"
+        printf '  %-20s  %-7s  %-10s%s%s\n' "$name" "$rev" "$date" "$health_str" "$stale"
+        ;;
+    esac
+  done
+
+  # Upstream check
+  if [[ "$CHECK_UPSTREAM" == true && "$ok_count" -gt 0 ]]; then
+    local upstream_url=""
+    for i in "${!statuses[@]}"; do
+      if [[ "${statuses[$i]}" == "ok" ]]; then
+        local dir="${WORK_DIR}/${names[$i]}"
+        upstream_url=$(get_upstream_url "${dir}/flake.lock" "$input_name")
+        [[ -n "$upstream_url" ]] && break
+      fi
+    done
+
+    echo ""
+    if [[ -n "$upstream_url" ]]; then
+      local upstream_rev=""
+      upstream_rev=$(git ls-remote "$upstream_url" HEAD 2>/dev/null | cut -f1 | head -1 || true)
+      if [[ -n "$upstream_rev" ]]; then
+        local short_upstream="${upstream_rev:0:7}"
+        if [[ "$majority_rev" == "$short_upstream" ]]; then
+          echo "upstream: up to date at ${short_upstream}"
+        else
+          echo "upstream: ${short_upstream} (local pins are behind)"
+        fi
+      else
+        echo "upstream: (could not fetch)"
+      fi
+    else
+      echo "upstream: (no fetchable URL for this input)"
+    fi
+  fi
+}
+
+# --- All-inputs mode ---
+
+show_all_inputs() {
+  local first=true
+
+  for repo in "${REPOS[@]}"; do
+    local dir="${WORK_DIR}/${repo}"
+    [[ -d "$dir" ]] || continue
+
+    [[ "$first" == true ]] && first=false || echo ""
+
+    local health="" health_str=""
+    health=$(repo_health_warnings "$dir")
+    [[ -n "$health" ]] && health_str="  ${health}"
+
+    echo "==> ${repo}${health_str}"
+
+    if [[ ! -f "${dir}/flake.lock" ]]; then
+      echo "  (no flake.lock)"
+      continue
+    fi
+
+    local inputs=""
+    inputs=$(get_all_inputs "${dir}/flake.lock")
+
+    if [[ -z "$inputs" ]]; then
+      echo "  (no pinned inputs)"
+      continue
+    fi
+
+    while IFS=$'\t' read -r name rev date; do
+      printf '  %-20s  %-7s  %s\n' "$name" "$rev" "$date"
+    done <<< "$inputs"
+
+    if [[ "$CHECK_UPSTREAM" == true ]]; then
+      while IFS=$'\t' read -r name rev _date; do
+        local url=""
+        url=$(get_upstream_url "${dir}/flake.lock" "$name")
+        [[ -z "$url" ]] && continue
+        local urev=""
+        urev=$(git ls-remote "$url" HEAD 2>/dev/null | cut -f1 | head -1 || true)
+        [[ -z "$urev" ]] && continue
+        local short_urev="${urev:0:7}"
+        if [[ "$rev" != "$short_urev" ]]; then
+          printf '  %-20s  upstream: %s (pinned: %s)\n' "$name" "$short_urev" "$rev"
+        fi
+      done <<< "$inputs"
+    fi
+  done
+}
+
+# --- Dispatch ---
+
+if [[ -n "$INPUT_NAME" ]]; then
+  show_named_input "$INPUT_NAME"
+else
+  show_all_inputs
+fi
