@@ -274,6 +274,14 @@ pr_create() {
   echo "PR created: $url"
 }
 
+pr_find_by_head() {
+  require_repo
+  local head_branch="${1:?pr find-by-head requires a branch name}"
+  # Prints the PR number if an open PR exists for this head branch; prints nothing if not found.
+  api GET "/repos/$REPO/pulls?state=open&limit=50&head=${head_branch}" \
+    | jq -r 'first(.[] | .number) // empty'
+}
+
 # --- Issue commands ---
 
 issue_list() {
@@ -348,6 +356,8 @@ PR commands:
       Post a comment
   forge pr create <title> <head> [base] [body]
       Create a pull request
+  forge pr find-by-head <branch>
+      Print PR number if an open PR exists for that head branch (empty if none)
 
 Issue commands:
   forge issue list
@@ -378,10 +388,11 @@ case "$RESOURCE" in
       edit)    pr_edit "${1:?usage: forge pr edit <number> [title] [body]}" "${2:-}" "${3:-}" ;;
       comment) pr_comment "${1:?usage: forge pr comment <number> <body>}" \
                            "${2:?usage: forge pr comment <number> <body>}" ;;
-      create)  pr_create "${1:?usage: forge pr create <title> <head> [base]}" \
-                         "${2:?usage: forge pr create <title> <head> [base]}" \
-                         "${3:-main}" "${4:-}" ;;
-      *)       usage; exit 1 ;;
+      create)       pr_create "${1:?usage: forge pr create <title> <head> [base]}" \
+                             "${2:?usage: forge pr create <title> <head> [base]}" \
+                             "${3:-main}" "${4:-}" ;;
+      find-by-head) pr_find_by_head "${1:?usage: forge pr find-by-head <branch>}" ;;
+      *)            usage; exit 1 ;;
     esac
     ;;
   issue)
