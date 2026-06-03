@@ -3,15 +3,21 @@ set -euo pipefail
 
 WORK_DIR="${HOME}/work"
 
-REPOS=(
-  machine-profiles
-  dev-vm-config
-  host-config
-  hashpool
-  identity-config
-  nvim-config
-  allodium/tools
-)
+# Discover all git repos under WORK_DIR (relative paths, recursive).
+collect_repos() {
+  local dir="${1%/}"
+  if [[ -d "$dir/.git" ]]; then
+    printf '%s\n' "${dir#"${WORK_DIR}/"}"
+    return
+  fi
+  local sub
+  for sub in "$dir"/*/; do
+    [[ -d "$sub" ]] || continue
+    collect_repos "$sub"
+  done
+}
+
+mapfile -t REPOS < <(collect_repos "$WORK_DIR")
 
 usage() {
   cat <<'EOF'
