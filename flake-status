@@ -295,6 +295,11 @@ show_all_inputs() {
   for repo in "${REPOS[@]}"; do
     local dir="${WORK_DIR}/${repo}"
     [[ -d "$dir" ]] || continue
+    [[ -f "${dir}/flake.lock" ]] || continue
+
+    local inputs=""
+    inputs=$(get_all_inputs "${dir}/flake.lock")
+    [[ -n "$inputs" ]] || continue
 
     [[ "$first" == true ]] && first=false || echo ""
 
@@ -303,19 +308,6 @@ show_all_inputs() {
     [[ -n "$health" ]] && health_str="  ${health}"
 
     echo "==> ${repo}${health_str}"
-
-    if [[ ! -f "${dir}/flake.lock" ]]; then
-      echo "  (no flake.lock)"
-      continue
-    fi
-
-    local inputs=""
-    inputs=$(get_all_inputs "${dir}/flake.lock")
-
-    if [[ -z "$inputs" ]]; then
-      echo "  (no pinned inputs)"
-      continue
-    fi
 
     while IFS=$'\t' read -r name rev date; do
       printf '  %-20s  %-7s  %s\n' "$name" "$rev" "$date"
