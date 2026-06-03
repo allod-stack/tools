@@ -374,7 +374,10 @@ for repo in "${REPOS[@]}"; do
     git -C "$dir" checkout -B "$pr_branch"
     git -C "$dir" commit -m "flake.lock: update ${INPUT_NAME}"
 
-    # Step 7: Push (force-with-lease handles existing branch from a prior run)
+    # Step 7: Push. Fetch first to refresh the tracking ref — if the branch was
+    # deleted after a prior PR merge, the stale local ref causes --force-with-lease
+    # to reject the push even though the remote branch no longer exists.
+    git -C "$dir" fetch origin "$pr_branch" 2>/dev/null || true
     if ! git -C "$dir" push --force-with-lease origin "$pr_branch"; then
       echo "  push failed"
       git -C "$dir" checkout "$default_branch"
