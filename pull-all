@@ -47,8 +47,13 @@ for repo in "${REPOS[@]}"; do
     continue
   fi
 
-  # If on a non-default branch, only switch if nothing is unpushed
+  # If on a non-default branch, only switch if nothing is unpushed.
+  # No upstream tracking branch → treat as unpushed (safe default).
   if [[ "$current_branch" != "$default_branch" ]]; then
+    if ! git -C "$dir" rev-parse --abbrev-ref "@{u}" >/dev/null 2>&1; then
+      printf '  %-24s  skipped    [on %s — no remote tracking branch]\n' "$repo" "$current_branch"
+      continue
+    fi
     unpushed=$(git -C "$dir" rev-list "HEAD...@{u}" --count 2>/dev/null || echo 0)
     if [[ "$unpushed" -gt 0 ]]; then
       if [[ "$unpushed" -eq 1 ]]; then
