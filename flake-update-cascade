@@ -5,13 +5,21 @@ WORK_DIR="${HOME}/work"
 
 usage() {
   cat <<'EOF'
-Usage: flake-update-cascade <input-name> [--dry-run]
+Usage: flake-update-cascade <input-name> [--dry-run] [--pr]
 
 Update flake.lock for <input-name> across all repos that use it.
 Runs pre-flight checks on all repos before making any changes.
 
+Modes:
+  (default)   Commit directly to the default branch. Skips repos whose
+              default branch is in ~/.config/git/protected-branches.
+  --pr        Create/update a PR branch instead of committing directly.
+              Works for all eligible repos including protected ones.
+  --dry-run   Show what would change without modifying anything.
+
 Examples:
   flake-update-cascade dev-vm-config
+  flake-update-cascade dev-vm-config --pr
   flake-update-cascade allodium-tools --dry-run
   flake-update-cascade nixpkgs
 EOF
@@ -19,11 +27,13 @@ EOF
 
 # --- Arg parsing ---
 DRY_RUN=false
+PR_MODE=false
 INPUT_NAME=""
 
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=true ;;
+    --pr)      PR_MODE=true ;;
     -h|--help) usage; exit 0 ;;
     -*)
       echo "flake-update-cascade: unknown option: $arg" >&2
@@ -55,6 +65,11 @@ fi
 
 if ! command -v nix >/dev/null 2>&1; then
   echo "flake-update-cascade: 'nix' not found on PATH" >&2
+  exit 1
+fi
+
+if [[ "$PR_MODE" == true ]] && ! command -v forge >/dev/null 2>&1; then
+  echo "flake-update-cascade: 'forge' not found on PATH (required for --pr mode)" >&2
   exit 1
 fi
 
@@ -110,6 +125,14 @@ repo_default_branch() {
     || echo "master"
 }
 
+# Extract owner/repo from the git remote URL.
+repo_forge_name() {
+  local dir="$1"
+  git -C "$dir" remote get-url origin 2>/dev/null \
+    | sed 's/\.git$//' \
+    | grep -oE '[^/:]+/[^/:]+$'
+}
+
 # --- Phase 1: Pre-flight ---
 #
 # Status values:
@@ -118,6 +141,7 @@ repo_default_branch() {
 #   skip:no-input   — input not a root input
 #   skip:follows    — input is a follows path (not directly pinned)
 #   skip:active-pr  — listed in active-pr-branches (GPG required)
+#   skip:protected  — default branch is protected (direct mode only)
 #   eligible        — passed all checks, ready to update
 #   error           — pre-flight error (blocks cascade)
 
@@ -126,6 +150,7 @@ declare -A REPO_ERROR_MSG=()
 declare -a ERROR_REPOS=()
 
 ACTIVE_PR_FILE="${HOME}/.config/git/active-pr-branches"
+PROTECTED_BRANCHES_FILE="${HOME}/.config/git/protected-branches"
 
 for repo in "${REPOS[@]}"; do
   dir="${WORK_DIR}/${repo}"
@@ -159,6 +184,16 @@ for repo in "${REPOS[@]}"; do
   if [[ -f "$ACTIVE_PR_FILE" ]] && grep -Fxq "$repo" "$ACTIVE_PR_FILE" 2>/dev/null; then
     REPO_STATUS["$repo"]="skip:active-pr"
     continue
+  fi
+
+  # Protected-branches check (direct mode only; --pr mode handles these via PR flow)
+  if [[ "$PR_MODE" == false && "$DRY_RUN" == false ]]; then
+    default_branch=$(repo_default_branch "$dir")
+    if [[ -f "$PROTECTED_BRANCHES_FILE" ]] && \
+       grep -Fxq "work/${repo} ${default_branch}" "$PROTECTED_BRANCHES_FILE" 2>/dev/null; then
+      REPO_STATUS["$repo"]="skip:protected"
+      continue
+    fi
   fi
 
   # Steps 4-6: Error-flagging checks
@@ -243,6 +278,11 @@ for repo in "${REPOS[@]}"; do
       echo "  listed in active-pr-branches (GPG-signed commits required), skipping — handle manually"
       continue
       ;;
+    skip:protected)
+      default_branch=$(repo_default_branch "$dir")
+      echo "  protected branch (${default_branch}) — re-run with --pr to create a PR"
+      continue
+      ;;
   esac
 
   # --- eligible: process this repo ---
@@ -256,6 +296,8 @@ for repo in "${REPOS[@]}"; do
     overall_exit=1
     continue
   fi
+
+  default_branch=$(repo_default_branch "$dir")
 
   # Step 1: Pull
   echo "  pulling..."
@@ -294,8 +336,76 @@ for repo in "${REPOS[@]}"; do
     fi
 
     rm -f "$tmp_lock"
-  else
+
+  elif [[ "$PR_MODE" == true ]]; then
+    pr_branch="agent/flake-update-${INPUT_NAME}"
+
     # Capture old rev (after pull, before update)
+    old_rev=$(get_rev "${dir}/flake.lock" "$INPUT_NAME")
+
+    # Step 2: Update
+    echo "  updating ${INPUT_NAME} input..."
+    if ! timeout 120 nix flake update "$INPUT_NAME" --flake "$dir"; then
+      echo "  nix flake update failed, skipping"
+      overall_exit=1
+      continue
+    fi
+
+    # Step 3: Evaluation check
+    if ! nix flake metadata --json "$dir" > /dev/null 2>&1; then
+      echo "  broken evaluation after update — reverting flake.lock"
+      git -C "$dir" checkout -- flake.lock
+      overall_exit=1
+      continue
+    fi
+
+    # Step 4: Diff check
+    if git -C "$dir" diff --quiet -- flake.lock; then
+      echo "  already up to date"
+      continue
+    fi
+
+    # Step 5: Show what changed
+    new_rev=$(get_rev "${dir}/flake.lock" "$INPUT_NAME")
+    echo "  ${old_rev:0:7} → ${new_rev:0:7}"
+
+    # Step 6: Stage, create/reset PR branch, commit
+    git -C "$dir" add flake.lock
+    git -C "$dir" checkout -B "$pr_branch"
+    git -C "$dir" commit -m "flake.lock: update ${INPUT_NAME}"
+
+    # Step 7: Push (force-with-lease handles existing branch from a prior run)
+    if ! git -C "$dir" push --force-with-lease origin "$pr_branch"; then
+      echo "  push failed"
+      git -C "$dir" checkout "$default_branch"
+      git -C "$dir" checkout -- flake.lock
+      overall_exit=1
+      continue
+    fi
+
+    # Step 8: Create PR or note that existing PR was updated
+    forge_repo=$(repo_forge_name "$dir")
+    if [[ -n "$forge_repo" ]]; then
+      existing_pr=$(forge -R "$forge_repo" pr find-by-head "$pr_branch" 2>/dev/null || true)
+      if [[ -z "$existing_pr" ]]; then
+        pr_url=$(forge -R "$forge_repo" pr create \
+          "flake.lock: update ${INPUT_NAME}" \
+          "$pr_branch" "$default_branch" \
+          "Automated flake.lock update for input \`${INPUT_NAME}\`." 2>/dev/null || true)
+        echo "  ${pr_url:-PR created (could not fetch URL)}"
+      else
+        echo "  PR #${existing_pr} updated"
+      fi
+    else
+      echo "  pushed (could not infer forge repo for PR creation)"
+    fi
+
+    # Step 9: Return to default branch
+    git -C "$dir" checkout "$default_branch"
+    git -C "$dir" checkout -- flake.lock
+
+  else
+    # Direct mode: commit to default branch
     old_rev=$(get_rev "${dir}/flake.lock" "$INPUT_NAME")
 
     # Step 2: Update
@@ -326,7 +436,13 @@ for repo in "${REPOS[@]}"; do
 
     # Step 6: Commit
     git -C "$dir" add flake.lock
-    git -C "$dir" commit -m "flake.lock: update ${INPUT_NAME}"
+    if ! git -C "$dir" commit -m "flake.lock: update ${INPUT_NAME}"; then
+      echo "  commit failed (hook blocked?) — reverting"
+      git -C "$dir" restore --staged flake.lock 2>/dev/null || git -C "$dir" reset HEAD flake.lock
+      git -C "$dir" checkout -- flake.lock
+      overall_exit=1
+      continue
+    fi
 
     # Step 7: Push
     if ! git -C "$dir" push; then
