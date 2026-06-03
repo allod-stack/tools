@@ -164,11 +164,7 @@ show_named_input() {
     local health=""
     health=$(repo_health_warnings "$dir")
 
-    if [[ ! -f "${dir}/flake.lock" ]]; then
-      names+=("$repo"); revs+=(""); dates+=("")
-      statuses+=("no-lock"); healths+=("$health")
-      continue
-    fi
+    [[ -f "${dir}/flake.lock" ]] || continue
 
     local pin=""
     pin=$(get_input_pin "${dir}/flake.lock" "$input_name")
@@ -242,9 +238,6 @@ show_named_input() {
     [[ -n "$health" ]] && health_str="  ${health}"
 
     case "$status" in
-      no-lock)
-        printf '  %-20s  %s\n' "$name" "(no flake.lock)"
-        ;;
       not-input)
         printf '  %-20s  %s\n' "$name" "(not an input)"
         ;;
