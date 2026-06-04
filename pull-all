@@ -63,11 +63,17 @@ for repo in "${REPOS[@]}"; do
       fi
       continue
     fi
-    git -C "$dir" checkout "$default_branch" > /dev/null 2>&1
+    if ! git -C "$dir" checkout "$default_branch" > /dev/null 2>&1; then
+      printf '  %-24s  error      [checkout %s failed]\n' "$repo" "$default_branch"
+      continue
+    fi
   fi
 
   # Pull
-  pull_out=$(git -C "$dir" pull 2>&1)
+  pull_out=$(git -C "$dir" pull 2>&1) || {
+    printf '  %-24s  error      [pull failed: %s]\n' "$repo" "$(printf '%s' "$pull_out" | head -1)"
+    continue
+  }
   if printf '%s' "$pull_out" | grep -q "Already up to date"; then
     printf '  %-24s  up to date [%s]\n' "$repo" "$default_branch"
   else
