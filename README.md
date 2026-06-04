@@ -1,4 +1,4 @@
-# allodium/tools
+# allod/tools
 
 Shell scripts for managing a multi-repo NixOS dev environment. All scripts are
 packaged via `pkgs.writeShellApplication` in `machine-profiles` (dev VMs) and
@@ -23,7 +23,7 @@ For each repo:
 - **Already on default branch** → pulls
 
 ```
-  allodium/tools            pulled     [master]
+  allod/tools            pulled     [master]
   dev-vm-config             up to date [master]
   hashpool                  skipped    [on agent/my-feature — 2 unpushed commits]
   host-config               up to date [master]
@@ -59,7 +59,7 @@ flake-status <input-name> --check-upstream   # compare pins to upstream HEAD
 **No args** — full table per repo:
 ```
 ==> host-config
-  allodium-tools        97b57e1  2026-06-03
+  allod-tools        97b57e1  2026-06-03
   home-manager          3ee51fb  2026-05-23
   nixpkgs               b77b3de  2026-05-22
   ...
@@ -67,8 +67,8 @@ flake-status <input-name> --check-upstream   # compare pins to upstream HEAD
 
 **Named input** — consistency check across all repos:
 ```
-$ flake-status allodium-tools
-allodium-tools — all repos consistent at 97b57e1 (2026-06-03)
+$ flake-status allod-tools
+allod-tools — all repos consistent at 97b57e1 (2026-06-03)
 
   dev-vm-config         (not an input)
   host-config           97b57e1  2026-06-03
@@ -124,8 +124,8 @@ flake-update-cascade nixpkgs --dry-run
 # Update nixpkgs across all repos, committing directly (non-protected only)
 flake-update-cascade nixpkgs
 
-# Update allodium-tools across all repos via PRs (works on protected branches)
-flake-update-cascade allodium-tools --pr
+# Update allod-tools across all repos via PRs (works on protected branches)
+flake-update-cascade allod-tools --pr
 ```
 
 ---
@@ -183,19 +183,19 @@ flake-status      # spot pin drift across repos
 
 ```bash
 # 1. Check if an update is available
-flake-status allodium-tools --check-upstream
+flake-status allod-tools --check-upstream
 
 # 2. Preview what would change
-flake-update-cascade allodium-tools --dry-run
+flake-update-cascade allod-tools --dry-run
 
 # 3. Create update PRs across all repos
-flake-update-cascade allodium-tools --pr
+flake-update-cascade allod-tools --pr
 
 # 4. Review and merge PRs on Forgejo
 
 # 5. Sync and verify
 pull-all
-flake-status allodium-tools
+flake-status allod-tools
 ```
 
 ### Reviewing a PR

@@ -20,7 +20,7 @@ Modes:
 Examples:
   flake-update-cascade dev-vm-config
   flake-update-cascade dev-vm-config --pr
-  flake-update-cascade allodium-tools --dry-run
+  flake-update-cascade allod-tools --dry-run
   flake-update-cascade nixpkgs
 EOF
 }
