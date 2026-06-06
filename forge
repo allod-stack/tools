@@ -9,13 +9,16 @@
 #   forge pr list                              List open pull requests
 #   forge pr view <number>                     Show PR details and comments
 #   forge pr review-comments <number>          List inline comments with IDs
-#   forge pr reply <number> <id> <body>        Reply to an inline comment thread
-#   forge pr create <title> <head> [base] [body]  Create a pull request
-#   forge pr comment <number> <body>           Post a comment on a PR
+#   forge pr reply <number> <id> --body <text> Reply to an inline comment thread
+#   forge pr create --title <title> [flags]    Create a pull request
+#   forge pr edit <number> [flags]             Edit a pull request
+#   forge pr comment <number> --body <text>    Post a comment on a PR
 #
 # issue commands:
-#   forge issue list                  List open issues
-#   forge issue view <number>         Show issue details and comments
+#   forge issue list                            List open issues
+#   forge issue view <number>                   Show issue details and comments
+#   forge issue create --title <title> [flags]  Create an issue
+#   forge issue edit <number> [flags]           Edit an issue
 #
 # Config (env vars):
 #   FORGE_URL          Base URL of Forgejo instance (default: https://forge.anarch.diy)
@@ -67,7 +70,14 @@ infer_repo() {
 REPO=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -R|--repo) REPO="$2"; shift 2 ;;
+    -R|--repo)
+      [[ $# -ge 2 ]] || {
+        echo "forge: $1 requires a value" >&2
+        exit 1
+      }
+      REPO="$2"
+      shift 2
+      ;;
     -h|--help) RESOURCE="help"; shift ;;
     *) break ;;
   esac
@@ -78,6 +88,49 @@ COMMAND="${1:-}";       [[ $# -gt 0 ]] && shift
 
 require_repo() {
   [ -n "$REPO" ] || REPO=$(infer_repo)
+}
+
+die() {
+  echo "forge: $*" >&2
+  exit 1
+}
+
+require_option_value() {
+  local option="$1"
+  local count="$2"
+  [[ "$count" -ge 2 ]] || die "$option requires a value"
+}
+
+reset_body_option() {
+  BODY=""
+  BODY_SET=false
+  BODY_SOURCE=""
+}
+
+set_body_option() {
+  local option="$1"
+  local value="$2"
+  [[ "$BODY_SET" == false ]] || {
+    die "$option cannot be combined with $BODY_SOURCE"
+  }
+
+  if [[ "$option" == "-F" || "$option" == "--body-file" ]]; then
+    if [[ "$value" != "-" && ! -r "$value" ]]; then
+      die "cannot read body file: $value"
+    fi
+    local body_with_sentinel
+    if [[ "$value" == "-" ]]; then
+      body_with_sentinel="$(cat; printf '\x1f')"
+    else
+      body_with_sentinel="$(cat "$value"; printf '\x1f')"
+    fi
+    BODY="${body_with_sentinel%?}"
+  else
+    BODY="$value"
+  fi
+
+  BODY_SET=true
+  BODY_SOURCE="$option"
 }
 
 # --- API helper ---
@@ -186,15 +239,44 @@ pr_review_comments() {
 
 pr_edit() {
   require_repo
-  local number="$1"
-  local title="${2:-}"
-  local body="${3:-}"
+  local number="${1:-}"
+  [[ -n "$number" ]] || die "usage: forge pr edit <number> [--title <title>] [--body <text> | --body-file <file>]"
+  shift
+
+  local title="" title_set=false
+  reset_body_option
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -t|--title)
+        require_option_value "$1" "$#"
+        [[ "$title_set" == false ]] || die "$1 specified more than once"
+        title="$2"
+        title_set=true
+        shift 2
+        ;;
+      -b|--body|-F|--body-file)
+        require_option_value "$1" "$#"
+        set_body_option "$1" "$2"
+        shift 2
+        ;;
+      -*) die "unknown option for pr edit: $1" ;;
+      *) die "unexpected argument for pr edit: $1" ;;
+    esac
+  done
+
+  [[ "$title_set" == true || "$BODY_SET" == true ]] || {
+    die "pr edit requires --title, --body, or --body-file"
+  }
+  [[ "$title_set" == false || -n "$title" ]] || die "--title cannot be empty"
+
   local payload
   payload=$(jq -n \
     --arg title "$title" \
-    --arg body "$body" \
-    '{} | if $title != "" then . + {title: $title} else . end
-        | if $body  != "" then . + {body: $body}  else . end')
+    --arg body "$BODY" \
+    --argjson title_set "$title_set" \
+    --argjson body_set "$BODY_SET" \
+    '{} | if $title_set then . + {title: $title} else . end
+        | if $body_set  then . + {body: $body}  else . end')
   local url
   url=$(api PATCH "/repos/$REPO/pulls/$number" -d "$payload" | jq -r '.html_url')
   echo "PR updated: $url"
@@ -202,19 +284,52 @@ pr_edit() {
 
 pr_comment() {
   require_repo
-  local number="$1"
-  local body="$2"
+  local number="${1:-}"
+  [[ -n "$number" ]] || die "usage: forge pr comment <number> [--body <text> | --body-file <file>]"
+  shift
+
+  reset_body_option
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -b|--body|-F|--body-file)
+        require_option_value "$1" "$#"
+        set_body_option "$1" "$2"
+        shift 2
+        ;;
+      -*) die "unknown option for pr comment: $1" ;;
+      *) die "unexpected argument for pr comment: $1" ;;
+    esac
+  done
+  [[ "$BODY_SET" == true ]] || die "pr comment requires --body or --body-file"
+
   local url
   url=$(api POST "/repos/$REPO/issues/$number/comments" \
-    -d "{\"body\": $(echo "$body" | jq -Rs .)}" | jq -r '.html_url')
+    -d "$(jq -n --arg body "$BODY" '{body: $body}')" | jq -r '.html_url')
   echo "Comment posted: $url"
 }
 
 pr_reply() {
   require_repo
-  local number="$1"
-  local comment_id="$2"
-  local body="$3"
+  local number="${1:-}"
+  local comment_id="${2:-}"
+  [[ -n "$number" && -n "$comment_id" ]] || {
+    die "usage: forge pr reply <number> <comment-id> [--body <text> | --body-file <file>]"
+  }
+  shift 2
+
+  reset_body_option
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -b|--body|-F|--body-file)
+        require_option_value "$1" "$#"
+        set_body_option "$1" "$2"
+        shift 2
+        ;;
+      -*) die "unknown option for pr reply: $1" ;;
+      *) die "unexpected argument for pr reply: $1" ;;
+    esac
+  done
+  [[ "$BODY_SET" == true ]] || die "pr reply requires --body or --body-file"
 
   # Find the review containing the original comment.
   # Replies must go to POST /reviews/{id}/comments — posting to a new review
@@ -249,7 +364,7 @@ pr_reply() {
     -d "$(jq -n \
       --arg path "$orig_path" \
       --argjson new_position "$orig_position" \
-      --arg body "$body" \
+      --arg body "$BODY" \
       '{path: $path, new_position: $new_position, body: $body}')" \
     | jq -r '.html_url')
   echo "Reply posted: $url"
@@ -257,10 +372,61 @@ pr_reply() {
 
 pr_create() {
   require_repo
-  local title="${1:?pr create requires a title}"
-  local head="${2:?pr create requires a head branch}"
-  local base="${3:-main}"
-  local body="${4:-}"
+  local title="" head="" base=""
+  local title_set=false head_set=false base_set=false
+  reset_body_option
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -t|--title)
+        require_option_value "$1" "$#"
+        [[ "$title_set" == false ]] || die "$1 specified more than once"
+        title="$2"
+        title_set=true
+        shift 2
+        ;;
+      -H|--head)
+        require_option_value "$1" "$#"
+        [[ "$head_set" == false ]] || die "$1 specified more than once"
+        head="$2"
+        head_set=true
+        shift 2
+        ;;
+      -B|--base)
+        require_option_value "$1" "$#"
+        [[ "$base_set" == false ]] || die "$1 specified more than once"
+        base="$2"
+        base_set=true
+        shift 2
+        ;;
+      -b|--body|-F|--body-file)
+        require_option_value "$1" "$#"
+        set_body_option "$1" "$2"
+        shift 2
+        ;;
+      -*) die "unknown option for pr create: $1" ;;
+      *) die "unexpected argument for pr create: $1" ;;
+    esac
+  done
+
+  [[ "$title_set" == true ]] || die "pr create requires --title"
+  [[ -n "$title" ]] || die "--title cannot be empty"
+  [[ "$head_set" == false || -n "$head" ]] || die "--head cannot be empty"
+  [[ "$base_set" == false || -n "$base" ]] || die "--base cannot be empty"
+
+  if [[ "$head_set" == false ]]; then
+    head=$(git branch --show-current 2>/dev/null || true)
+    [[ -n "$head" ]] || {
+      die "cannot infer PR head branch; use --head"
+    }
+  fi
+
+  if [[ "$base_set" == false ]]; then
+    base=$(api GET "/repos/$REPO" | jq -r '.default_branch // empty')
+    [[ -n "$base" ]] || {
+      die "could not determine repository default branch; use --base"
+    }
+  fi
 
   local url
   url=$(api POST "/repos/$REPO/pulls" \
@@ -268,7 +434,7 @@ pr_create() {
       --arg title "$title" \
       --arg head "$head" \
       --arg base "$base" \
-      --arg body "$body" \
+      --arg body "$BODY" \
       '{title: $title, head: $head, base: $base, body: $body}')" \
     | jq -r '.html_url')
   echo "PR created: $url"
@@ -331,6 +497,88 @@ issue_view() {
   fi
 }
 
+issue_create() {
+  require_repo
+  local title="" title_set=false
+  reset_body_option
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -t|--title)
+        require_option_value "$1" "$#"
+        [[ "$title_set" == false ]] || die "$1 specified more than once"
+        title="$2"
+        title_set=true
+        shift 2
+        ;;
+      -b|--body|-F|--body-file)
+        require_option_value "$1" "$#"
+        set_body_option "$1" "$2"
+        shift 2
+        ;;
+      -*) die "unknown option for issue create: $1" ;;
+      *) die "unexpected argument for issue create: $1" ;;
+    esac
+  done
+
+  [[ "$title_set" == true ]] || die "issue create requires --title"
+  [[ -n "$title" ]] || die "--title cannot be empty"
+
+  local url
+  url=$(api POST "/repos/$REPO/issues" \
+    -d "$(jq -n \
+      --arg title "$title" \
+      --arg body "$BODY" \
+      '{title: $title, body: $body}')" \
+    | jq -r '.html_url')
+  echo "Issue created: $url"
+}
+
+issue_edit() {
+  require_repo
+  local number="${1:-}"
+  [[ -n "$number" ]] || die "usage: forge issue edit <number> [--title <title>] [--body <text> | --body-file <file>]"
+  shift
+
+  local title="" title_set=false
+  reset_body_option
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -t|--title)
+        require_option_value "$1" "$#"
+        [[ "$title_set" == false ]] || die "$1 specified more than once"
+        title="$2"
+        title_set=true
+        shift 2
+        ;;
+      -b|--body|-F|--body-file)
+        require_option_value "$1" "$#"
+        set_body_option "$1" "$2"
+        shift 2
+        ;;
+      -*) die "unknown option for issue edit: $1" ;;
+      *) die "unexpected argument for issue edit: $1" ;;
+    esac
+  done
+
+  [[ "$title_set" == true || "$BODY_SET" == true ]] || {
+    die "issue edit requires --title, --body, or --body-file"
+  }
+  [[ "$title_set" == false || -n "$title" ]] || die "--title cannot be empty"
+
+  local payload
+  payload=$(jq -n \
+    --arg title "$title" \
+    --arg body "$BODY" \
+    --argjson title_set "$title_set" \
+    --argjson body_set "$BODY_SET" \
+    '{} | if $title_set then . + {title: $title} else . end
+        | if $body_set  then . + {body: $body}  else . end')
+  local url
+  url=$(api PATCH "/repos/$REPO/issues/$number" -d "$payload" | jq -r '.html_url')
+  echo "Issue updated: $url"
+}
+
 # --- Usage ---
 
 usage() {
@@ -348,13 +596,13 @@ PR commands:
       Show PR details and comments
   forge pr review-comments <number>
       List inline review comments with IDs (for use with reply)
-  forge pr reply <number> <comment-id> <body>
+  forge pr reply <number> <comment-id> [-b <text> | -F <file>]
       Reply to an inline review comment thread
-  forge pr edit <number> [title] [body]
+  forge pr edit <number> [-t <title>] [-b <text> | -F <file>]
       Update PR title and/or description
-  forge pr comment <number> <body>
+  forge pr comment <number> [-b <text> | -F <file>]
       Post a comment
-  forge pr create <title> <head> [base] [body]
+  forge pr create -t <title> [-H <branch>] [-B <branch>] [-b <text> | -F <file>]
       Create a pull request
   forge pr find-by-head <branch>
       Print PR number if an open PR exists for that head branch (empty if none)
@@ -364,9 +612,18 @@ Issue commands:
       List open issues
   forge issue view <number>
       Show issue details and comments
+  forge issue create -t <title> [-b <text> | -F <file>]
+      Create an issue
+  forge issue edit <number> [-t <title>] [-b <text> | -F <file>]
+      Update issue title and/or description
 
 Flags:
   -R, --repo <owner/repo>   Target repo (default: inferred from git remote)
+  -t, --title <text>        Set a title
+  -b, --body <text>         Set body text
+  -F, --body-file <file>    Read body text from file (use "-" for stdin)
+  -H, --head <branch>       PR head branch (default: current branch)
+  -B, --base <branch>       PR base branch (default: repository default)
 
 Config:
   FORGE_URL       Forgejo base URL (default: https://forge.anarch.diy)
@@ -382,24 +639,21 @@ case "$RESOURCE" in
       list)    pr_list ;;
       view)    pr_view "${1:?usage: forge pr view <number>}" ;;
       review-comments) pr_review_comments "${1:?usage: forge pr review-comments <number>}" ;;
-      reply)   pr_reply "${1:?usage: forge pr reply <number> <comment-id> <body>}" \
-                        "${2:?usage: forge pr reply <number> <comment-id> <body>}" \
-                        "${3:?usage: forge pr reply <number> <comment-id> <body>}" ;;
-      edit)    pr_edit "${1:?usage: forge pr edit <number> [title] [body]}" "${2:-}" "${3:-}" ;;
-      comment) pr_comment "${1:?usage: forge pr comment <number> <body>}" \
-                           "${2:?usage: forge pr comment <number> <body>}" ;;
-      create)       pr_create "${1:?usage: forge pr create <title> <head> [base]}" \
-                             "${2:?usage: forge pr create <title> <head> [base]}" \
-                             "${3:-main}" "${4:-}" ;;
+      reply)   pr_reply "$@" ;;
+      edit)    pr_edit "$@" ;;
+      comment) pr_comment "$@" ;;
+      create)  pr_create "$@" ;;
       find-by-head) pr_find_by_head "${1:?usage: forge pr find-by-head <branch>}" ;;
       *)            usage; exit 1 ;;
     esac
     ;;
   issue)
     case "$COMMAND" in
-      list)  issue_list ;;
-      view)  issue_view "${1:?usage: forge issue view <number>}" ;;
-      *)     usage; exit 1 ;;
+      list)   issue_list ;;
+      view)   issue_view "${1:?usage: forge issue view <number>}" ;;
+      create) issue_create "$@" ;;
+      edit)   issue_edit "$@" ;;
+      *)      usage; exit 1 ;;
     esac
     ;;
   help|--help|-h|"")

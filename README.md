@@ -152,19 +152,33 @@ Repo is inferred from `git remote get-url origin` when `-R` is omitted.
 ```bash
 forge pr list
 forge pr view <number>
-forge pr create <title> <head> [base] [body]
-forge pr comment <number> <body>
-forge pr edit <number> [title] [body]
+forge pr create --title <title> [--head <branch>] [--base <branch>] \
+  [--body <text> | --body-file <file>]
+forge pr comment <number> [--body <text> | --body-file <file>]
+forge pr edit <number> [--title <title>] [--body <text> | --body-file <file>]
 forge pr review-comments <number>          # list inline comments with IDs
-forge pr reply <number> <comment-id> <body>
+forge pr reply <number> <comment-id> [--body <text> | --body-file <file>]
 forge pr find-by-head <branch>             # print PR number if open PR exists for branch
 ```
+
+`pr create` defaults `--head` to the current branch and `--base` to the
+repository's default branch. The `gh` short aliases are also supported:
+`-t`, `-b`, `-F`, `-H`, and `-B`.
 
 **Issue commands:**
 
 ```bash
 forge issue list
 forge issue view <number>
+forge issue create --title <title> [--body <text> | --body-file <file>]
+forge issue edit <number> [--title <title>] [--body <text> | --body-file <file>]
+```
+
+Pass `-` to `--body-file` to read from stdin:
+
+```bash
+forge issue create --title "Bug report" --body-file issue.md
+printf '%s\n' "Updated description" | forge issue edit 20 --body-file -
 ```
 
 ---
@@ -204,6 +218,6 @@ flake-status allod-tools
 forge pr list
 forge pr view <number>
 forge pr review-comments <number>
-forge pr reply <number> <comment-id> "looks good"
-forge pr comment <number> "approved"
+forge pr reply <number> <comment-id> --body "looks good"
+forge pr comment <number> --body "approved"
 ```

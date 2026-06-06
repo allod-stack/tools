@@ -395,9 +395,11 @@ for repo in "${REPOS[@]}"; do
       existing_pr=$(forge -R "$forge_repo" pr find-by-head "$pr_branch" 2>/dev/null || true)
       if [[ -z "$existing_pr" ]]; then
         pr_url=$(forge -R "$forge_repo" pr create \
-          "flake.lock: update ${INPUT_NAME}" \
-          "$pr_branch" "$default_branch" \
-          "Automated flake.lock update for input \`${INPUT_NAME}\`." 2>/dev/null || true)
+          --title "flake.lock: update ${INPUT_NAME}" \
+          --head "$pr_branch" \
+          --base "$default_branch" \
+          --body "Automated flake.lock update for input \`${INPUT_NAME}\`." \
+          2>/dev/null || true)
         echo "  ${pr_url:-PR created (could not fetch URL)}"
       else
         echo "  PR #${existing_pr} updated"
