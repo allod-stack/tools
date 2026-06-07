@@ -223,6 +223,40 @@ printf 'stdin body\n\n' | run_ok issue edit 20 --title "Updated" --body-file -
 assert_request 1 PATCH "/api/v1/repos/acme/widget/issues/20"
 assert_json 1 '. == {title: "Updated", body: "stdin body\n\n"}'
 
+# issue close: without flags, closing is a single issue update.
+reset_requests
+run_ok issue close 20
+[[ "$(request_count)" == 1 ]] || fail "plain issue close should make one request"
+assert_request 1 PATCH "/api/v1/repos/acme/widget/issues/20"
+assert_json 1 '. == {state: "closed"}'
+
+# issue close: the gh-compatible short comment flag posts before closing.
+reset_requests
+run_ok issue close 20 -c "Implemented"
+[[ "$(request_count)" == 2 ]] || fail "issue close with comment should make two requests"
+assert_request 1 POST "/api/v1/repos/acme/widget/issues/20/comments"
+assert_json 1 '. == {body: "Implemented"}'
+assert_request 2 PATCH "/api/v1/repos/acme/widget/issues/20"
+assert_json 2 '. == {state: "closed"}'
+
+# issue close: issue URLs and gh close reasons are accepted. Forgejo records
+# non-completed reasons in the closing comment because it has no reason field.
+reset_requests
+run_ok issue close https://forge.example/acme/widget/issues/20 \
+  --comment "Already tracked" --duplicate-of 12
+[[ "$(request_count)" == 2 ]] || fail "duplicate issue close should make two requests"
+assert_request 1 POST "/api/v1/repos/acme/widget/issues/20/comments"
+assert_json 1 '. == {body: "Already tracked\n\nDuplicate of #12."}'
+assert_request 2 PATCH "/api/v1/repos/acme/widget/issues/20"
+assert_json 2 '. == {state: "closed"}'
+
+reset_requests
+run_ok issue close 20 --reason "not planned"
+assert_request 1 POST "/api/v1/repos/acme/widget/issues/20/comments"
+assert_json 1 '. == {body: "Closed as not planned."}'
+assert_request 2 PATCH "/api/v1/repos/acme/widget/issues/20"
+assert_json 2 '. == {state: "closed"}'
+
 # Invalid invocations must fail before any API request.
 reset_requests
 run_fail "cannot be combined" pr create -t title -b one -F "$TMP/pr-body.md"
@@ -235,6 +269,11 @@ run_fail "requires --title, --body, or --body-file" issue edit 20
 run_fail "requires --body or --body-file" pr comment 12
 run_fail "unexpected argument" pr create "legacy title" topic
 run_fail "unknown option" pr edit 12 --unknown value
+run_fail "usage: forge issue close" issue close
+run_fail "--reason must be one of" issue close 20 --reason invalid
+run_fail "cannot be combined" issue close 20 --reason completed --duplicate-of 12
+run_fail "issue target must be a number or URL" issue close https://other.example/acme/widget/issues/20
+run_fail "duplicate target must be a number or URL" issue close 20 --duplicate-of nope
 [[ "$(request_count)" == 0 ]] || fail "invalid commands made an API request"
 
 echo "forge content flag tests passed"

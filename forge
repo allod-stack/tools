@@ -19,6 +19,7 @@
 #   forge issue view <number>                   Show issue details and comments
 #   forge issue create --title <title> [flags]  Create an issue
 #   forge issue edit <number> [flags]           Edit an issue
+#   forge issue close <number-or-url> [flags]    Close an issue
 #
 # Config (env vars):
 #   FORGE_URL          Base URL of Forgejo instance (default: https://forge.anarch.diy)
@@ -579,6 +580,143 @@ issue_edit() {
   echo "Issue updated: $url"
 }
 
+resolve_issue_target() {
+  local target="$1"
+  if [[ "$target" =~ ^[0-9]+$ ]]; then
+    require_repo
+    ISSUE_NUMBER="$target"
+    return
+  fi
+
+  local base="${FORGE_URL%/}"
+  local path
+  case "$target" in
+    "$base"/*) path="${target#"$base"/}" ;;
+    *) die "issue target must be a number or URL on $base" ;;
+  esac
+
+  local owner repo resource number extra
+  IFS=/ read -r owner repo resource number extra <<< "$path"
+  [[ -n "$owner" && -n "$repo" && "$resource" == "issues" &&
+     "$number" =~ ^[0-9]+$ && -z "$extra" ]] || {
+    die "issue target must be a number or URL on $base"
+  }
+
+  REPO="$owner/$repo"
+  ISSUE_NUMBER="$number"
+}
+
+normalize_issue_reference() {
+  local target="$1"
+  if [[ "$target" =~ ^[0-9]+$ ]]; then
+    printf '#%s' "$target"
+    return
+  fi
+
+  local base="${FORGE_URL%/}"
+  local path
+  case "$target" in
+    "$base"/*) path="${target#"$base"/}" ;;
+    *) die "duplicate target must be a number or URL on $base" ;;
+  esac
+
+  local owner repo resource number extra
+  IFS=/ read -r owner repo resource number extra <<< "$path"
+  [[ -n "$owner" && -n "$repo" && "$resource" == "issues" &&
+     "$number" =~ ^[0-9]+$ && -z "$extra" ]] || {
+    die "duplicate target must be a number or URL on $base"
+  }
+  printf '%s' "$target"
+}
+
+issue_close() {
+  local target="${1:-}"
+  [[ -n "$target" ]] || {
+    die "usage: forge issue close {<number> | <url>} [--comment <text>] [--reason <reason>] [--duplicate-of <issue>]"
+  }
+  shift
+
+  local comment="" reason="" duplicate_of=""
+  local comment_set=false reason_set=false duplicate_set=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -c|--comment)
+        require_option_value "$1" "$#"
+        [[ "$comment_set" == false ]] || die "$1 specified more than once"
+        comment="$2"
+        comment_set=true
+        shift 2
+        ;;
+      -r|--reason)
+        require_option_value "$1" "$#"
+        [[ "$reason_set" == false ]] || die "$1 specified more than once"
+        reason="$2"
+        reason_set=true
+        shift 2
+        ;;
+      --duplicate-of)
+        require_option_value "$1" "$#"
+        [[ "$duplicate_set" == false ]] || die "$1 specified more than once"
+        duplicate_of="$2"
+        duplicate_set=true
+        shift 2
+        ;;
+      -*) die "unknown option for issue close: $1" ;;
+      *) die "unexpected argument for issue close: $1" ;;
+    esac
+  done
+
+  if [[ "$reason_set" == true ]]; then
+    case "$reason" in
+      completed|"not planned"|duplicate) ;;
+      *) die "--reason must be one of: completed, not planned, duplicate" ;;
+    esac
+  elif [[ "$duplicate_set" == true ]]; then
+    reason="duplicate"
+  else
+    reason="completed"
+  fi
+
+  if [[ "$duplicate_set" == true && "$reason_set" == true && "$reason" != duplicate ]]; then
+    die "--duplicate-of cannot be combined with --reason $reason"
+  fi
+  [[ "$duplicate_set" == false || -n "$duplicate_of" ]] || die "--duplicate-of cannot be empty"
+
+  resolve_issue_target "$target"
+
+  local reason_note=""
+  case "$reason" in
+    "not planned")
+      reason_note="Closed as not planned."
+      ;;
+    duplicate)
+      if [[ "$duplicate_set" == true ]]; then
+        reason_note="Duplicate of $(normalize_issue_reference "$duplicate_of")."
+      else
+        reason_note="Closed as duplicate."
+      fi
+      ;;
+  esac
+
+  local closing_comment="$comment"
+  if [[ -n "$reason_note" ]]; then
+    if [[ "$comment_set" == true && -n "$closing_comment" ]]; then
+      closing_comment+=$'\n\n'
+    fi
+    closing_comment+="$reason_note"
+  fi
+
+  if [[ "$comment_set" == true || -n "$reason_note" ]]; then
+    api POST "/repos/$REPO/issues/$ISSUE_NUMBER/comments" \
+      -d "$(jq -n --arg body "$closing_comment" '{body: $body}')" >/dev/null
+  fi
+
+  local url
+  url=$(api PATCH "/repos/$REPO/issues/$ISSUE_NUMBER" \
+    -d '{"state":"closed"}' | jq -r '.html_url')
+  echo "Issue closed: $url"
+}
+
 # --- Usage ---
 
 usage() {
@@ -616,6 +754,8 @@ Issue commands:
       Create an issue
   forge issue edit <number> [-t <title>] [-b <text> | -F <file>]
       Update issue title and/or description
+  forge issue close {<number> | <url>} [-c <text>] [-r <reason>] [--duplicate-of <issue>]
+      Close an issue; reasons: completed, not planned, duplicate
 
 Flags:
   -R, --repo <owner/repo>   Target repo (default: inferred from git remote)
@@ -624,6 +764,9 @@ Flags:
   -F, --body-file <file>    Read body text from file (use "-" for stdin)
   -H, --head <branch>       PR head branch (default: current branch)
   -B, --base <branch>       PR base branch (default: repository default)
+  -c, --comment <text>      Leave a closing comment
+  -r, --reason <reason>     Closing reason: completed, not planned, duplicate
+      --duplicate-of <issue>  Mark the closing comment as a duplicate
 
 Config:
   FORGE_URL       Forgejo base URL (default: https://forge.anarch.diy)
@@ -653,6 +796,7 @@ case "$RESOURCE" in
       view)   issue_view "${1:?usage: forge issue view <number>}" ;;
       create) issue_create "$@" ;;
       edit)   issue_edit "$@" ;;
+      close)  issue_close "$@" ;;
       *)      usage; exit 1 ;;
     esac
     ;;

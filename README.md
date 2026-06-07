@@ -172,6 +172,8 @@ forge issue list
 forge issue view <number>
 forge issue create --title <title> [--body <text> | --body-file <file>]
 forge issue edit <number> [--title <title>] [--body <text> | --body-file <file>]
+forge issue close {<number> | <url>} [--comment <text>] \
+  [--reason completed|"not planned"|duplicate] [--duplicate-of <number-or-url>]
 ```
 
 Pass `-` to `--body-file` to read from stdin:
@@ -180,6 +182,11 @@ Pass `-` to `--body-file` to read from stdin:
 forge issue create --title "Bug report" --body-file issue.md
 printf '%s\n' "Updated description" | forge issue edit 20 --body-file -
 ```
+
+`issue close` follows `gh issue close` syntax, including `-c`/`--comment`,
+`-r`/`--reason`, and `--duplicate-of`. Forgejo does not expose close-reason
+metadata through its API, so `not planned` and duplicate reasons are recorded
+in the closing comment.
 
 ---
 
