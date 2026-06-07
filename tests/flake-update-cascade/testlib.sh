@@ -101,6 +101,7 @@ EOF
 
 chmod +x "$MOCK_BIN/git" "$MOCK_BIN/nix" "$MOCK_BIN/forge"
 export PATH="$MOCK_BIN:$PATH"
+test_number=0
 
 write_direct_lock() {
   local dir="$1"
@@ -130,17 +131,62 @@ new_home() {
   : > "$MOCK_LOG"
 }
 
+pass() {
+  test_number=$((test_number + 1))
+  printf '✅ %d - %s\n' "$test_number" "$1"
+}
+
 fail() {
-  echo "FAIL: $*" >&2
+  test_number=$((test_number + 1))
+  printf '❌ %d - %s\n' "$test_number" "$1" >&2
+  shift
+  printf '%s\n' "$@" >&2
   exit 1
 }
 
 run_fail() {
-  local expected="$1"
-  shift
+  local expected="$1" description="$2"
+  shift 2
   local output
   if output=$(bash "$ROOT/flake-update-cascade" "$@" 2>&1); then
-    fail "command unexpectedly succeeded: $*"
+    fail "$description" "command unexpectedly succeeded: $*" "$output"
+  elif [[ "$output" == *"$expected"* ]]; then
+    pass "$description"
+  else
+    fail "$description" "expected failure to contain: $expected" "actual output:" "$output"
   fi
-  [[ "$output" == *"$expected"* ]] || fail "failure missing '$expected': $output"
+}
+
+assert_contains() {
+  local actual="$1" expected="$2" description="$3"
+  if [[ "$actual" == *"$expected"* ]]; then
+    pass "$description"
+  else
+    fail "$description" "expected output to contain: $expected" "actual output:" "$actual"
+  fi
+}
+
+assert_equal() {
+  local actual="$1" expected="$2" description="$3"
+  if [[ "$actual" == "$expected" ]]; then
+    pass "$description"
+  else
+    fail "$description" "expected: $expected" "actual: $actual"
+  fi
+}
+
+assert_log_contains() {
+  local expected="$1" description="$2"
+  if grep -Fq "$expected" "$MOCK_LOG"; then
+    pass "$description"
+  else
+    fail "$description" "expected command log entry: $expected" \
+      "actual command log:" "$(cat "$MOCK_LOG")"
+  fi
+}
+
+finish_tests() {
+  local suite="$1"
+  printf '\nTests run: %d\n' "$test_number"
+  printf '✅ All %d %s tests passed.\n' "$test_number" "$suite"
 }

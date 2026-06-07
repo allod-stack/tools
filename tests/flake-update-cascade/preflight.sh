@@ -4,9 +4,10 @@ source "$(dirname "${BASH_SOURCE[0]}")/testlib.sh"
 new_home preflight
 write_direct_lock "$HOME/work/dirty-repo"
 export MOCK_SCENARIO=dirty
-run_fail "Pre-flight checks failed — no changes made." demo
-[[ "$(grep -c '^nix' "$MOCK_LOG" || true)" == 0 ]] ||
-  fail "preflight failure invoked nix"
+run_fail "Pre-flight checks failed — no changes made." \
+  "blocks the cascade when preflight fails" demo
+assert_equal "$(grep -c '^nix' "$MOCK_LOG" || true)" "0" \
+  "does not invoke Nix after a preflight failure"
 
 new_home skips
 mkdir -p "$HOME/work/no-lock/.git"
@@ -17,11 +18,15 @@ write_direct_lock "$HOME/work/protected"
 printf '%s\n' "work/protected master" > "$HOME/.config/git/protected-branches"
 export MOCK_SCENARIO=skips
 output=$(bash "$ROOT/flake-update-cascade" demo)
-[[ "$output" == *"no flake.lock, skipping"* ]] || fail "no-lock skip missing"
-[[ "$output" == *"demo not an input, skipping"* ]] || fail "no-input skip missing"
-[[ "$output" == *"demo is a follows, not directly pinned, skipping"* ]] ||
-  fail "follows skip missing"
-[[ "$output" == *"protected branch (master)"* ]] || fail "protected skip missing"
-[[ "$(grep -c '^nix' "$MOCK_LOG" || true)" == 0 ]] || fail "skip-only run invoked nix"
+assert_contains "$output" "no flake.lock, skipping" \
+  "skips repositories without a lock file"
+assert_contains "$output" "demo not an input, skipping" \
+  "skips repositories without the requested input"
+assert_contains "$output" "demo is a follows, not directly pinned, skipping" \
+  "skips follows inputs"
+assert_contains "$output" "protected branch (master)" \
+  "skips protected branches in direct mode"
+assert_equal "$(grep -c '^nix' "$MOCK_LOG" || true)" "0" \
+  "does not invoke Nix when every repository is skipped"
 
-echo "flake-update-cascade preflight tests passed"
+finish_tests "flake-update-cascade preflight"

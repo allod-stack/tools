@@ -5,12 +5,17 @@ new_home pr
 write_direct_lock "$HOME/work/app"
 export MOCK_SCENARIO=pr
 output=$(bash "$ROOT/flake-update-cascade" demo --pr)
-[[ "$output" == *"aaaaaaa → bbbbbbb"* ]] || fail "PR update revision output missing"
-[[ "$output" == *"PR #42 updated"* ]] || fail "existing PR output missing"
-grep -Fq $'git\tapp\tcheckout -B agent/flake-update-demo' "$MOCK_LOG"
-grep -Fq $'git\tapp\tcommit -m flake.lock: update demo' "$MOCK_LOG"
-grep -Fq $'git\tapp\tpush --force-with-lease origin agent/flake-update-demo' "$MOCK_LOG"
-grep -Fq $'forge\t-R acme/app pr find-by-head agent/flake-update-demo' "$MOCK_LOG"
-grep -Fq $'git\tapp\tcheckout master' "$MOCK_LOG"
+assert_contains "$output" "aaaaaaa → bbbbbbb" "reports the updated revision"
+assert_contains "$output" "PR #42 updated" "reports an existing PR update"
+assert_log_contains $'git\tapp\tcheckout -B agent/flake-update-demo' \
+  "creates or resets the update branch"
+assert_log_contains $'git\tapp\tcommit -m flake.lock: update demo' \
+  "commits the updated lock file"
+assert_log_contains $'git\tapp\tpush --force-with-lease origin agent/flake-update-demo' \
+  "pushes the update branch with lease protection"
+assert_log_contains $'forge\t-R acme/app pr find-by-head agent/flake-update-demo' \
+  "looks up an existing PR for the update branch"
+assert_log_contains $'git\tapp\tcheckout master' \
+  "returns to the default branch"
 
-echo "flake-update-cascade PR-mode tests passed"
+finish_tests "flake-update-cascade PR-mode"
