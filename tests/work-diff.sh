@@ -27,38 +27,66 @@ printf 'staged\n' > "$WORK/changed/staged.txt"
 git -C "$WORK/changed" add staged.txt
 printf 'base\nunstaged\n' > "$WORK/changed/file.txt"
 
+test_number=0
+
+pass() {
+  test_number=$((test_number + 1))
+  printf 'ok %d - %s\n' "$test_number" "$1"
+}
+
 fail() {
-  echo "FAIL: $*" >&2
+  test_number=$((test_number + 1))
+  printf 'not ok %d - %s\n' "$test_number" "$1" >&2
+  shift
+  printf '%s\n' "$@" >&2
   exit 1
 }
 
+assert_contains() {
+  local actual="$1" expected="$2" description="$3"
+  if [[ "$actual" == *"$expected"* ]]; then
+    pass "$description"
+  else
+    fail "$description" "expected output to contain: $expected" "actual output:" "$actual"
+  fi
+}
+
+assert_not_contains() {
+  local actual="$1" unexpected="$2" description="$3"
+  if [[ "$actual" != *"$unexpected"* ]]; then
+    pass "$description"
+  else
+    fail "$description" "expected output not to contain: $unexpected" "actual output:" "$actual"
+  fi
+}
+
 output=$(bash "$ROOT/work-diff")
-[[ "$output" == *"clean  [master]"* ]] || fail "clean repo missing"
-[[ "$output" == *"(clean)"* ]] || fail "clean status missing"
-[[ "$output" == *"changed  [master]"* ]] || fail "changed repo missing"
-[[ "$output" == *"A  staged.txt"* ]] || fail "porcelain staged status missing"
-[[ "$output" == *" M file.txt"* ]] || fail "porcelain unstaged status missing"
-[[ "$output" == *"--- staged ---"* ]] || fail "staged diff heading missing"
-[[ "$output" == *"+staged"* ]] || fail "staged diff missing"
-[[ "$output" == *"--- unstaged ---"* ]] || fail "unstaged diff heading missing"
-[[ "$output" == *"+unstaged"* ]] || fail "unstaged diff missing"
-[[ "$output" == *"group/nested  [master]"* ]] || fail "nested repo missing"
+assert_contains "$output" "clean  [master]" "discovers a top-level clean repository"
+assert_contains "$output" "(clean)" "reports a clean working tree"
+assert_contains "$output" "changed  [master]" "discovers a changed repository"
+assert_contains "$output" "A  staged.txt" "shows staged porcelain status"
+assert_contains "$output" " M file.txt" "shows unstaged porcelain status"
+assert_contains "$output" "--- staged ---" "labels the staged diff section"
+assert_contains "$output" "+staged" "renders staged diff content"
+assert_contains "$output" "--- unstaged ---" "labels the unstaged diff section"
+assert_contains "$output" "+unstaged" "renders unstaged diff content"
+assert_contains "$output" "group/nested  [master]" "recursively discovers a nested repository"
 
 target=$(bash "$ROOT/work-diff" changed)
-[[ "$target" == *"changed  [master]"* ]] || fail "targeted repo missing"
-[[ "$target" != *"clean  [master]"* ]] || fail "targeted mode showed another repo"
+assert_contains "$target" "changed  [master]" "shows the requested repository in targeted mode"
+assert_not_contains "$target" "clean  [master]" "excludes other repositories in targeted mode"
 
 help=$(bash "$ROOT/work-diff" --help)
-[[ "$help" == *"Usage: work-diff"* ]] || fail "help output missing"
+assert_contains "$help" "Usage: work-diff" "prints usage for --help"
 
 if output=$(bash "$ROOT/work-diff" --invalid 2>&1); then
-  fail "unknown option succeeded"
+  fail "rejects an unknown option" "command unexpectedly succeeded" "$output"
 fi
-[[ "$output" == *"Unknown option: --invalid"* ]] || fail "unknown option message missing"
+assert_contains "$output" "Unknown option: --invalid" "explains an unknown-option failure"
 
 if output=$(bash "$ROOT/work-diff" missing 2>&1); then
-  fail "missing repository succeeded"
+  fail "rejects a missing repository" "command unexpectedly succeeded" "$output"
 fi
-[[ "$output" == *"Error: 'missing' not found"* ]] || fail "missing repo message absent"
+assert_contains "$output" "Error: 'missing' not found" "explains a missing-repository failure"
 
-echo "work-diff tests passed"
+printf '1..%d\n' "$test_number"
