@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -144,53 +144,3 @@ run_fail() {
   fi
   [[ "$output" == *"$expected"* ]] || fail "failure missing '$expected': $output"
 }
-
-new_home validation
-run_fail "missing required argument" 
-run_fail "unknown option: --bad" demo --bad
-run_fail "invalid input name" "bad/input"
-
-new_home preflight
-write_direct_lock "$HOME/work/dirty-repo"
-export MOCK_SCENARIO=dirty
-run_fail "Pre-flight checks failed — no changes made." demo
-[[ "$(grep -c '^nix' "$MOCK_LOG" || true)" == 0 ]] || fail "preflight failure invoked nix"
-
-new_home skips
-mkdir -p "$HOME/work/no-lock/.git"
-mkdir -p "$HOME/work/no-input/.git"
-printf '%s\n' '{"nodes":{"root":{"inputs":{}}}}' > "$HOME/work/no-input/flake.lock"
-write_follow_lock "$HOME/work/follows"
-write_direct_lock "$HOME/work/protected"
-printf '%s\n' "work/protected master" > "$HOME/.config/git/protected-branches"
-export MOCK_SCENARIO=skips
-output=$(bash "$ROOT/flake-update-cascade" demo)
-[[ "$output" == *"no flake.lock, skipping"* ]] || fail "no-lock skip missing"
-[[ "$output" == *"demo not an input, skipping"* ]] || fail "no-input skip missing"
-[[ "$output" == *"demo is a follows, not directly pinned, skipping"* ]] || fail "follows skip missing"
-[[ "$output" == *"protected branch (master)"* ]] || fail "protected skip missing"
-[[ "$(grep -c '^nix' "$MOCK_LOG" || true)" == 0 ]] || fail "skip-only run invoked nix"
-
-new_home dry-run
-write_direct_lock "$HOME/work/app"
-before=$(sha256sum "$HOME/work/app/flake.lock")
-export MOCK_SCENARIO=dry-run
-output=$(bash "$ROOT/flake-update-cascade" demo --dry-run)
-[[ "$output" == *"aaaaaaa → bbbbbbb  (dry-run: no changes made)"* ]] || fail "dry-run revision output missing"
-after=$(sha256sum "$HOME/work/app/flake.lock")
-[[ "$before" == "$after" ]] || fail "dry-run changed flake.lock"
-grep -Fq $'nix\tflake update demo --flake '"$HOME/work/app"' --output-lock-file /tmp/app.flake.lock.new' "$MOCK_LOG"
-
-new_home pr
-write_direct_lock "$HOME/work/app"
-export MOCK_SCENARIO=pr
-output=$(bash "$ROOT/flake-update-cascade" demo --pr)
-[[ "$output" == *"aaaaaaa → bbbbbbb"* ]] || fail "PR update revision output missing"
-[[ "$output" == *"PR #42 updated"* ]] || fail "existing PR output missing"
-grep -Fq $'git\tapp\tcheckout -B agent/flake-update-demo' "$MOCK_LOG"
-grep -Fq $'git\tapp\tcommit -m flake.lock: update demo' "$MOCK_LOG"
-grep -Fq $'git\tapp\tpush --force-with-lease origin agent/flake-update-demo' "$MOCK_LOG"
-grep -Fq $'forge\t-R acme/app pr find-by-head agent/flake-update-demo' "$MOCK_LOG"
-grep -Fq $'git\tapp\tcheckout master' "$MOCK_LOG"
-
-echo "flake-update-cascade tests passed"
