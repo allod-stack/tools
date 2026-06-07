@@ -79,29 +79,65 @@ export PATH="$TMP/bin:$PATH"
 
 output=$("$ROOT/pull-all")
 
-contains() {
-  [[ "$output" == *"$1"* ]] || {
-    echo "FAIL: output missing: $1" >&2
-    printf '%s\n' "$output" >&2
-    exit 1
-  }
+test_number=0
+
+pass() {
+  test_number=$((test_number + 1))
+  printf 'ok %d - %s\n' "$test_number" "$1"
 }
 
-contains "clean                     up to date [master]"
-contains "dirty                     skipped    [dirty working tree]"
-contains "local                     skipped    [on feature — no remote tracking branch]"
-contains "unpushed                  skipped    [on feature — 2 unpushed commits]"
-contains "switched                  pulled     [master]"
-contains "pull-fail                 error      [pull failed: network unavailable]"
-contains "group/nested/repo         pulled     [master]"
+fail() {
+  test_number=$((test_number + 1))
+  printf 'not ok %d - %s\n' "$test_number" "$1" >&2
+  shift
+  printf '%s\n' "$@" >&2
+  exit 1
+}
 
-grep -Fxq $'switched\tcheckout master' "$MOCK_LOG"
-grep -Fxq $'switched\tpull' "$MOCK_LOG"
-grep -Fxq $'repo\tpull' "$MOCK_LOG"
+assert_output_contains() {
+  local expected="$1" description="$2"
+  if [[ "$output" == *"$expected"* ]]; then
+    pass "$description"
+  else
+    fail "$description" "expected output to contain: $expected" "actual output:" "$output"
+  fi
+}
+
+assert_log_contains() {
+  local expected="$1" description="$2"
+  if grep -Fxq "$expected" "$MOCK_LOG"; then
+    pass "$description"
+  else
+    fail "$description" "expected Git log entry: $expected" "actual Git log:" "$(cat "$MOCK_LOG")"
+  fi
+}
+
+assert_output_contains "clean                     up to date [master]" \
+  "reports an up-to-date default branch"
+assert_output_contains "dirty                     skipped    [dirty working tree]" \
+  "skips a dirty working tree"
+assert_output_contains "local                     skipped    [on feature — no remote tracking branch]" \
+  "skips a branch without remote tracking"
+assert_output_contains "unpushed                  skipped    [on feature — 2 unpushed commits]" \
+  "skips a branch with unpushed commits"
+assert_output_contains "switched                  pulled     [master]" \
+  "reports a successful branch switch and pull"
+assert_output_contains "pull-fail                 error      [pull failed: network unavailable]" \
+  "reports the first line of a pull failure"
+assert_output_contains "group/nested/repo         pulled     [master]" \
+  "discovers and pulls a nested repository"
+
+assert_log_contains $'switched\tcheckout master' \
+  "checks out the default branch before pulling"
+assert_log_contains $'switched\tpull' \
+  "pulls after switching branches"
+assert_log_contains $'repo\tpull' \
+  "pulls a recursively discovered repository"
 
 if grep -Eq $'^(dirty|local|unpushed)\tpull$' "$MOCK_LOG"; then
-  echo "FAIL: skipped repository was pulled" >&2
-  exit 1
+  fail "never pulls repositories that were skipped" "actual Git log:" "$(cat "$MOCK_LOG")"
+else
+  pass "never pulls repositories that were skipped"
 fi
 
-echo "pull-all tests passed"
+printf '1..%d\n' "$test_number"
