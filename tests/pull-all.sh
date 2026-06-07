@@ -83,12 +83,12 @@ test_number=0
 
 pass() {
   test_number=$((test_number + 1))
-  printf 'ok %d - %s\n' "$test_number" "$1"
+  printf 'ok %d - ✅ %s\n' "$test_number" "$1"
 }
 
 fail() {
   test_number=$((test_number + 1))
-  printf 'not ok %d - %s\n' "$test_number" "$1" >&2
+  printf 'not ok %d - ❌ %s\n' "$test_number" "$1" >&2
   shift
   printf '%s\n' "$@" >&2
   exit 1
@@ -141,3 +141,4 @@ else
 fi
 
 printf '1..%d\n' "$test_number"
+printf '✅ All %d pull-all tests passed.\n' "$test_number"
