@@ -31,12 +31,12 @@ test_number=0
 
 pass() {
   test_number=$((test_number + 1))
-  printf 'ok %d - %s\n' "$test_number" "$1"
+  printf '✅ %d - %s\n' "$test_number" "$1"
 }
 
 fail() {
   test_number=$((test_number + 1))
-  printf 'not ok %d - %s\n' "$test_number" "$1" >&2
+  printf '❌ %d - %s\n' "$test_number" "$1" >&2
   shift
   printf '%s\n' "$@" >&2
   exit 1
@@ -89,4 +89,5 @@ if output=$(bash "$ROOT/work-diff" missing 2>&1); then
 fi
 assert_contains "$output" "Error: 'missing' not found" "explains a missing-repository failure"
 
-printf '1..%d\n' "$test_number"
+printf '\nTests run: %d\n' "$test_number"
+printf '✅ All %d work-diff tests passed.\n' "$test_number"
