@@ -77,41 +77,85 @@ EOF
 chmod +x "$TMP/bin/git"
 export PATH="$TMP/bin:$PATH"
 
+test_number=0
+
+pass() {
+  test_number=$((test_number + 1))
+  printf '✅ %d - %s\n' "$test_number" "$1"
+}
+
 fail() {
-  echo "FAIL: $*" >&2
+  test_number=$((test_number + 1))
+  printf '❌ %d - %s\n' "$test_number" "$1" >&2
+  shift
+  printf '%s\n' "$@" >&2
   exit 1
 }
 
+assert_contains() {
+  local actual="$1" expected="$2" description="$3"
+  if [[ "$actual" == *"$expected"* ]]; then
+    pass "$description"
+  else
+    fail "$description" "expected output to contain: $expected" "actual output:" "$actual"
+  fi
+}
+
+assert_not_contains() {
+  local actual="$1" unexpected="$2" description="$3"
+  if [[ "$actual" != *"$unexpected"* ]]; then
+    pass "$description"
+  else
+    fail "$description" "expected output not to contain: $unexpected" "actual output:" "$actual"
+  fi
+}
+
 output=$(bash "$ROOT/flake-status" demo)
-[[ "$output" == *"demo — INCONSISTENT (1 repo differs)"* ]] || fail "inconsistent header missing"
-[[ "$output" == *"alpha                 aaaaaaa  1970-01-01"* ]] || fail "alpha pin missing"
-[[ "$output" == *"beta                  bbbbbbb  1970-01-01"* ]] || fail "beta pin missing"
-[[ "$output" == *"[on branch feature, not master]"* ]] || fail "branch warning missing"
-[[ "$output" == *"[dirty: unstaged changes]"* ]] || fail "dirty warning missing"
-[[ "$output" == *"[2 unpushed commits]"* ]] || fail "unpushed warning missing"
-[[ "$output" == *"← stale"* ]] || fail "stale marker missing"
-[[ "$output" == *"gamma                 (not an input)"* ]] || fail "not-input row missing"
-[[ "$output" != *"no-lock"* ]] || fail "repo without lock should be omitted"
+assert_contains "$output" "demo — INCONSISTENT (1 repo differs)" \
+  "reports inconsistent revisions"
+assert_contains "$output" "alpha                 aaaaaaa  1970-01-01" \
+  "shows the majority revision"
+assert_contains "$output" "beta                  bbbbbbb  1970-01-01" \
+  "shows a differing revision"
+assert_contains "$output" "[on branch feature, not master]" \
+  "warns about a non-default branch"
+assert_contains "$output" "[dirty: unstaged changes]" \
+  "warns about unstaged changes"
+assert_contains "$output" "[2 unpushed commits]" \
+  "warns about unpushed commits"
+assert_contains "$output" "← stale" \
+  "marks the differing revision as stale"
+assert_contains "$output" "gamma                 (not an input)" \
+  "reports repositories without the named input"
+assert_not_contains "$output" "no-lock" \
+  "omits repositories without a lock file"
 
 upstream=$(bash "$ROOT/flake-status" demo --check-upstream)
-[[ "$upstream" == *"upstream: ccccccc (local pins are behind)"* ]] || fail "upstream comparison missing"
+assert_contains "$upstream" "upstream: ccccccc (local pins are behind)" \
+  "reports when local pins are behind upstream"
 
 all=$(bash "$ROOT/flake-status")
-[[ "$all" == *"==> alpha"* ]] || fail "all-input alpha heading missing"
-[[ "$all" == *"demo                  aaaaaaa  1970-01-01"* ]] || fail "all-input row missing"
-[[ "$all" != *"followed"* ]] || fail "follows input should be omitted"
+assert_contains "$all" "==> alpha" \
+  "shows repository headings in all-input mode"
+assert_contains "$all" "demo                  aaaaaaa  1970-01-01" \
+  "shows direct pins in all-input mode"
+assert_not_contains "$all" "followed" \
+  "omits follows inputs from all-input mode"
 
 help=$(bash "$ROOT/flake-status" --help)
-[[ "$help" == *"Usage: flake-status"* ]] || fail "help missing"
+assert_contains "$help" "Usage: flake-status" "prints usage for --help"
 
 if output=$(bash "$ROOT/flake-status" --invalid 2>&1); then
-  fail "unknown option succeeded"
+  fail "rejects an unknown option" "command unexpectedly succeeded" "$output"
 fi
-[[ "$output" == *"unknown option: --invalid"* ]] || fail "unknown option message missing"
+assert_contains "$output" "unknown option: --invalid" \
+  "explains an unknown-option failure"
 
 if output=$(bash "$ROOT/flake-status" one two 2>&1); then
-  fail "extra argument succeeded"
+  fail "rejects an extra positional argument" "command unexpectedly succeeded" "$output"
 fi
-[[ "$output" == *"unexpected argument: two"* ]] || fail "extra argument message missing"
+assert_contains "$output" "unexpected argument: two" \
+  "explains an extra-argument failure"
 
-echo "flake-status tests passed"
+printf '\nTests run: %d\n' "$test_number"
+printf '✅ All %d flake-status tests passed.\n' "$test_number"
