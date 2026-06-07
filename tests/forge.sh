@@ -75,12 +75,21 @@ case "$url" in
   */api/v1/repos/acme/widget)
     printf '%s\n' '{"default_branch":"master"}'
     ;;
+  */api/v1/repos/acme/widget/pulls\?state=open\&limit=50\&head=topic)
+    printf '%s\n' '[{"number":31}]'
+    ;;
+  */api/v1/repos/acme/widget/pulls\?state=open\&limit=50)
+    printf '%s\n' '[{"number":12,"title":"Improve tool","user":{"login":"alice"},"head":{"label":"acme:topic"},"base":{"label":"master"}}]'
+    ;;
+  */api/v1/repos/acme/widget/issues\?type=issues\&state=open\&limit=50)
+    printf '%s\n' '[{"number":20,"title":"Fix backup","user":{"login":"bob"}}]'
+    ;;
   */api/v1/repos/acme/widget/pulls/12/reviews)
     printf '%s\n' '[{"id":7,"comments_count":1}]'
     ;;
   */api/v1/repos/acme/widget/pulls/12/reviews/7/comments)
     if [[ "$method" == GET ]]; then
-      printf '%s\n' '[{"id":99,"path":"forge","position":4}]'
+      printf '%s\n' '[{"id":99,"path":"forge","line":4,"position":4,"diff_hunk":"@@ -1 +1 @@","body":"Inline note","created_at":"2026-06-01T00:00:00Z","user":{"login":"carol"}}]'
     else
       printf '%s\n' '{"html_url":"https://forge.example/acme/widget/pulls/12#comment-100"}'
     fi
@@ -88,17 +97,32 @@ case "$url" in
   */api/v1/repos/acme/widget/pulls)
     printf '%s\n' '{"html_url":"https://forge.example/acme/widget/pulls/1"}'
     ;;
-  */api/v1/repos/acme/widget/pulls/*)
-    printf '%s\n' '{"html_url":"https://forge.example/acme/widget/pulls/12"}'
+  */api/v1/repos/acme/widget/pulls/12)
+    if [[ "$method" == GET ]]; then
+      printf '%s\n' '{"title":"Improve tool","state":"open","body":"PR body","user":{"login":"alice"},"head":{"label":"acme:topic"},"base":{"label":"master"}}'
+    else
+      printf '%s\n' '{"html_url":"https://forge.example/acme/widget/pulls/12"}'
+    fi
     ;;
-  */api/v1/repos/acme/widget/issues/*/comments)
-    printf '%s\n' '{"html_url":"https://forge.example/acme/widget/issues/12#comment-1"}'
+  */api/v1/repos/acme/widget/issues/12/comments)
+    if [[ "$method" == GET ]]; then
+      printf '%s\n' '[{"body":"General note","created_at":"2026-06-02T00:00:00Z","user":{"login":"dave"}}]'
+    else
+      printf '%s\n' '{"html_url":"https://forge.example/acme/widget/issues/12#comment-1"}'
+    fi
+    ;;
+  */api/v1/repos/acme/widget/issues/20/comments)
+    printf '%s\n' '[{"body":"Issue note","created_at":"2026-06-03T00:00:00Z","user":{"login":"erin"}}]'
     ;;
   */api/v1/repos/acme/widget/issues)
     printf '%s\n' '{"html_url":"https://forge.example/acme/widget/issues/20"}'
     ;;
-  */api/v1/repos/acme/widget/issues/*)
-    printf '%s\n' '{"html_url":"https://forge.example/acme/widget/issues/20"}'
+  */api/v1/repos/acme/widget/issues/20)
+    if [[ "$method" == GET ]]; then
+      printf '%s\n' '{"title":"Fix backup","state":"open","body":"Issue body","user":{"login":"bob"}}'
+    else
+      printf '%s\n' '{"html_url":"https://forge.example/acme/widget/issues/20"}'
+    fi
     ;;
   *)
     echo "unexpected mocked URL: $url" >&2
@@ -157,6 +181,10 @@ run_ok() {
   }
 }
 
+run_capture() {
+  "$ROOT/forge" "$@" 2>&1
+}
+
 run_fail() {
   local expected="$1"
   shift
@@ -210,6 +238,37 @@ assert_request 1 GET "/api/v1/repos/acme/widget/pulls/12/reviews"
 assert_request 2 GET "/api/v1/repos/acme/widget/pulls/12/reviews/7/comments"
 assert_request 3 POST "/api/v1/repos/acme/widget/pulls/12/reviews/7/comments"
 assert_json 3 '. == {path: "forge", new_position: 4, body: "thread reply"}'
+
+# Read commands: list/view/review output and repository inference.
+reset_requests
+output=$(run_capture -R acme/widget pr list)
+[[ "$output" == *"12"*"Improve tool"*"alice"*"acme:topic → master"* ]] || fail "pr list output incorrect"
+assert_request 1 GET "/api/v1/repos/acme/widget/pulls?state=open&limit=50"
+
+reset_requests
+output=$(run_capture -R acme/widget pr view 12)
+[[ "$output" == *"PR #12: Improve tool"* ]] || fail "pr view header missing"
+[[ "$output" == *"General note"* ]] || fail "pr comment missing"
+[[ "$output" == *"Inline note"* ]] || fail "inline review comment missing"
+[[ "$(request_count)" == 4 ]] || fail "pr view should make four requests"
+
+reset_requests
+output=$(run_capture -R acme/widget pr review-comments 12)
+[[ "$output" == *"id 99"*"carol on forge line 4"*"Inline note"* ]] || fail "review comment output incorrect"
+
+reset_requests
+output=$(run_capture -R acme/widget pr find-by-head topic)
+[[ "$output" == "31" ]] || fail "find-by-head output incorrect"
+
+reset_requests
+output=$(run_capture issue list)
+[[ "$output" == *"20"*"Fix backup"*"bob"* ]] || fail "issue list or repo inference failed"
+assert_request 1 GET "/api/v1/repos/acme/widget/issues?type=issues&state=open&limit=50"
+
+reset_requests
+output=$(run_capture -R acme/widget issue view 20)
+[[ "$output" == *"Issue #20: Fix backup"* ]] || fail "issue view header missing"
+[[ "$output" == *"Issue body"*"Issue note"* ]] || fail "issue view content missing"
 
 # issue create: title is required; an omitted body is sent as empty.
 reset_requests
@@ -276,4 +335,4 @@ run_fail "issue target must be a number or URL" issue close https://other.exampl
 run_fail "duplicate target must be a number or URL" issue close 20 --duplicate-of nope
 [[ "$(request_count)" == 0 ]] || fail "invalid commands made an API request"
 
-echo "forge content flag tests passed"
+echo "forge tests passed"
