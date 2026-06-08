@@ -85,12 +85,16 @@ input's remote HEAD. Useful before deciding whether an update is worth running.
 
 ### `flake-update-cascade`
 
-Updates a named flake input across all repos that pin it directly, running
-pre-flight checks before touching anything.
+Updates one or more named flake inputs across all repos that pin them directly,
+running pre-flight checks before touching anything.
 
 ```
-flake-update-cascade <input-name> [--pr] [--dry-run]
+flake-update-cascade <input-name>... [--pr] [--dry-run]
 ```
+
+The requested names are resolved through each repository's lock graph. All
+reachable direct pins with those names are passed to one `nix flake update`
+invocation, producing at most one commit and one PR per repository.
 
 **Modes:**
 
@@ -123,6 +127,9 @@ flake-update-cascade nixpkgs --dry-run
 
 # Update nixpkgs across all repos, committing directly (non-protected only)
 flake-update-cascade nixpkgs
+
+# Update multiple inputs together in each repository
+flake-update-cascade nixpkgs home-manager
 
 # Update allod-tools across all repos via PRs (works on protected branches)
 flake-update-cascade allod-tools --pr

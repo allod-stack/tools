@@ -20,10 +20,8 @@ export MOCK_SCENARIO=skips
 output=$(bash "$ROOT/flake-update-cascade" demo)
 assert_contains "$output" "no flake.lock, skipping" \
   "skips repositories without a lock file"
-assert_contains "$output" "demo not an input, skipping" \
-  "skips repositories without the requested input"
-assert_contains "$output" "demo is a follows, not directly pinned, skipping" \
-  "skips follows inputs"
+assert_contains "$output" "no directly pinned demo input found, skipping" \
+  "skips repositories without a reachable direct pin"
 assert_contains "$output" "protected branch (master)" \
   "skips protected branches in direct mode"
 assert_equal "$(grep -c '^nix' "$MOCK_LOG" || true)" "0" \

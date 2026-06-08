@@ -6,8 +6,10 @@ write_direct_lock "$HOME/work/app"
 before=$(sha256sum "$HOME/work/app/flake.lock")
 export MOCK_SCENARIO=dry-run
 output=$(bash "$ROOT/flake-update-cascade" demo --dry-run)
-assert_contains "$output" "aaaaaaa → bbbbbbb  (dry-run: no changes made)" \
+assert_contains "$output" "demo: aaaaaaa → bbbbbbb" \
   "reports the proposed revision change"
+assert_contains "$output" "dry-run: no changes made" \
+  "confirms the dry-run left the repository unchanged"
 after=$(sha256sum "$HOME/work/app/flake.lock")
 assert_equal "$after" "$before" "leaves the repository lock file unchanged"
 assert_log_contains \
