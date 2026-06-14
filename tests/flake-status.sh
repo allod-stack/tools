@@ -6,11 +6,12 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 export HOME="$TMP/home"
-mkdir -p "$HOME/work/group" "$TMP/bin"
+mkdir -p "$HOME/work/.git" "$HOME/work/group" "$TMP/bin"
 
 write_lock() {
   local dir="$1" rev="$2" include_demo="$3"
   mkdir -p "$dir/.git"
+  : > "$dir/.git/HEAD"
   if [[ "$include_demo" == true ]]; then
     cat > "$dir/flake.lock" <<EOF
 {
@@ -37,6 +38,7 @@ write_lock "$HOME/work/beta" "$REV_B" true
 write_lock "$HOME/work/group/delta" "$REV_A" true
 write_lock "$HOME/work/gamma" "$REV_A" false
 mkdir -p "$HOME/work/no-lock/.git"
+: > "$HOME/work/no-lock/.git/HEAD"
 
 cat > "$TMP/bin/git" <<'EOF'
 #!/usr/bin/env bash
@@ -48,11 +50,16 @@ if [[ "$1" == "ls-remote" ]]; then
 fi
 
 [[ "$1" == "-C" ]] || { echo "unexpected git invocation: $*" >&2; exit 1; }
+repo_dir="$2"
 repo=$(basename "$2")
 shift 2
 command="$*"
 
 case "$command" in
+  "rev-parse --show-toplevel")
+    [[ -f "$repo_dir/.git/HEAD" ]] || exit 1
+    printf '%s\n' "$repo_dir"
+    ;;
   "symbolic-ref refs/remotes/origin/HEAD")
     printf 'refs/remotes/origin/master\n'
     ;;

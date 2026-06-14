@@ -8,7 +8,8 @@ trap 'rm -rf "$TMP"' EXIT
 export HOME="$TMP/home"
 export MOCK_LOG="$TMP/commands.log"
 REPO="$HOME/work/app"
-mkdir -p "$REPO/.git" "$HOME/.config/git" "$TMP/bin"
+mkdir -p "$HOME/work/.git" "$REPO/.git" "$HOME/.config/git" "$TMP/bin"
+: > "$REPO/.git/HEAD"
 : > "$HOME/.config/git/active-pr-branches"
 : > "$HOME/.config/git/protected-branches"
 : > "$MOCK_LOG"
@@ -42,10 +43,15 @@ cat > "$TMP/bin/git" <<'EOF'
 set -euo pipefail
 
 [[ "$1" == "-C" ]] || { echo "unexpected git invocation: $*" >&2; exit 1; }
+dir="$2"
 shift 2
 printf 'git\t%s\n' "$*" >> "$MOCK_LOG"
 
 case "$*" in
+  "rev-parse --show-toplevel")
+    [[ -f "$dir/.git/HEAD" ]] || exit 1
+    printf '%s\n' "$dir"
+    ;;
   "symbolic-ref refs/remotes/origin/HEAD")
     printf 'refs/remotes/origin/master\n'
     ;;

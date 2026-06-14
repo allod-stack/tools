@@ -7,7 +7,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 export HOME="$TMP/home"
 WORK="$HOME/work"
-mkdir -p "$WORK/group"
+mkdir -p "$WORK/.git" "$WORK/group"
 
 init_repo() {
   local dir="$1"
@@ -61,6 +61,8 @@ assert_not_contains() {
 }
 
 output=$(bash "$ROOT/work-diff")
+assert_not_contains "$output" "$WORK  [" \
+  "ignores an invalid .git marker at the workspace root"
 assert_contains "$output" "clean  [master]" "discovers a top-level clean repository"
 assert_contains "$output" "(clean)" "reports a clean working tree"
 assert_contains "$output" "changed  [master]" "discovers a changed repository"

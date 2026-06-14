@@ -21,6 +21,10 @@ command="$*"
 printf 'git\t%s\t%s\n' "$repo" "$command" >> "$MOCK_LOG"
 
 case "$command" in
+  "rev-parse --show-toplevel")
+    [[ -f "$dir/.git/HEAD" ]] || exit 1
+    printf '%s\n' "$dir"
+    ;;
   "symbolic-ref refs/remotes/origin/HEAD")
     printf 'refs/remotes/origin/master\n'
     ;;
@@ -106,6 +110,7 @@ test_number=0
 write_direct_lock() {
   local dir="$1"
   mkdir -p "$dir/.git"
+  : > "$dir/.git/HEAD"
   cat > "$dir/flake.lock" <<'EOF'
 {
   "nodes": {
@@ -119,13 +124,14 @@ EOF
 write_follow_lock() {
   local dir="$1"
   mkdir -p "$dir/.git"
+  : > "$dir/.git/HEAD"
   printf '%s\n' '{"nodes":{"root":{"inputs":{"demo":["base","demo"]}}}}' > "$dir/flake.lock"
 }
 
 new_home() {
   export HOME="$TMP/home-$1"
   rm -rf "$HOME"
-  mkdir -p "$HOME/work" "$HOME/.config/git"
+  mkdir -p "$HOME/work/.git" "$HOME/.config/git"
   : > "$HOME/.config/git/active-pr-branches"
   : > "$HOME/.config/git/protected-branches"
   : > "$MOCK_LOG"

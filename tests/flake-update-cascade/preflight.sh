@@ -12,6 +12,8 @@ assert_equal "$(grep -c '^nix' "$MOCK_LOG" || true)" "0" \
 new_home skips
 mkdir -p "$HOME/work/no-lock/.git"
 mkdir -p "$HOME/work/no-input/.git"
+: > "$HOME/work/no-lock/.git/HEAD"
+: > "$HOME/work/no-input/.git/HEAD"
 printf '%s\n' '{"nodes":{"root":{"inputs":{}}}}' > "$HOME/work/no-input/flake.lock"
 write_follow_lock "$HOME/work/follows"
 write_direct_lock "$HOME/work/protected"

@@ -11,9 +11,16 @@ set -euo pipefail
 
 WORK_DIR="${HOME}/work"
 
+is_repo_root() {
+  local dir="$1" top
+  [[ -e "$dir/.git" ]] || return 1
+  top=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) || return 1
+  [[ "$top" == "$dir" ]]
+}
+
 collect_repos() {
   local dir="${1%/}"
-  if [[ -d "$dir/.git" ]]; then
+  if is_repo_root "$dir"; then
     printf '%s\n' "${dir#"${WORK_DIR}/"}"
     return
   fi

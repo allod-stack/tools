@@ -7,10 +7,11 @@ trap 'rm -rf "$TMP"' EXIT
 
 export HOME="$TMP/home"
 export MOCK_LOG="$TMP/git.log"
-mkdir -p "$HOME/work/group/nested" "$TMP/bin"
+mkdir -p "$HOME/work/.git" "$HOME/work/group/nested" "$TMP/bin"
 
 for repo in clean dirty local unpushed switched pull-fail group/nested/repo; do
   mkdir -p "$HOME/work/$repo/.git"
+  : > "$HOME/work/$repo/.git/HEAD"
 done
 
 cat > "$TMP/bin/git" <<'EOF'
@@ -18,12 +19,17 @@ cat > "$TMP/bin/git" <<'EOF'
 set -euo pipefail
 
 [[ "$1" == "-C" ]] || { echo "expected git -C" >&2; exit 1; }
+repo_dir="$2"
 repo=$(basename "$2")
 shift 2
 printf '%s\t%s\n' "$repo" "$*" >> "$MOCK_LOG"
 command="$*"
 
 case "$command" in
+  "rev-parse --show-toplevel")
+    [[ -f "$repo_dir/.git/HEAD" ]] || exit 1
+    printf '%s\n' "$repo_dir"
+    ;;
   "symbolic-ref refs/remotes/origin/HEAD")
     if [[ "$repo" == local ]]; then
       exit 1
