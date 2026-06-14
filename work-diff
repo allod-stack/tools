@@ -3,6 +3,10 @@ set -euo pipefail
 
 WORK_DIR="${HOME}/work"
 
+if ! declare -F workspace_collect_repos >/dev/null; then
+    source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/workspace.sh"
+fi
+
 usage() {
     cat <<'EOF'
 Usage: work-diff [--all | <repo-name>]
@@ -17,16 +21,9 @@ EOF
 
 sep() { printf '%.0s═' $(seq 1 60); echo; }
 
-is_repo_root() {
-    local dir="$1" top
-    [[ -e "$dir/.git" ]] || return 1
-    top=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) || return 1
-    [[ "$top" == "$dir" ]]
-}
-
 show_repo() {
     local dir="$1"
-    is_repo_root "$dir" || return 0
+    workspace_is_repo_root "$dir" || return 0
 
     local name branch status staged unstaged
     name="${dir#"$WORK_DIR"/}"
@@ -55,7 +52,7 @@ show_repo() {
 
 walk() {
     local dir="${1%/}"
-    if is_repo_root "$dir"; then
+    if workspace_is_repo_root "$dir"; then
         show_repo "$dir"
         return
     fi

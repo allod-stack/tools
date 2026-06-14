@@ -74,6 +74,15 @@ assert_contains "$output" "--- unstaged ---" "labels the unstaged diff section"
 assert_contains "$output" "+unstaged" "renders unstaged diff content"
 assert_contains "$output" "group/nested  [master]" "recursively discovers a nested repository"
 
+embedded="$TMP/work-diff-embedded"
+{
+  cat "$ROOT/lib/workspace.sh"
+  cat "$ROOT/work-diff"
+} > "$embedded"
+embedded_output=$(bash "$embedded")
+assert_contains "$embedded_output" "group/nested  [master]" \
+  "works when the shared library is embedded by Nix packaging"
+
 target=$(bash "$ROOT/work-diff" changed)
 assert_contains "$target" "changed  [master]" "shows the requested repository in targeted mode"
 assert_not_contains "$target" "clean  [master]" "excludes other repositories in targeted mode"

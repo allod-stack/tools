@@ -3,28 +3,11 @@ set -euo pipefail
 
 WORK_DIR="${HOME}/work"
 
-is_repo_root() {
-  local dir="$1" top
-  [[ -e "$dir/.git" ]] || return 1
-  top=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) || return 1
-  [[ "$top" == "$dir" ]]
-}
+if ! declare -F workspace_collect_repos >/dev/null; then
+  source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/workspace.sh"
+fi
 
-# Discover all git repos under WORK_DIR (relative paths, recursive).
-collect_repos() {
-  local dir="${1%/}"
-  if is_repo_root "$dir"; then
-    printf '%s\n' "${dir#"${WORK_DIR}/"}"
-    return
-  fi
-  local sub
-  for sub in "$dir"/*/; do
-    [[ -d "$sub" ]] || continue
-    collect_repos "$sub"
-  done
-}
-
-mapfile -t REPOS < <(collect_repos "$WORK_DIR")
+mapfile -t REPOS < <(workspace_collect_repos "$WORK_DIR")
 
 usage() {
   cat <<'EOF'
@@ -117,13 +100,6 @@ get_upstream_url() {
 # --- Git helpers ---
 
 # Return the default branch from the local remote-tracking ref (no network).
-repo_default_branch() {
-  local dir="$1"
-  git -C "$dir" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null \
-    | sed 's|refs/remotes/origin/||' \
-    || echo "master"
-}
-
 # Output health warning strings for a repo (space-separated, may be empty).
 repo_health_warnings() {
   local dir="$1"
@@ -132,7 +108,7 @@ repo_health_warnings() {
   local branch
   branch=$(git -C "$dir" branch --show-current 2>/dev/null || true)
   local default_branch
-  default_branch=$(repo_default_branch "$dir")
+  default_branch=$(workspace_repo_default_branch "$dir")
   if [[ -n "$branch" && "$branch" != "$default_branch" ]]; then
     warnings+=("[on branch $branch, not $default_branch]")
   fi

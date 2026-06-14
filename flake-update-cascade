@@ -3,6 +3,10 @@ set -euo pipefail
 
 WORK_DIR="${HOME}/work"
 
+if ! declare -F workspace_collect_repos >/dev/null; then
+  source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/workspace.sh"
+fi
+
 usage() {
   cat <<'EOF'
 Usage: flake-update-cascade <input-name>... [--dry-run] [--pr]
@@ -71,28 +75,8 @@ if [[ "$PR_MODE" == true ]] && ! command -v forge >/dev/null 2>&1; then
   exit 1
 fi
 
-# --- Repo discovery (mirrors flake-status) ---
-is_repo_root() {
-  local dir="$1" top
-  [[ -e "$dir/.git" ]] || return 1
-  top=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) || return 1
-  [[ "$top" == "$dir" ]]
-}
-
-collect_repos() {
-  local dir="${1%/}"
-  if is_repo_root "$dir"; then
-    printf '%s\n' "${dir#"${WORK_DIR}/"}"
-    return
-  fi
-  local sub
-  for sub in "$dir"/*/; do
-    [[ -d "$sub" ]] || continue
-    collect_repos "$sub"
-  done
-}
-
-mapfile -t REPOS < <(collect_repos "$WORK_DIR")
+# --- Repo discovery (shared with the other workspace tools) ---
+mapfile -t REPOS < <(workspace_collect_repos "$WORK_DIR")
 
 # --- jq helpers ---
 
@@ -133,13 +117,6 @@ get_rev() {
 }
 
 # --- Git helpers ---
-
-repo_default_branch() {
-  local dir="$1"
-  git -C "$dir" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null \
-    | sed 's|refs/remotes/origin/||' \
-    || echo "master"
-}
 
 # Extract owner/repo from the git remote URL.
 repo_forge_name() {
@@ -210,7 +187,7 @@ run_combined_cycle() {
 
     # Protected-branches check (direct mode only; --pr mode handles these via PR flow)
     if [[ "$PR_MODE" == false && "$DRY_RUN" == false ]]; then
-      default_branch=$(repo_default_branch "$dir")
+      default_branch=$(workspace_repo_default_branch "$dir")
       if [[ -f "$PROTECTED_BRANCHES_FILE" ]] && \
          grep -Fxq "work/${repo} ${default_branch}" "$PROTECTED_BRANCHES_FILE" 2>/dev/null; then
         REPO_STATUS["$repo"]="skip:protected"
@@ -223,7 +200,7 @@ run_combined_cycle() {
 
     # Step 4: Branch check
     current_branch=$(git -C "$dir" branch --show-current 2>/dev/null || true)
-    default_branch=$(repo_default_branch "$dir")
+    default_branch=$(workspace_repo_default_branch "$dir")
     if [[ -z "$current_branch" || "$current_branch" != "$default_branch" ]]; then
       repo_errors+=("not on default branch (on '${current_branch:-detached}', expected '${default_branch}')")
     fi
@@ -294,7 +271,7 @@ run_combined_cycle() {
         continue
         ;;
       skip:protected)
-        default_branch=$(repo_default_branch "$dir")
+        default_branch=$(workspace_repo_default_branch "$dir")
         echo "  protected branch (${default_branch}) — re-run with --pr to create a PR"
         continue
         ;;
@@ -312,7 +289,7 @@ run_combined_cycle() {
       continue
     fi
 
-    default_branch=$(repo_default_branch "$dir")
+    default_branch=$(workspace_repo_default_branch "$dir")
     mapfile -t update_paths <<< "${REPO_INPUT_PATHS[$repo]}"
 
     # Step 1: Pull
