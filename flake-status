@@ -4,6 +4,7 @@ set -euo pipefail
 WORK_DIR="${HOME}/work"
 
 if ! declare -F workspace_collect_repos >/dev/null; then
+  # shellcheck source=/dev/null
   source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/workspace.sh"
 fi
 
