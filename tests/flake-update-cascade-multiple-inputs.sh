@@ -20,14 +20,14 @@ cat > "$REPO/flake.lock" <<'EOF'
     "root": {
       "inputs": {
         "allod-tools": "allod-tools",
-        "dev-vm-config": "dev-vm-config",
-        "nixpkgs": ["dev-vm-config", "nixpkgs"]
+        "vm": "vm",
+        "nixpkgs": ["vm", "nixpkgs"]
       }
     },
     "allod-tools": {
       "locked": {"rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
     },
-    "dev-vm-config": {
+    "vm": {
       "inputs": {"nixpkgs": "nixpkgs"},
       "locked": {"rev": "cccccccccccccccccccccccccccccccccccccccc"}
     },
@@ -103,7 +103,7 @@ case "$1 $2" in
         *) inputs+=("$1"); shift ;;
       esac
     done
-    [[ "${inputs[*]}" == "allod-tools dev-vm-config/nixpkgs" ]] || {
+    [[ "${inputs[*]}" == "allod-tools vm/nixpkgs" ]] || {
       echo "unexpected combined inputs: ${inputs[*]}" >&2
       exit 1
     }
@@ -139,12 +139,12 @@ after=$(sha256sum "$REPO/flake.lock")
 [[ "$before" == "$after" ]] || fail "dry-run changed flake.lock"
 [[ "$output" == *"allod-tools: aaaaaaa → bbbbbbb"* ]] ||
   fail "direct root input change missing"
-[[ "$output" == *"dev-vm-config/nixpkgs: ddddddd → eeeeeee"* ]] ||
+[[ "$output" == *"vm/nixpkgs: ddddddd → eeeeeee"* ]] ||
   fail "nested input change missing"
 [[ "$(grep -c $'^nix\tflake update' "$MOCK_LOG")" == 1 ]] ||
   fail "expected exactly one combined Nix update"
 grep -Fq \
-  $'nix\tflake update allod-tools dev-vm-config/nixpkgs --flake '"$REPO" \
+  $'nix\tflake update allod-tools vm/nixpkgs --flake '"$REPO" \
   "$MOCK_LOG" || fail "combined update paths were not passed to Nix"
 
 : > "$MOCK_LOG"

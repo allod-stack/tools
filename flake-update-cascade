@@ -23,9 +23,9 @@ Modes:
   --dry-run   Show what would change without modifying anything.
 
 Examples:
-  flake-update-cascade dev-vm-config
-  flake-update-cascade nixpkgs dev-vm-config
-  flake-update-cascade nixpkgs dev-vm-config --pr
+  flake-update-cascade vm
+  flake-update-cascade nixpkgs vm
+  flake-update-cascade nixpkgs vm --pr
   flake-update-cascade allod-tools --dry-run
 EOF
 }
@@ -83,7 +83,7 @@ mapfile -t REPOS < <(workspace_collect_repos "$WORK_DIR")
 
 # Find reachable, directly pinned input paths whose final component matches one
 # of the requested names. Following the graph finds canonical targets behind
-# root-level follows, such as dev-vm-config/nixpkgs.
+# root-level follows, such as vm/nixpkgs.
 get_update_paths() {
   local lockfile="$1"
   shift

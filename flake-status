@@ -20,7 +20,7 @@ Usage: flake-status [input-name] [--check-upstream]
 
 Examples:
   flake-status
-  flake-status dev-vm-config
+  flake-status vm
   flake-status nixpkgs --check-upstream
 EOF
 }

@@ -1,8 +1,8 @@
 # allod/tools
 
 Shell scripts for managing a multi-repo NixOS dev environment. All scripts are
-packaged via `pkgs.writeShellApplication` in `machine-profiles` (dev VMs) and
-`host-config` (host machine) — no manual installation needed after
+packaged via `pkgs.writeShellApplication` in `profiles` (dev VMs) and
+`nexus` (host machine) — no manual installation needed after
 `nixos-rebuild switch`.
 
 ## Scripts
@@ -24,10 +24,10 @@ For each repo:
 
 ```
   allod/tools            pulled     [master]
-  dev-vm-config             up to date [master]
+  allod/vm                  up to date [master]
   hashpool                  skipped    [on agent/my-feature — 2 unpushed commits]
-  host-config               up to date [master]
-  machine-profiles          pulled     [main]
+  allod/nexus               up to date [master]
+  allod/profiles            pulled     [master]
 ```
 
 ---
@@ -58,7 +58,7 @@ flake-status <input-name> --check-upstream   # compare pins to upstream HEAD
 
 **No args** — full table per repo:
 ```
-==> host-config
+==> allod/nexus
   allod-tools        97b57e1  2026-06-03
   home-manager          3ee51fb  2026-05-23
   nixpkgs               b77b3de  2026-05-22
@@ -70,9 +70,9 @@ flake-status <input-name> --check-upstream   # compare pins to upstream HEAD
 $ flake-status allod-tools
 allod-tools — all repos consistent at 97b57e1 (2026-06-03)
 
-  dev-vm-config         (not an input)
-  host-config           97b57e1  2026-06-03
-  machine-profiles      97b57e1  2026-06-03
+  allod/vm              (not an input)
+  allod/nexus           97b57e1  2026-06-03
+  allod/profiles        97b57e1  2026-06-03
 ```
 
 If repos are out of sync, the header says `INCONSISTENT` and the stale rows are
