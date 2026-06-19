@@ -8,6 +8,8 @@ run_fail "cannot be combined" "rejects conflicting body options" \
 run_fail "specified more than once" "rejects a duplicate title option" \
   pr create -t one --title two
 run_fail "requires a value" "rejects an option without a value" pr create --title
+run_fail "requires a value" "rejects a command-level repo flag without a value" \
+  issue list --repo
 run_fail "--head cannot be empty" "rejects an empty head branch" \
   pr create --title title --head ""
 run_fail "--base cannot be empty" "rejects an empty base branch" \

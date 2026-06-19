@@ -33,6 +33,12 @@ assert_request 1 GET "/api/v1/repos/acme/widget/issues?type=issues&state=open&li
   "infers the repository for issue listing"
 
 reset_requests
+output=$(run_capture issue list --repo acme/gadget)
+assert_contains "$output" "Gadget issue" "lists issues with command-level repo"
+assert_request 1 GET "/api/v1/repos/acme/gadget/issues?type=issues&state=open&limit=50" \
+  "uses command-level repo for issue listing"
+
+reset_requests
 output=$(run_capture -R acme/widget issue view 20)
 assert_contains "$output" "Issue #20: Fix backup" "shows the issue header"
 assert_contains "$output" "Issue body" "shows the issue body"

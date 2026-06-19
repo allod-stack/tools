@@ -24,6 +24,13 @@ assert_json 1 '. == {title: "Short flags", head: "topic", base: "develop", body:
   "sends explicit pull request fields"
 
 reset_requests
+run_capture pr create -R acme/gadget -t "Command repo" -H topic -B master -b "body" >/dev/null
+assert_request 1 POST "/api/v1/repos/acme/gadget/pulls" \
+  "creates a pull request with command-level repo"
+assert_json 1 '. == {title: "Command repo", head: "topic", base: "master", body: "body"}' \
+  "uses command-level repo for pull request creation"
+
+reset_requests
 run_ok pr edit 12 --body ""
 assert_request 1 PATCH "/api/v1/repos/acme/widget/pulls/12" "updates a pull request"
 assert_json 1 '. == {body: ""}' "preserves an explicitly empty body"
@@ -52,6 +59,13 @@ run_ok issue create -t "New issue"
 assert_request 1 POST "/api/v1/repos/acme/widget/issues" "creates an issue"
 assert_json 1 '. == {title: "New issue", body: ""}' \
   "sends an empty body when omitted"
+
+reset_requests
+run_capture issue create -R acme/gadget -t "Command repo issue" >/dev/null
+assert_request 1 POST "/api/v1/repos/acme/gadget/issues" \
+  "creates an issue with command-level repo"
+assert_json 1 '. == {title: "Command repo issue", body: ""}' \
+  "uses command-level repo for issue creation"
 
 reset_requests
 printf 'stdin body\n\n' | run_ok issue edit 20 --title "Updated" --body-file -

@@ -107,6 +107,15 @@ case "$url" in
       printf '%s\n' '{"html_url":"https://forge.example/acme/widget/issues/20"}'
     fi
     ;;
+  */api/v1/repos/acme/gadget/pulls)
+    printf '%s\n' '{"html_url":"https://forge.example/acme/gadget/pulls/1"}'
+    ;;
+  */api/v1/repos/acme/gadget/issues\?type=issues\&state=open\&limit=50)
+    printf '%s\n' '[{"number":21,"title":"Gadget issue","user":{"login":"zoe"}}]'
+    ;;
+  */api/v1/repos/acme/gadget/issues)
+    printf '%s\n' '{"html_url":"https://forge.example/acme/gadget/issues/21"}'
+    ;;
   *)
     echo "unexpected mocked URL: $url" >&2
     exit 1
