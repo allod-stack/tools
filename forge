@@ -3,7 +3,10 @@
 #
 # Usage: forge [-R|--repo owner/repo] <resource> <command> [args]
 #
-# Resources:  pr, issue
+# Resources:  pr, issue, token
+#
+# token commands:
+#   forge token verify [flags]                  Verify a Forgejo token
 #
 # pr commands:
 #   forge pr list                              List open pull requests
@@ -826,6 +829,53 @@ issue_close() {
   echo "Issue closed: $url"
 }
 
+# --- Token commands ---
+
+token_verify() {
+  local verify_token="$TOKEN"
+  local source_label="default"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --token)
+        require_option_value "$1" "$#"
+        verify_token="$2"
+        source_label="--token"
+        shift 2
+        ;;
+      --token-file)
+        require_option_value "$1" "$#"
+        [[ -r "$2" ]] || die "cannot read token file: $2"
+        verify_token="$(cat "$2")"
+        source_label="$2"
+        shift 2
+        ;;
+      -*) die "unknown option for token verify: $1" ;;
+      *) die "unexpected argument for token verify: $1" ;;
+    esac
+  done
+
+  [[ -n "$verify_token" ]] || die "no token to verify"
+
+  local result http_code
+  result=$(curl -s -w '\n%{http_code}' -X GET \
+    "$FORGE_URL/api/v1/user" \
+    -H "Authorization: token $verify_token" \
+    -H "Content-Type: application/json")
+  http_code=$(echo "$result" | tail -1)
+  local body
+  body=$(echo "$result" | sed '$d')
+
+  if [[ "$http_code" == "200" ]]; then
+    local login
+    login=$(echo "$body" | jq -r '.login')
+    echo "Token valid: authenticated as $login (source: $source_label)"
+  else
+    echo "Token invalid: HTTP $http_code (source: $source_label)" >&2
+    exit 1
+  fi
+}
+
 # --- Usage ---
 
 usage() {
@@ -835,6 +885,7 @@ Usage: forge [-R owner/repo] <resource> <command> [args]
 Resources:
   pr      Pull requests
   issue   Issues
+  token   Token management
 
 PR commands:
   forge pr list
@@ -853,6 +904,10 @@ PR commands:
       Create a pull request
   forge pr find-by-head <branch>
       Print PR number if an open PR exists for that head branch (empty if none)
+
+Token commands:
+  forge token verify [--token <value> | --token-file <path>]
+      Verify a token against the Forgejo API (default: configured token)
 
 Issue commands:
   forge issue list
@@ -906,6 +961,12 @@ case "$RESOURCE" in
       create) issue_create "$@" ;;
       edit)   issue_edit "$@" ;;
       close)  issue_close "$@" ;;
+      *)      usage; exit 1 ;;
+    esac
+    ;;
+  token)
+    case "$COMMAND" in
+      verify) token_verify "$@" ;;
       *)      usage; exit 1 ;;
     esac
     ;;
