@@ -834,20 +834,25 @@ issue_close() {
 token_verify() {
   local verify_token="$TOKEN"
   local source_desc="configured token"
+  local token_set=false
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --token)
         require_option_value "$1" "$#"
+        [[ "$token_set" == false ]] || die "--token cannot be combined with --token-file"
         verify_token="$2"
         source_desc="provided token"
+        token_set=true
         shift 2
         ;;
       --token-file)
         require_option_value "$1" "$#"
+        [[ "$token_set" == false ]] || die "--token-file cannot be combined with --token"
         [[ -r "$2" ]] || die "cannot read token file: $2"
         verify_token="$(cat "$2")"
         source_desc="$2"
+        token_set=true
         shift 2
         ;;
       -*) die "unknown option for token verify: $1" ;;
@@ -857,18 +862,19 @@ token_verify() {
 
   [[ -n "$verify_token" ]] || die "no token to verify"
 
+  # Does not use api() because we need the HTTP status code to distinguish
+  # 401/403 from other failures; api() passes curl -f which exits on 4xx/5xx.
   local result http_code
   result=$(curl -s -w '\n%{http_code}' -X GET \
     "$FORGE_URL/api/v1/user" \
-    -H "Authorization: token $verify_token" \
-    -H "Content-Type: application/json")
-  http_code=$(echo "$result" | tail -1)
+    -H "Authorization: token $verify_token")
+  http_code=$(printf '%s' "$result" | tail -1)
   local body
-  body=$(echo "$result" | sed '$d')
+  body=$(printf '%s' "$result" | sed '$d')
 
   if [[ "$http_code" == "200" ]]; then
     local login
-    login=$(echo "$body" | jq -r '.login')
+    login=$(printf '%s' "$body" | jq -r '.login')
     echo "Token valid: authenticated as $login ($source_desc)"
   else
     local reason
@@ -886,7 +892,7 @@ token_verify() {
 
 usage() {
   cat <<EOF
-Usage: forge [-R owner/repo] <resource> <command> [args]
+Usage: forge [-R|--repo owner/repo] <resource> <command> [args]
 
 Resources:
   pr      Pull requests

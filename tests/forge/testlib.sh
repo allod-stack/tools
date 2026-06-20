@@ -34,11 +34,19 @@ set -euo pipefail
 method=GET
 url=""
 data=""
+write_out=""
+auth_header=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -X) method="$2"; shift 2 ;;
-    -H) shift 2 ;;
+    -H)
+      case "$2" in
+        Authorization:*) auth_header="$2" ;;
+      esac
+      shift 2
+      ;;
     -d) data="$2"; shift 2 ;;
+    -w) write_out="$2"; shift 2 ;;
     -sf|-fs|-s|-f) shift ;;
     http://*|https://*) url="$1"; shift ;;
     *) echo "unexpected mocked curl argument: $1" >&2; exit 1 ;;
@@ -115,6 +123,15 @@ case "$url" in
     ;;
   */api/v1/repos/acme/gadget/issues)
     printf '%s\n' '{"html_url":"https://forge.example/acme/gadget/issues/21"}'
+    ;;
+  */api/v1/user)
+    if [[ "$auth_header" == *"valid-token"* ]]; then
+      printf '%s' '{"login":"testuser"}'
+      [[ -z "$write_out" ]] || printf '\n200'
+    else
+      printf '%s' '{"message":"Unauthorized"}'
+      [[ -z "$write_out" ]] || printf '\n401'
+    fi
     ;;
   *)
     echo "unexpected mocked URL: $url" >&2
