@@ -1,15 +1,35 @@
 #!/usr/bin/env bash
-# pull-all - checkout default branch and pull every repo under ~/work/
+# pull-all - pull every repo under ~/work/
 #
 # For each repo:
 #   - Skips if working tree is dirty
-#   - Skips if on a non-default branch with unpushed commits
-#   - Checks out default branch if on a different branch (clean, nothing unpushed)
-#   - Pulls and reports what happened
+#   - Pulls the current branch and reports what happened
+#   - With --switch, checks out the default branch first (if safe)
 #
 # All repos are processed in parallel.
+#
+# Options:
+#   --switch  Switch repos on non-default branches to the default
+#                       branch before pulling (skips if unpushed commits exist)
+#   -h, --help          Show this help message
 
 set -euo pipefail
+
+SWITCH_DEFAULT=false
+
+for arg in "$@"; do
+  case "$arg" in
+    --switch) SWITCH_DEFAULT=true ;;
+    -h|--help)
+      sed -n '2,${/^#/!q; s/^# \{0,1\}//; p;}' "$0"
+      exit 0
+      ;;
+    *)
+      printf 'pull-all: unknown option: %s\n' "$arg" >&2
+      exit 1
+      ;;
+  esac
+done
 
 WORK_DIR="${HOME}/work"
 
@@ -37,9 +57,8 @@ process_repo() {
     return
   fi
 
-  # If on a non-default branch, only switch if nothing is unpushed.
-  # No upstream tracking branch → treat as unpushed (safe default).
-  if [[ "$current_branch" != "$default_branch" ]]; then
+  # With --switch, try to check out the default branch first
+  if [[ "$current_branch" != "$default_branch" && "$SWITCH_DEFAULT" == true ]]; then
     if ! git -C "$dir" rev-parse --abbrev-ref "@{u}" >/dev/null 2>&1; then
       printf '  %-24s  skipped    [on %s — no remote tracking branch]\n' "$repo" "$current_branch" > "$outfile"
       return
@@ -58,6 +77,7 @@ process_repo() {
       printf '  %-24s  error      [checkout %s failed]\n' "$repo" "$default_branch" > "$outfile"
       return
     fi
+    current_branch="$default_branch"
   fi
 
   # Pull
@@ -67,9 +87,9 @@ process_repo() {
     return
   }
   if printf '%s' "$pull_out" | grep -q "Already up to date"; then
-    printf '  %-24s  up to date [%s]\n' "$repo" "$default_branch" > "$outfile"
+    printf '  %-24s  up to date [%s]\n' "$repo" "$current_branch" > "$outfile"
   else
-    printf '  %-24s  pulled     [%s]\n' "$repo" "$default_branch" > "$outfile"
+    printf '  %-24s  pulled     [%s]\n' "$repo" "$current_branch" > "$outfile"
   fi
 }
 
