@@ -833,21 +833,21 @@ issue_close() {
 
 token_verify() {
   local verify_token="$TOKEN"
-  local source_label="default"
+  local source_desc="configured token"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --token)
         require_option_value "$1" "$#"
         verify_token="$2"
-        source_label="--token"
+        source_desc="provided token"
         shift 2
         ;;
       --token-file)
         require_option_value "$1" "$#"
         [[ -r "$2" ]] || die "cannot read token file: $2"
         verify_token="$(cat "$2")"
-        source_label="$2"
+        source_desc="$2"
         shift 2
         ;;
       -*) die "unknown option for token verify: $1" ;;
@@ -869,9 +869,15 @@ token_verify() {
   if [[ "$http_code" == "200" ]]; then
     local login
     login=$(echo "$body" | jq -r '.login')
-    echo "Token valid: authenticated as $login (source: $source_label)"
+    echo "Token valid: authenticated as $login ($source_desc)"
   else
-    echo "Token invalid: HTTP $http_code (source: $source_label)" >&2
+    local reason
+    case "$http_code" in
+      401) reason="unauthorized" ;;
+      403) reason="forbidden" ;;
+      *)   reason="HTTP $http_code" ;;
+    esac
+    echo "Token invalid: $reason ($source_desc)" >&2
     exit 1
   fi
 }
