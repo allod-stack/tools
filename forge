@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # forge - Forgejo CLI, like gh but for Forgejo
 #
-# Usage: forge [-R owner/repo] <resource> <command> [args]
+# Usage: forge [-R|--repo owner/repo] <resource> <command> [args]
 #
 # Resources:  pr, issue
 #

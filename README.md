@@ -142,7 +142,7 @@ flake-update-cascade allod-tools --pr
 Forgejo CLI — `gh` but for a self-hosted Forgejo instance.
 
 ```
-forge [-R owner/repo] <resource> <command> [args]
+forge [-R|--repo owner/repo] <resource> <command> [args]
 ```
 
 **Config:**
@@ -152,7 +152,7 @@ forge [-R owner/repo] <resource> <command> [args]
 | `FORGE_URL` | `https://forge.anarch.diy` |
 | `FORGEJO_TOKEN` | read from `~/.config/git/forgejo-token` |
 
-Repo is inferred from `git remote get-url origin` when `-R` is omitted.
+Repo is inferred from `git remote get-url origin` when `-R`/`--repo` is omitted.
 
 **PR commands:**
 
