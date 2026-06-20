@@ -9,18 +9,25 @@ packaged via `pkgs.writeShellApplication` in `profiles` (dev VMs) and
 
 ### `pull-all`
 
-Syncs every git repo under `~/work/` to its default branch.
+Pulls every git repo under `~/work/`. By default, each repo stays on its
+current branch. Use `--switch` to return clean, fully pushed work branches to
+their default branch before pulling.
 
 ```
 pull-all
+pull-all --switch
 ```
 
 For each repo:
 - **Dirty working tree** → skipped with notice
-- **Non-default branch, no remote tracking** → skipped with notice (local-only branch)
-- **Non-default branch, unpushed commits** → skipped with notice
-- **Non-default branch, clean and fully pushed** → auto-checks out default branch, then pulls
-- **Already on default branch** → pulls
+- **Current branch** → pulls and reports whether anything changed
+- **With `--switch`, non-default branch with no remote tracking** → skipped with notice (local-only branch)
+- **With `--switch`, non-default branch with unpushed commits** → skipped with notice
+- **With `--switch`, non-default branch clean and fully pushed** → checks out the default branch, then pulls
+
+Repos are processed in parallel and printed in workspace order.
+
+Example `pull-all --switch` output:
 
 ```
   allod/tools            pulled     [master]
@@ -39,6 +46,7 @@ changes, current branch.
 
 ```
 work-diff                  # all repos
+work-diff --all            # all repos
 work-diff <repo-name>      # single repo
 ```
 
@@ -53,7 +61,7 @@ Shows which flake inputs each repo pins and at what revision.
 ```
 flake-status                           # all inputs, all repos
 flake-status <input-name>              # one input across all repos
-flake-status <input-name> --check-upstream   # compare pins to upstream HEAD
+flake-status <input-name> --upstream   # compare pins to upstream HEAD
 ```
 
 **No args** — full table per repo:
@@ -78,8 +86,10 @@ allod-tools — all repos consistent at 97b57e1 (2026-06-03)
 If repos are out of sync, the header says `INCONSISTENT` and the stale rows are
 marked `← stale`.
 
-**`--check-upstream`** makes a network call to compare local pins against the
-input's remote HEAD. Useful before deciding whether an update is worth running.
+**`--upstream`** makes a network call to compare local pins against the input's
+remote HEAD. In all-inputs mode, stale pins are marked with `→ <rev>` and the
+output suggests `flake-update-cascade` commands for outdated inputs.
+`--check-upstream` remains accepted as a compatibility alias.
 
 ---
 
@@ -110,6 +120,7 @@ invocation, producing at most one commit and one PR per repository.
 - Unpushed commits → error
 - No `flake.lock` → skip with notice
 - Input not present / is a `follows` → skip with notice
+- Listed in `~/.config/git/active-pr-branches` → skip with notice (GPG-signed commits required)
 
 If any repo fails pre-flight, the cascade aborts before touching anything.
 
@@ -147,12 +158,15 @@ forge [-R|--repo owner/repo] <resource> <command> [args]
 
 **Config:**
 
-| Variable | Default |
+| Variable | Meaning |
 |---|---|
-| `FORGE_URL` | `https://forge.anarch.diy` |
-| `FORGEJO_TOKEN` | read from `~/.config/git/forgejo-token` |
+| `FORGE_URL` | Forgejo base URL; defaults to `https://forge.anarch.diy` |
+| `FORGEJO_TOKEN` | Token value; overrides the token file when set |
+| `FORGE_TOKEN_FILE` | Token file path; defaults to `~/.config/git/forgejo-token` |
 
-Repo is inferred from `git remote get-url origin` when `-R`/`--repo` is omitted.
+When `FORGEJO_TOKEN` is unset, `forge` reads the token from `FORGE_TOKEN_FILE`.
+Repo is inferred from `git remote get-url origin` when `-R`/`--repo` is omitted,
+and `-R`/`--repo` may appear before the resource or after the command.
 
 **PR commands:**
 
@@ -172,6 +186,15 @@ forge pr find-by-head <branch>             # print PR number if open PR exists f
 repository's default branch. The `gh` short aliases are also supported:
 `-t`, `-b`, `-F`, `-H`, and `-B`.
 
+**Token commands:**
+
+```bash
+forge token verify [--token <value> | --token-file <path>]
+```
+
+Without flags, `token verify` checks the configured token. Use `--token` or
+`--token-file` to validate a replacement before updating local config.
+
 **Issue commands:**
 
 ```bash
@@ -180,7 +203,7 @@ forge issue view <number>
 forge issue create --title <title> [--body <text> | --body-file <file>]
 forge issue edit <number> [--title <title>] [--body <text> | --body-file <file>]
 forge issue close {<number> | <url>} [--comment <text>] \
-  [--reason completed|"not planned"|duplicate] [--duplicate-of <number-or-url>]
+  [--reason completed|"not planned"|duplicate] [--duplicate-of <issue>]
 ```
 
 Pass `-` to `--body-file` to read from stdin:
@@ -202,7 +225,7 @@ in the closing comment.
 ### Morning sync / getting up to speed
 
 ```bash
-pull-all          # sync all repos to default branch; returns merged PR branches automatically
+pull-all --switch # return clean pushed branches to default, then pull
 work-diff         # see anything still in-flight
 flake-status      # spot pin drift across repos
 ```
@@ -211,7 +234,7 @@ flake-status      # spot pin drift across repos
 
 ```bash
 # 1. Check if an update is available
-flake-status allod-tools --check-upstream
+flake-status allod-tools --upstream
 
 # 2. Preview what would change
 flake-update-cascade allod-tools --dry-run
