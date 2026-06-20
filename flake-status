@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# --- Color support ---
+if [[ -t 1 ]]; then
+  YELLOW=$'\033[33m'
+  RESET=$'\033[0m'
+else
+  YELLOW="" RESET=""
+fi
+
 WORK_DIR="${HOME}/work"
 
 if ! declare -F workspace_collect_repos >/dev/null; then
@@ -12,16 +20,16 @@ mapfile -t REPOS < <(workspace_collect_repos "$WORK_DIR")
 
 usage() {
   cat <<'EOF'
-Usage: flake-status [input-name] [--check-upstream]
+Usage: flake-status [input-name] [--upstream]
 
   (no args)          show all inputs for all repos
   <input-name>       show only that input across all repos
-  --check-upstream   compare pins against upstream remote HEAD (network)
+  --upstream         compare pins against upstream remote HEAD (network)
 
 Examples:
   flake-status
   flake-status vm
-  flake-status nixpkgs --check-upstream
+  flake-status nixpkgs --upstream
 EOF
 }
 
@@ -32,7 +40,7 @@ CHECK_UPSTREAM=false
 
 for arg in "$@"; do
   case "$arg" in
-    --check-upstream) CHECK_UPSTREAM=true ;;
+    --upstream|--check-upstream) CHECK_UPSTREAM=true ;;
     -h|--help) usage; exit 0 ;;
     -*) echo "flake-status: unknown option: $arg" >&2; usage >&2; exit 1 ;;
     *)
@@ -43,6 +51,21 @@ for arg in "$@"; do
       ;;
   esac
 done
+
+# --- Upstream cache ---
+declare -A _LS_REMOTE_CACHE=()
+
+cached_ls_remote() {
+  local url="$1"
+  if [[ -v _LS_REMOTE_CACHE["$url"] ]]; then
+    printf '%s' "${_LS_REMOTE_CACHE[$url]}"
+    return
+  fi
+  local rev
+  rev=$(git ls-remote "$url" HEAD 2>/dev/null | cut -f1 | head -1 || true)
+  _LS_REMOTE_CACHE["$url"]="${rev:-}"
+  printf '%s' "${rev:-}"
+}
 
 # --- jq helpers ---
 
@@ -247,7 +270,7 @@ show_named_input() {
     echo ""
     if [[ -n "$upstream_url" ]]; then
       local upstream_rev=""
-      upstream_rev=$(git ls-remote "$upstream_url" HEAD 2>/dev/null | cut -f1 | head -1 || true)
+      upstream_rev=$(cached_ls_remote "$upstream_url")
       if [[ -n "$upstream_rev" ]]; then
         local short_upstream="${upstream_rev:0:7}"
         if [[ "$majority_rev" == "$short_upstream" ]]; then
@@ -268,6 +291,8 @@ show_named_input() {
 
 show_all_inputs() {
   local first=true
+  declare -A _outdated_local=()
+  declare -A _outdated_external=()
 
   for repo in "${REPOS[@]}"; do
     local dir="${WORK_DIR}/${repo}"
@@ -287,24 +312,41 @@ show_all_inputs() {
     echo "==> ${repo}${health_str}"
 
     while IFS=$'\t' read -r name rev date; do
-      printf '  %-20s  %-7s  %s\n' "$name" "$rev" "$date"
-    done <<< "$inputs"
-
-    if [[ "$CHECK_UPSTREAM" == true ]]; then
-      while IFS=$'\t' read -r name rev _date; do
+      local suffix=""
+      if [[ "$CHECK_UPSTREAM" == true ]]; then
         local url=""
         url=$(get_upstream_url "${dir}/flake.lock" "$name")
-        [[ -z "$url" ]] && continue
-        local urev=""
-        urev=$(git ls-remote "$url" HEAD 2>/dev/null | cut -f1 | head -1 || true)
-        [[ -z "$urev" ]] && continue
-        local short_urev="${urev:0:7}"
-        if [[ "$rev" != "$short_urev" ]]; then
-          printf '  %-20s  upstream: %s (pinned: %s)\n' "$name" "$short_urev" "$rev"
+        if [[ -n "$url" ]]; then
+          local urev=""
+          urev=$(cached_ls_remote "$url")
+          if [[ -n "$urev" ]]; then
+            local short_urev="${urev:0:7}"
+            if [[ "$rev" != "$short_urev" ]]; then
+              suffix="  ${YELLOW}→ ${short_urev}${RESET}"
+              if [[ "$url" == *"forge.anarch.diy"* ]]; then
+                _outdated_local["$name"]=1
+              else
+                _outdated_external["$name"]=1
+              fi
+            fi
+          fi
         fi
-      done <<< "$inputs"
-    fi
+      fi
+      printf '  %-20s  %-7s  %-10s%s\n' "$name" "$rev" "$date" "$suffix"
+    done <<< "$inputs"
   done
+
+  if [[ ${#_outdated_local[@]} -gt 0 || ${#_outdated_external[@]} -gt 0 ]]; then
+    echo ""
+    if [[ ${#_outdated_local[@]} -gt 0 ]]; then
+      echo "Outdated (local):"
+      echo "  flake-update-cascade ${!_outdated_local[*]}"
+    fi
+    if [[ ${#_outdated_external[@]} -gt 0 ]]; then
+      echo "Outdated (external):"
+      echo "  flake-update-cascade ${!_outdated_external[*]}"
+    fi
+  fi
 }
 
 # --- Dispatch ---

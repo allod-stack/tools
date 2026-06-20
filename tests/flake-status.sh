@@ -137,9 +137,13 @@ assert_contains "$output" "gamma                 (not an input)" \
 assert_not_contains "$output" "no-lock" \
   "omits repositories without a lock file"
 
-upstream=$(bash "$ROOT/flake-status" demo --check-upstream)
+upstream=$(bash "$ROOT/flake-status" demo --upstream)
 assert_contains "$upstream" "upstream: ccccccc (local pins are behind)" \
   "reports when local pins are behind upstream"
+
+compat=$(bash "$ROOT/flake-status" demo --check-upstream)
+assert_contains "$compat" "upstream: ccccccc (local pins are behind)" \
+  "--check-upstream still works as alias"
 
 all=$(bash "$ROOT/flake-status")
 assert_contains "$all" "==> alpha" \
@@ -148,6 +152,16 @@ assert_contains "$all" "demo                  aaaaaaa  1970-01-01" \
   "shows direct pins in all-input mode"
 assert_not_contains "$all" "followed" \
   "omits follows inputs from all-input mode"
+
+all_upstream=$(bash "$ROOT/flake-status" --upstream)
+assert_contains "$all_upstream" "→ ccccccc" \
+  "shows upstream arrow inline in all-input mode"
+assert_not_contains "$all_upstream" "upstream:" \
+  "does not show separate upstream rows in all-input mode"
+assert_contains "$all_upstream" "flake-update-cascade demo" \
+  "suggests flake-update-cascade for outdated inputs"
+assert_contains "$all_upstream" "Outdated (external):" \
+  "labels github inputs as external"
 
 help=$(bash "$ROOT/flake-status" --help)
 assert_contains "$help" "Usage: flake-status" "prints usage for --help"
