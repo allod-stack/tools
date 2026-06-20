@@ -141,9 +141,12 @@ upstream=$(bash "$ROOT/flake-status" demo --upstream)
 assert_contains "$upstream" "upstream: ccccccc (local pins are behind)" \
   "reports when local pins are behind upstream"
 
-compat=$(bash "$ROOT/flake-status" demo --check-upstream)
-assert_contains "$compat" "upstream: ccccccc (local pins are behind)" \
-  "--check-upstream still works as alias"
+if output=$(bash "$ROOT/flake-status" demo --check-upstream 2>&1); then
+  fail "rejects the removed --check-upstream alias" \
+    "command unexpectedly succeeded" "$output"
+fi
+assert_contains "$output" "unknown option: --check-upstream" \
+  "rejects the removed --check-upstream alias"
 
 all=$(bash "$ROOT/flake-status")
 assert_contains "$all" "==> alpha" \

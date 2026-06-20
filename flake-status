@@ -40,7 +40,7 @@ CHECK_UPSTREAM=false
 
 for arg in "$@"; do
   case "$arg" in
-    --upstream|--check-upstream) CHECK_UPSTREAM=true ;;
+    --upstream) CHECK_UPSTREAM=true ;;
     -h|--help) usage; exit 0 ;;
     -*) echo "flake-status: unknown option: $arg" >&2; usage >&2; exit 1 ;;
     *)

@@ -89,7 +89,6 @@ marked `← stale`.
 **`--upstream`** makes a network call to compare local pins against the input's
 remote HEAD. In all-inputs mode, stale pins are marked with `→ <rev>` and the
 output suggests `flake-update-cascade` commands for outdated inputs.
-`--check-upstream` remains accepted as a compatibility alias.
 
 ---
 
