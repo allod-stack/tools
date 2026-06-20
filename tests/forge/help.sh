@@ -37,6 +37,19 @@ assert_contains "$output" "--repo" "pr list --help shows --repo flag"
 output=$(run_capture issue view -h)
 assert_contains "$output" "<number>" "issue view -h shows number positional"
 
+output=$(run_capture pr find-by-head --help)
+assert_contains "$output" "<branch>" "pr find-by-head --help shows branch positional"
+
+output=$(run_capture issue edit -h)
+assert_contains "$output" "--title" "issue edit -h shows --title flag"
+assert_contains "$output" "--body-file" "issue edit -h shows --body-file flag"
+
+output=$(run_capture issue list --help)
+assert_contains "$output" "--repo" "issue list --help shows --repo flag"
+
+output=$(run_capture pr review-comments -h)
+assert_contains "$output" "<number>" "pr review-comments -h shows number positional"
+
 # --- Resource-level help exits zero ---
 
 output=$(run_capture pr --help)
