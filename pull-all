@@ -6,6 +6,8 @@
 #   - Skips if on a non-default branch with unpushed commits
 #   - Checks out default branch if on a different branch (clean, nothing unpushed)
 #   - Pulls and reports what happened
+#
+# All repos are processed in parallel.
 
 set -euo pipefail
 
@@ -18,50 +20,70 @@ fi
 
 mapfile -t REPOS < <(workspace_collect_repos "$WORK_DIR")
 
-for repo in "${REPOS[@]}"; do
-  dir="${WORK_DIR}/${repo}"
-  [[ -d "$dir" ]] || continue
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
 
+process_repo() {
+  local repo="$1" dir="$2" outfile="$3"
+
+  local default_branch current_branch
   default_branch=$(workspace_repo_default_branch "$dir")
   current_branch=$(git -C "$dir" branch --show-current 2>/dev/null || true)
 
   # Skip dirty repos
   if ! git -C "$dir" diff --quiet 2>/dev/null || \
      ! git -C "$dir" diff --cached --quiet 2>/dev/null; then
-    printf '  %-24s  skipped    [dirty working tree]\n' "$repo"
-    continue
+    printf '  %-24s  skipped    [dirty working tree]\n' "$repo" > "$outfile"
+    return
   fi
 
   # If on a non-default branch, only switch if nothing is unpushed.
   # No upstream tracking branch → treat as unpushed (safe default).
   if [[ "$current_branch" != "$default_branch" ]]; then
     if ! git -C "$dir" rev-parse --abbrev-ref "@{u}" >/dev/null 2>&1; then
-      printf '  %-24s  skipped    [on %s — no remote tracking branch]\n' "$repo" "$current_branch"
-      continue
+      printf '  %-24s  skipped    [on %s — no remote tracking branch]\n' "$repo" "$current_branch" > "$outfile"
+      return
     fi
+    local unpushed
     unpushed=$(git -C "$dir" rev-list "HEAD...@{u}" --count 2>/dev/null || echo 0)
     if [[ "$unpushed" -gt 0 ]]; then
       if [[ "$unpushed" -eq 1 ]]; then
-        printf '  %-24s  skipped    [on %s — 1 unpushed commit]\n' "$repo" "$current_branch"
+        printf '  %-24s  skipped    [on %s — 1 unpushed commit]\n' "$repo" "$current_branch" > "$outfile"
       else
-        printf '  %-24s  skipped    [on %s — %d unpushed commits]\n' "$repo" "$current_branch" "$unpushed"
+        printf '  %-24s  skipped    [on %s — %d unpushed commits]\n' "$repo" "$current_branch" "$unpushed" > "$outfile"
       fi
-      continue
+      return
     fi
     if ! git -C "$dir" checkout "$default_branch" > /dev/null 2>&1; then
-      printf '  %-24s  error      [checkout %s failed]\n' "$repo" "$default_branch"
-      continue
+      printf '  %-24s  error      [checkout %s failed]\n' "$repo" "$default_branch" > "$outfile"
+      return
     fi
   fi
 
   # Pull
+  local pull_out
   pull_out=$(git -C "$dir" pull 2>&1) || {
-    printf '  %-24s  error      [pull failed: %s]\n' "$repo" "$(printf '%s' "$pull_out" | head -1)"
-    continue
+    printf '  %-24s  error      [pull failed: %s]\n' "$repo" "$(printf '%s' "$pull_out" | head -1)" > "$outfile"
+    return
   }
   if printf '%s' "$pull_out" | grep -q "Already up to date"; then
-    printf '  %-24s  up to date [%s]\n' "$repo" "$default_branch"
+    printf '  %-24s  up to date [%s]\n' "$repo" "$default_branch" > "$outfile"
   else
-    printf '  %-24s  pulled     [%s]\n' "$repo" "$default_branch"
+    printf '  %-24s  pulled     [%s]\n' "$repo" "$default_branch" > "$outfile"
   fi
+}
+
+for i in "${!REPOS[@]}"; do
+  repo="${REPOS[$i]}"
+  dir="${WORK_DIR}/${repo}"
+  [[ -d "$dir" ]] || continue
+
+  process_repo "$repo" "$dir" "$tmpdir/$i" &
+done
+
+wait
+
+# Print results in original repo order
+for i in "${!REPOS[@]}"; do
+  [[ -f "$tmpdir/$i" ]] && cat "$tmpdir/$i"
 done
