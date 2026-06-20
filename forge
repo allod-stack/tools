@@ -99,6 +99,15 @@ die() {
   exit 1
 }
 
+contains_help_flag() {
+  for arg in "$@"; do
+    case "$arg" in
+      -h|--help) return 0 ;;
+    esac
+  done
+  return 1
+}
+
 require_option_value() {
   local option="$1"
   local count="$2"
@@ -195,6 +204,7 @@ api() {
 # --- PR commands ---
 
 pr_list() {
+  contains_help_flag "$@" && { command_usage "pr list"; return; }
   parse_repo_only_args "pr list" "$@"
   require_repo
   local result
@@ -210,6 +220,7 @@ pr_list() {
 }
 
 pr_view() {
+  contains_help_flag "$@" && { command_usage "pr view"; return; }
   parse_repo_positionals "pr view" "$@"
   [[ "${#POSITIONAL_ARGS[@]}" -eq 1 ]] || die "usage: forge pr view <number>"
   require_repo
@@ -269,6 +280,7 @@ pr_view() {
 }
 
 pr_review_comments() {
+  contains_help_flag "$@" && { command_usage "pr review-comments"; return; }
   parse_repo_positionals "pr review-comments" "$@"
   [[ "${#POSITIONAL_ARGS[@]}" -eq 1 ]] || die "usage: forge pr review-comments <number>"
   require_repo
@@ -290,6 +302,7 @@ pr_review_comments() {
 }
 
 pr_edit() {
+  contains_help_flag "$@" && { command_usage "pr edit"; return; }
   local number="" number_set=false
   local title="" title_set=false
   reset_body_option
@@ -344,6 +357,7 @@ pr_edit() {
 }
 
 pr_comment() {
+  contains_help_flag "$@" && { command_usage "pr comment"; return; }
   local number="" number_set=false
   reset_body_option
   while [[ $# -gt 0 ]]; do
@@ -379,6 +393,7 @@ pr_comment() {
 }
 
 pr_reply() {
+  contains_help_flag "$@" && { command_usage "pr reply"; return; }
   local number="" number_set=false
   local comment_id="" comment_id_set=false
   reset_body_option
@@ -454,6 +469,7 @@ pr_reply() {
 }
 
 pr_create() {
+  contains_help_flag "$@" && { command_usage "pr create"; return; }
   local title="" head="" base=""
   local title_set=false head_set=false base_set=false
   reset_body_option
@@ -528,6 +544,7 @@ pr_create() {
 }
 
 pr_find_by_head() {
+  contains_help_flag "$@" && { command_usage "pr find-by-head"; return; }
   parse_repo_positionals "pr find-by-head" "$@"
   [[ "${#POSITIONAL_ARGS[@]}" -eq 1 ]] || die "usage: forge pr find-by-head <branch>"
   require_repo
@@ -540,6 +557,7 @@ pr_find_by_head() {
 # --- Issue commands ---
 
 issue_list() {
+  contains_help_flag "$@" && { command_usage "issue list"; return; }
   parse_repo_only_args "issue list" "$@"
   require_repo
   local result
@@ -555,6 +573,7 @@ issue_list() {
 }
 
 issue_view() {
+  contains_help_flag "$@" && { command_usage "issue view"; return; }
   parse_repo_positionals "issue view" "$@"
   [[ "${#POSITIONAL_ARGS[@]}" -eq 1 ]] || die "usage: forge issue view <number>"
   require_repo
@@ -590,6 +609,7 @@ issue_view() {
 }
 
 issue_create() {
+  contains_help_flag "$@" && { command_usage "issue create"; return; }
   local title="" title_set=false
   reset_body_option
 
@@ -631,6 +651,7 @@ issue_create() {
 }
 
 issue_edit() {
+  contains_help_flag "$@" && { command_usage "issue edit"; return; }
   local number="" number_set=false
   local title="" title_set=false
   reset_body_option
@@ -734,6 +755,7 @@ normalize_issue_reference() {
 }
 
 issue_close() {
+  contains_help_flag "$@" && { command_usage "issue close"; return; }
   local target="" target_set=false
   local comment="" reason="" duplicate_of=""
   local comment_set=false reason_set=false duplicate_set=false
@@ -890,6 +912,149 @@ token_verify() {
 
 # --- Usage ---
 
+command_usage() {
+  case "$1" in
+    "pr list") cat <<'USAGE'
+Usage: forge pr list [-R <owner/repo>]
+
+List open pull requests.
+
+Flags:
+  -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
+USAGE
+      ;;
+    "pr view") cat <<'USAGE'
+Usage: forge pr view <number> [-R <owner/repo>]
+
+Show PR details and comments.
+
+Flags:
+  -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
+USAGE
+      ;;
+    "pr review-comments") cat <<'USAGE'
+Usage: forge pr review-comments <number> [-R <owner/repo>]
+
+List inline review comments with IDs (for use with reply).
+
+Flags:
+  -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
+USAGE
+      ;;
+    "pr find-by-head") cat <<'USAGE'
+Usage: forge pr find-by-head <branch> [-R <owner/repo>]
+
+Print PR number if an open PR exists for that head branch (empty if none).
+
+Flags:
+  -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
+USAGE
+      ;;
+    "pr create") cat <<'USAGE'
+Usage: forge pr create -t <title> [-H <branch>] [-B <branch>] [-b <text> | -F <file>] [-R <owner/repo>]
+
+Create a pull request.
+
+Flags:
+  -t, --title <text>        PR title (required)
+  -H, --head <branch>       Head branch (default: current branch)
+  -B, --base <branch>       Base branch (default: repository default)
+  -b, --body <text>         Set body text
+  -F, --body-file <file>    Read body from file (use "-" for stdin)
+  -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
+USAGE
+      ;;
+    "pr edit") cat <<'USAGE'
+Usage: forge pr edit <number> [-t <title>] [-b <text> | -F <file>] [-R <owner/repo>]
+
+Update PR title and/or description.
+
+Flags:
+  -t, --title <text>        New title
+  -b, --body <text>         New body text
+  -F, --body-file <file>    Read body from file (use "-" for stdin)
+  -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
+USAGE
+      ;;
+    "pr comment") cat <<'USAGE'
+Usage: forge pr comment <number> [-b <text> | -F <file>] [-R <owner/repo>]
+
+Post a comment on a pull request.
+
+Flags:
+  -b, --body <text>         Comment body
+  -F, --body-file <file>    Read body from file (use "-" for stdin)
+  -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
+USAGE
+      ;;
+    "pr reply") cat <<'USAGE'
+Usage: forge pr reply <number> <comment-id> [-b <text> | -F <file>] [-R <owner/repo>]
+
+Reply to an inline review comment thread.
+
+Flags:
+  -b, --body <text>         Reply body
+  -F, --body-file <file>    Read body from file (use "-" for stdin)
+  -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
+USAGE
+      ;;
+    "issue list") cat <<'USAGE'
+Usage: forge issue list [-R <owner/repo>]
+
+List open issues.
+
+Flags:
+  -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
+USAGE
+      ;;
+    "issue view") cat <<'USAGE'
+Usage: forge issue view <number> [-R <owner/repo>]
+
+Show issue details and comments.
+
+Flags:
+  -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
+USAGE
+      ;;
+    "issue create") cat <<'USAGE'
+Usage: forge issue create -t <title> [-b <text> | -F <file>] [-R <owner/repo>]
+
+Create an issue.
+
+Flags:
+  -t, --title <text>        Issue title (required)
+  -b, --body <text>         Set body text
+  -F, --body-file <file>    Read body from file (use "-" for stdin)
+  -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
+USAGE
+      ;;
+    "issue edit") cat <<'USAGE'
+Usage: forge issue edit <number> [-t <title>] [-b <text> | -F <file>] [-R <owner/repo>]
+
+Update issue title and/or description.
+
+Flags:
+  -t, --title <text>        New title
+  -b, --body <text>         New body text
+  -F, --body-file <file>    Read body from file (use "-" for stdin)
+  -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
+USAGE
+      ;;
+    "issue close") cat <<'USAGE'
+Usage: forge issue close {<number> | <url>} [-c <text>] [-r <reason>] [--duplicate-of <issue>] [-R <owner/repo>]
+
+Close an issue.
+
+Flags:
+  -c, --comment <text>      Leave a closing comment
+  -r, --reason <reason>     Closing reason: completed, not planned, duplicate
+      --duplicate-of <issue>  Mark as a duplicate of another issue
+  -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
+USAGE
+      ;;
+  esac
+}
+
 usage() {
   cat <<EOF
 Usage: forge [-R|--repo owner/repo] <resource> <command> [args]
@@ -963,6 +1128,7 @@ case "$RESOURCE" in
       comment) pr_comment "$@" ;;
       create)  pr_create "$@" ;;
       find-by-head) pr_find_by_head "$@" ;;
+      -h|--help)    usage ;;
       *)            usage; exit 1 ;;
     esac
     ;;
@@ -973,6 +1139,7 @@ case "$RESOURCE" in
       create) issue_create "$@" ;;
       edit)   issue_edit "$@" ;;
       close)  issue_close "$@" ;;
+      -h|--help) usage ;;
       *)      usage; exit 1 ;;
     esac
     ;;
