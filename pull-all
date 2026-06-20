@@ -85,5 +85,9 @@ wait
 
 # Print results in original repo order
 for i in "${!REPOS[@]}"; do
-  [[ -f "$tmpdir/$i" ]] && cat "$tmpdir/$i"
+  if [[ -f "$tmpdir/$i" ]]; then
+    cat "$tmpdir/$i"
+  elif [[ -d "${WORK_DIR}/${REPOS[$i]}" ]]; then
+    printf '  %-24s  error      [unexpected failure]\n' "${REPOS[$i]}"
+  fi
 done
