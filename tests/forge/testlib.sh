@@ -36,13 +36,22 @@ url=""
 data=""
 write_out=""
 auth_header=""
+config_stdin=false
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -X) method="$2"; shift 2 ;;
     -H)
       case "$2" in
-        Authorization:*) auth_header="$2" ;;
+        Authorization:*)
+          echo "SECURITY: Authorization header passed in argv" >&2
+          exit 99
+          ;;
       esac
+      shift 2
+      ;;
+    --config)
+      [[ "$2" == "-" ]] && config_stdin=true
       shift 2
       ;;
     -d) data="$2"; shift 2 ;;
@@ -52,6 +61,17 @@ while [[ $# -gt 0 ]]; do
     *) echo "unexpected mocked curl argument: $1" >&2; exit 1 ;;
   esac
 done
+
+if [[ "$config_stdin" == true ]]; then
+  while IFS= read -r line; do
+    case "$line" in
+      header\ =\ \"Authorization:*)
+        auth_header="${line#header = \"}"
+        auth_header="${auth_header%\"}"
+        ;;
+    esac
+  done
+fi
 
 count_file="$MOCK_REQUEST_DIR/count"
 count=0

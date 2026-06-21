@@ -3,10 +3,13 @@
 #
 # Usage: forge [-R|--repo owner/repo] <resource> <command> [args]
 #
-# Resources:  pr, issue, token
+# Resources:  pr, issue, token, auth
+#
+# auth commands:
+#   forge auth status                           Check configured credentials
 #
 # token commands:
-#   forge token verify [flags]                  Verify a Forgejo token
+#   forge token verify                          Verify a candidate token from stdin
 #
 # pr commands:
 #   forge pr list                              List open pull requests
@@ -26,7 +29,8 @@
 #
 # Config (env vars):
 #   FORGE_URL          Base URL of Forgejo instance (default: https://forge.anarch.diy)
-#   FORGEJO_TOKEN      API token (default: read from ~/.config/git/forgejo-token)
+#   FORGEJO_TOKEN      API token (takes precedence over token file)
+#   FORGE_TOKEN_FILE   Path to token file (default: ~/.config/git/forgejo-token)
 
 set -euo pipefail
 
@@ -46,14 +50,21 @@ fi
 
 # --- Auth ---
 
-if [ -n "${FORGEJO_TOKEN:-}" ]; then
-  TOKEN="$FORGEJO_TOKEN"
-elif [ -r "$FORGE_TOKEN_FILE" ]; then
-  TOKEN="$(cat "$FORGE_TOKEN_FILE")"
-else
-  echo "forge: no token found — set FORGEJO_TOKEN or ensure $FORGE_TOKEN_FILE exists" >&2
-  exit 1
-fi
+TOKEN=""
+TOKEN_LOADED=false
+
+load_token() {
+  [[ "$TOKEN_LOADED" == false ]] || return 0
+  if [ -n "${FORGEJO_TOKEN:-}" ]; then
+    TOKEN="$FORGEJO_TOKEN"
+  elif [ -r "$FORGE_TOKEN_FILE" ]; then
+    TOKEN="$(cat "$FORGE_TOKEN_FILE")"
+  else
+    echo "forge: no token found — set FORGEJO_TOKEN or ensure $FORGE_TOKEN_FILE exists" >&2
+    exit 1
+  fi
+  TOKEN_LOADED=true
+}
 
 # --- Repo inference ---
 
@@ -192,13 +203,15 @@ set_body_option() {
 # --- API helper ---
 
 api() {
+  load_token
   local method="$1"; shift
   local path="$1"; shift
-  curl -sf -X "$method" \
-    "$FORGE_URL/api/v1$path" \
-    -H "Authorization: token $TOKEN" \
-    -H "Content-Type: application/json" \
-    "$@"
+  printf 'header = "Authorization: token %s"\n' "$TOKEN" | \
+    curl -sf -X "$method" \
+      "$FORGE_URL/api/v1$path" \
+      --config - \
+      -H "Content-Type: application/json" \
+      "$@"
 }
 
 # --- PR commands ---
@@ -854,42 +867,25 @@ issue_close() {
 # --- Token commands ---
 
 token_verify() {
-  local verify_token="$TOKEN"
-  local source_desc="configured token"
-  local token_set=false
-
+  contains_help_flag "$@" && { command_usage "token verify"; return; }
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --token)
-        require_option_value "$1" "$#"
-        [[ "$token_set" == false ]] || die "--token cannot be combined with --token-file"
-        verify_token="$2"
-        source_desc="provided token"
-        token_set=true
-        shift 2
-        ;;
-      --token-file)
-        require_option_value "$1" "$#"
-        [[ "$token_set" == false ]] || die "--token-file cannot be combined with --token"
-        [[ -r "$2" ]] || die "cannot read token file: $2"
-        verify_token="$(cat "$2")"
-        source_desc="$2"
-        token_set=true
-        shift 2
-        ;;
+      --token|--token-file) die "token verify reads from stdin; $1 is not supported" ;;
       -*) die "unknown option for token verify: $1" ;;
       *) die "unexpected argument for token verify: $1" ;;
     esac
   done
 
-  [[ -n "$verify_token" ]] || die "no token to verify"
+  local verify_token
+  verify_token=$(cat)
+  verify_token="${verify_token%$'\n'}"
+  [[ -n "$verify_token" ]] || die "no token on stdin"
 
-  # Does not use api() because we need the HTTP status code to distinguish
-  # 401/403 from other failures; api() passes curl -f which exits on 4xx/5xx.
   local result http_code
-  result=$(curl -s -w '\n%{http_code}' -X GET \
-    "$FORGE_URL/api/v1/user" \
-    -H "Authorization: token $verify_token")
+  result=$(printf 'header = "Authorization: token %s"\n' "$verify_token" | \
+    curl -s -w '\n%{http_code}' -X GET \
+      "$FORGE_URL/api/v1/user" \
+      --config -)
   http_code=$(printf '%s' "$result" | tail -1)
   local body
   body=$(printf '%s' "$result" | sed '$d')
@@ -897,7 +893,7 @@ token_verify() {
   if [[ "$http_code" == "200" ]]; then
     local login
     login=$(printf '%s' "$body" | jq -r '.login')
-    echo "Token valid: authenticated as $login ($source_desc)"
+    echo "Token valid: authenticated as $login"
   else
     local reason
     case "$http_code" in
@@ -905,7 +901,52 @@ token_verify() {
       403) reason="forbidden" ;;
       *)   reason="HTTP $http_code" ;;
     esac
-    echo "Token invalid: $reason ($source_desc)" >&2
+    echo "Token invalid: $reason" >&2
+    exit 1
+  fi
+}
+
+# --- Auth commands ---
+
+auth_status() {
+  contains_help_flag "$@" && { command_usage "auth status"; return; }
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --token|--token-file|--show-token) die "auth status does not accept $1" ;;
+      -*) die "unknown option for auth status: $1" ;;
+      *) die "unexpected argument for auth status: $1" ;;
+    esac
+  done
+
+  load_token
+  local source_desc
+  if [ -n "${FORGEJO_TOKEN:-}" ]; then
+    source_desc="FORGEJO_TOKEN"
+  else
+    source_desc="$FORGE_TOKEN_FILE"
+  fi
+
+  local result http_code
+  result=$(printf 'header = "Authorization: token %s"\n' "$TOKEN" | \
+    curl -s -w '\n%{http_code}' -X GET \
+      "$FORGE_URL/api/v1/user" \
+      --config -)
+  http_code=$(printf '%s' "$result" | tail -1)
+  local body
+  body=$(printf '%s' "$result" | sed '$d')
+
+  if [[ "$http_code" == "200" ]]; then
+    local login
+    login=$(printf '%s' "$body" | jq -r '.login')
+    echo "Authenticated as $login ($source_desc)"
+  else
+    local reason
+    case "$http_code" in
+      401) reason="unauthorized" ;;
+      403) reason="forbidden" ;;
+      *)   reason="HTTP $http_code" ;;
+    esac
+    echo "Authentication failed: $reason ($source_desc)" >&2
     exit 1
   fi
 }
@@ -1052,6 +1093,23 @@ Flags:
   -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
 USAGE
       ;;
+    "token verify") cat <<'USAGE'
+Usage: producer | forge token verify
+
+Verify a candidate token read from stdin against the Forgejo API.
+Does not use the configured token — stdin is the only input.
+
+Example:
+  extract-token-safely | forge token verify
+USAGE
+      ;;
+    "auth status") cat <<'USAGE'
+Usage: forge auth status
+
+Check whether the configured credential source (FORGEJO_TOKEN env var
+or token file) is valid. Does not print or expose token material.
+USAGE
+      ;;
   esac
 }
 
@@ -1062,7 +1120,8 @@ Usage: forge [-R|--repo owner/repo] <resource> <command> [args]
 Resources:
   pr      Pull requests
   issue   Issues
-  token   Token management
+  auth    Credential status
+  token   Candidate token verification
 
 PR commands:
   forge pr list
@@ -1082,9 +1141,13 @@ PR commands:
   forge pr find-by-head <branch>
       Print PR number if an open PR exists for that head branch (empty if none)
 
+Auth commands:
+  forge auth status
+      Check configured credentials (FORGEJO_TOKEN or token file)
+
 Token commands:
-  forge token verify [--token <value> | --token-file <path>]
-      Verify a token against the Forgejo API (default: configured token)
+  forge token verify
+      Verify a candidate token read from stdin
 
 Issue commands:
   forge issue list
@@ -1110,8 +1173,9 @@ Flags:
       --duplicate-of <issue>  Mark the closing comment as a duplicate
 
 Config:
-  FORGE_URL       Forgejo base URL (default: https://forge.anarch.diy)
-  FORGEJO_TOKEN   API token (default: ~/.config/git/forgejo-token)
+  FORGE_URL          Forgejo base URL (default: https://forge.anarch.diy)
+  FORGEJO_TOKEN      API token (takes precedence over token file)
+  FORGE_TOKEN_FILE   Path to token file (default: ~/.config/git/forgejo-token)
 EOF
 }
 
@@ -1146,6 +1210,15 @@ case "$RESOURCE" in
   token)
     case "$COMMAND" in
       verify) token_verify "$@" ;;
+      -h|--help) usage ;;
+      *)      usage; exit 1 ;;
+    esac
+    ;;
+  auth)
+    case "$COMMAND" in
+      status) auth_status "$@" ;;
+      token) die "auth token is not a command; use 'forge auth status' to check credentials" ;;
+      -h|--help) usage ;;
       *)      usage; exit 1 ;;
     esac
     ;;

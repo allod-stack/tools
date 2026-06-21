@@ -1,69 +1,44 @@
 #!/usr/bin/env bash
 source "$(dirname "${BASH_SOURCE[0]}")/testlib.sh"
 
-# --- token verify: default token (valid) ---
+# --- token verify: stdin valid token ---
 
 reset_requests
-export FORGEJO_TOKEN=valid-token
-output=$(run_capture token verify)
-assert_contains "$output" "authenticated as testuser" "reports authenticated user"
-assert_contains "$output" "configured token" "shows default source"
+export FORGEJO_TOKEN=test-token
+output=$(printf 'valid-token' | run_capture token verify)
+assert_contains "$output" "authenticated as testuser" "stdin valid token reports user"
+assert_contains "$output" "Token valid" "stdin valid token shows success"
 assert_request 1 GET "/api/v1/user" "requests user endpoint"
 
-# --- token verify: default token (invalid) ---
+# --- token verify: stdin invalid token ---
 
 reset_requests
-export FORGEJO_TOKEN=bad-token
-output=$(run_capture token verify 2>&1) || true
-assert_contains "$output" "Token invalid" "reports invalid token"
-assert_contains "$output" "unauthorized" "shows reason"
+output=$(printf 'bad-token' | run_capture token verify 2>&1) || true
+assert_contains "$output" "Token invalid" "stdin invalid token reports failure"
+assert_contains "$output" "unauthorized" "stdin invalid token shows reason"
 
-# --- token verify: --token flag (valid) ---
-
-reset_requests
-export FORGEJO_TOKEN=bad-token
-output=$(run_capture token verify --token valid-token)
-assert_contains "$output" "authenticated as testuser" "--token overrides default"
-assert_contains "$output" "provided token" "--token shows source as provided"
-
-# --- token verify: --token flag (invalid) ---
+# --- token verify: no stdin ---
 
 reset_requests
-export FORGEJO_TOKEN=valid-token
-output=$(run_capture token verify --token bad-token 2>&1) || true
-assert_contains "$output" "Token invalid" "--token with bad value fails"
+output=$(printf '' | run_capture token verify 2>&1) || true
+assert_contains "$output" "no token on stdin" "empty stdin gives clear error"
 
-# --- token verify: --token-file flag ---
-
-reset_requests
-token_file="$TMP/test-token"
-printf '%s' "valid-token" > "$token_file"
-output=$(run_capture token verify --token-file "$token_file")
-assert_contains "$output" "authenticated as testuser" "--token-file verifies token from file"
-assert_contains "$output" "$token_file" "--token-file shows file path as source"
-
-# --- token verify: --token-file with invalid token ---
+# --- token verify: rejects --token ---
 
 reset_requests
-printf '%s' "bad-token" > "$token_file"
-output=$(run_capture token verify --token-file "$token_file" 2>&1) || true
-assert_contains "$output" "Token invalid" "--token-file with bad token fails"
+output=$(run_capture token verify --token foo 2>&1) || true
+assert_contains "$output" "not supported" "rejects --token flag"
 
-# --- token verify: --token-file with missing file ---
-
-reset_requests
-output=$(run_capture token verify --token-file /nonexistent 2>&1) || true
-assert_contains "$output" "cannot read token file" "missing file gives clear error"
-
-# --- token verify: mutual exclusion ---
+# --- token verify: rejects --token-file ---
 
 reset_requests
-output=$(run_capture token verify --token foo --token-file /dev/null 2>&1) || true
-assert_contains "$output" "cannot be combined" "rejects --token with --token-file"
+output=$(run_capture token verify --token-file /dev/null 2>&1) || true
+assert_contains "$output" "not supported" "rejects --token-file flag"
+
+# --- token verify: strips trailing newline from stdin ---
 
 reset_requests
-printf '%s' "valid-token" > "$token_file"
-output=$(run_capture token verify --token-file "$token_file" --token foo 2>&1) || true
-assert_contains "$output" "cannot be combined" "rejects --token-file with --token"
+output=$(printf 'valid-token\n' | run_capture token verify)
+assert_contains "$output" "authenticated as testuser" "handles trailing newline"
 
 finish_tests "token"
