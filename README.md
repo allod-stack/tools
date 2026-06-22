@@ -214,6 +214,15 @@ read -rs tok; printf '%s' "$tok" | forge token verify
 pass show forgejo/token | forge token verify
 ```
 
+**Departures from `gh`:** `gh` has no equivalent of `token verify`. Token
+rotation with `gh` requires either blindly replacing the stored credential
+(`gh auth login --with-token`) or manually verifying with `curl` after
+extracting the raw token via `gh auth token`. forge separates verification
+from installation so you can validate a candidate token before committing to
+it, without exposing the live credential. forge also has no `auth token`
+(print the raw token) or `auth login` commands — token material is never
+printed to stdout or accepted as a command-line argument.
+
 **Issue commands:**
 
 ```bash
