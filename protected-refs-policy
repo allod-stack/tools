@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo="$(git rev-parse --show-toplevel)"
+hook="${1:?missing hook name}"
+shift
+protected_branches_file="$HOME/.config/git/protected-branches"
+signing_required_branches_file="$HOME/.config/git/signing-required-branches"
+active_pr_branches_file="$HOME/.config/git/active-pr-branches"
+allowed_external_remotes_file="$HOME/.config/git/allowed-external-remotes"
+
+hook_stdin=""
+if [ "$hook" = "pre-push" ]; then
+  hook_stdin="$(mktemp)"
+  trap 'rm -f "$hook_stdin"' EXIT
+  cat > "$hook_stdin"
+fi
+
+is_protected_branch() {
+  branch="$1"
+  repo_relative="${repo#"$HOME"/}"
+
+  [ -n "$branch" ] || return 1
+  [ -r "$protected_branches_file" ] || return 1
+
+  awk -v repo="$repo_relative" -v branch="$branch" '
+    /^[[:space:]]*(#|$)/ { next }
+    $1 == repo && $2 == branch { found = 1 }
+    END { exit found ? 0 : 1 }
+  ' "$protected_branches_file"
+}
+
+is_signing_required_branch() {
+  branch="$1"
+  repo_relative="${repo#"$HOME"/}"
+
+  [ -n "$branch" ] || return 1
+  [ -r "$signing_required_branches_file" ] || return 1
+
+  awk -v repo="$repo_relative" -v branch="$branch" '
+    /^[[:space:]]*(#|$)/ { next }
+    $1 == repo && $2 == branch { found = 1 }
+    END { exit found ? 0 : 1 }
+  ' "$signing_required_branches_file"
+}
+
+is_active_pr_branch() {
+  remote_url="$1"
+  branch="$2"
+  [ -r "$active_pr_branches_file" ] || return 1
+  while IFS= read -r line; do
+    case "$line" in \#*|"") continue ;; esac
+    pattern="${line%% *}"
+    br="${line##* }"
+    case "$remote_url" in *"$pattern"*) ;; *) continue ;; esac
+    [ "$br" = "$branch" ] && return 0
+  done < "$active_pr_branches_file"
+  return 1
+}
+
+is_allowed_external_remote() {
+  remote_url="$1"
+  # Personal forge is always allowed
+  case "$remote_url" in *forge.anarch.diy*) return 0 ;; esac
+  [ -r "$allowed_external_remotes_file" ] || return 1
+  while IFS= read -r pattern; do
+    case "$pattern" in \#*|"") continue ;; esac
+    case "$remote_url" in *"$pattern"*) return 0 ;; esac
+  done < "$allowed_external_remotes_file"
+  return 1
+}
+
+require_signed_push() {
+  sha="$1"
+  branch="$2"
+
+  if [ "${ALLOW_PROTECTED_REF:-}" = "1" ]; then
+    return 0
+  fi
+
+  if ! git verify-commit "$sha" 2>/dev/null; then
+    echo "ERROR: Commits on '$branch' must be GPG-signed." >&2
+    exit 1
+  fi
+}
+
+branch_from_ref() {
+  case "$1" in
+    refs/heads/*) printf '%s\n' "${1#refs/heads/}" ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
+require_override() {
+  action="$1"
+  branch="$2"
+
+  if [ "${ALLOW_PROTECTED_REF:-}" = "1" ]; then
+    return 0
+  fi
+
+  echo "ERROR: '$action' is not permitted on protected branch '$branch'." >&2
+  exit 1
+}
+
+run_repo_hook() {
+  repo_hook="$repo/.git/hooks/$hook"
+  if [ -x "$repo_hook" ]; then
+    if [ -n "$hook_stdin" ]; then
+      "$repo_hook" "$@" < "$hook_stdin"
+    else
+      "$repo_hook" "$@"
+    fi
+  fi
+}
+
+run_cdk_tracked_hook() {
+  case "$hook" in
+    pre-commit)
+      cdk_hook="$repo/misc/git-hooks/pre-commit"
+      if [ "$repo" = "$HOME/work/cdk" ] && [ -x "$cdk_hook" ]; then
+        "$cdk_hook" "$@"
+      fi
+      ;;
+  esac
+}
+
+case "$hook" in
+  pre-commit)
+    branch="$(git branch --show-current)"
+    if is_protected_branch "$branch"; then
+      require_override "commit on" "$branch"
+    fi
+    ;;
+  pre-rebase)
+    branch="${2:-$(git branch --show-current)}"
+    if is_protected_branch "$branch"; then
+      require_override "rebase" "$branch"
+    fi
+    ;;
+  pre-merge-commit)
+    branch="$(git branch --show-current)"
+    if is_protected_branch "$branch"; then
+      require_override "merge into" "$branch"
+    fi
+    ;;
+  pre-push)
+    remote_url="${2:-}"
+
+    if ! is_allowed_external_remote "$remote_url" && [ "${ALLOW_PROTECTED_REF:-}" != "1" ]; then
+      echo "ERROR: Push to '$remote_url' is not authorized." >&2
+      exit 1
+    fi
+
+    while read -r local_ref local_sha remote_ref remote_sha; do
+      local_branch="$(branch_from_ref "$local_ref")"
+      remote_branch="$(branch_from_ref "$remote_ref")"
+
+      if is_protected_branch "$local_branch"; then
+        require_override "push from" "$local_branch"
+      fi
+
+      if is_protected_branch "$remote_branch"; then
+        require_override "push to" "$remote_branch"
+      fi
+
+      if is_signing_required_branch "$remote_branch"; then
+        require_signed_push "$local_sha" "$remote_branch"
+      fi
+
+      if is_active_pr_branch "$remote_url" "$remote_branch"; then
+        require_signed_push "$local_sha" "$remote_branch"
+      fi
+    done < "$hook_stdin"
+    ;;
+esac
+
+run_cdk_tracked_hook "$@"
+run_repo_hook "$@"
