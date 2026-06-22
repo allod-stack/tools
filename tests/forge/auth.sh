@@ -62,7 +62,27 @@ assert_contains "$output" "does not accept" "rejects --show-token flag"
 # --- negative: no auth token command ---
 
 reset_requests
-output=$(run_capture auth token 2>&1) || true
+if output=$(run_capture auth token 2>&1); then
+  fail "auth token exits non-zero" "command unexpectedly succeeded"
+else
+  pass "auth token exits non-zero"
+fi
 assert_contains "$output" "not a command" "auth token is not a command"
+
+# --- auth status: rejects token with newline in configured credential ---
+
+reset_requests
+export FORGEJO_TOKEN=$'valid\ninjection'
+output=$(run_capture auth status 2>&1) || true
+assert_contains "$output" "invalid characters" "rejects configured token with newline"
+export FORGEJO_TOKEN=test-token
+
+# --- auth status: strips carriage return from configured token ---
+
+reset_requests
+export FORGEJO_TOKEN=$'valid-token\r'
+output=$(run_capture auth status)
+assert_contains "$output" "Authenticated as testuser" "strips carriage return from env var"
+export FORGEJO_TOKEN=test-token
 
 finish_tests "auth"

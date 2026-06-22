@@ -53,12 +53,23 @@ fi
 TOKEN=""
 TOKEN_LOADED=false
 
+validate_token() {
+  local token="$1" source="$2"
+  token="${token%$'\r'}"
+  if [[ "$token" == *$'\n'* || "$token" == *'"'* || "$token" == *\\* ]]; then
+    echo "forge: $source contains invalid characters (newline, quote, or backslash)" >&2
+    exit 1
+  fi
+  [[ -n "$token" ]] || { echo "forge: $source is empty" >&2; exit 1; }
+  printf '%s' "$token"
+}
+
 load_token() {
   [[ "$TOKEN_LOADED" == false ]] || return 0
   if [ -n "${FORGEJO_TOKEN:-}" ]; then
-    TOKEN="$FORGEJO_TOKEN"
+    TOKEN=$(validate_token "$FORGEJO_TOKEN" "FORGEJO_TOKEN")
   elif [ -r "$FORGE_TOKEN_FILE" ]; then
-    TOKEN="$(cat "$FORGE_TOKEN_FILE")"
+    TOKEN=$(validate_token "$(cat "$FORGE_TOKEN_FILE")" "$FORGE_TOKEN_FILE")
   else
     echo "forge: no token found — set FORGEJO_TOKEN or ensure $FORGE_TOKEN_FILE exists" >&2
     exit 1
@@ -865,6 +876,22 @@ issue_close() {
 
 # --- Token commands ---
 
+verify_token_http() {
+  local token="$1"
+  local result http_code
+  result=$(curl -s -w '\n%{http_code}' -X GET \
+    "$FORGE_URL/api/v1/user" \
+    --config <(printf 'header = "Authorization: token %s"\n' "$token"))
+  http_code=$(printf '%s' "$result" | tail -1)
+  local body
+  body=$(printf '%s' "$result" | sed '$d')
+  VERIFY_HTTP_CODE="$http_code"
+  VERIFY_LOGIN=""
+  if [[ "$http_code" == "200" ]]; then
+    VERIFY_LOGIN=$(printf '%s' "$body" | jq -r '.login')
+  fi
+}
+
 token_verify() {
   contains_help_flag "$@" && { command_usage "token verify"; return; }
   while [[ $# -gt 0 ]]; do
@@ -878,28 +905,17 @@ token_verify() {
   [[ ! -t 0 ]] || die "token verify reads from stdin; pipe a token to it"
 
   local verify_token
-  verify_token=$(cat)
-  verify_token="${verify_token%$'\n'}"
-  [[ -n "$verify_token" ]] || die "no token on stdin"
+  verify_token=$(validate_token "$(cat)" "stdin")
 
-  local result http_code
-  result=$(curl -s -w '\n%{http_code}' -X GET \
-    "$FORGE_URL/api/v1/user" \
-    --config <(printf 'header = "Authorization: token %s"\n' "$verify_token"))
-  http_code=$(printf '%s' "$result" | tail -1)
-  local body
-  body=$(printf '%s' "$result" | sed '$d')
-
-  if [[ "$http_code" == "200" ]]; then
-    local login
-    login=$(printf '%s' "$body" | jq -r '.login')
-    echo "Token valid: authenticated as $login"
+  verify_token_http "$verify_token"
+  if [[ "$VERIFY_HTTP_CODE" == "200" ]]; then
+    echo "Token valid: authenticated as $VERIFY_LOGIN"
   else
     local reason
-    case "$http_code" in
+    case "$VERIFY_HTTP_CODE" in
       401) reason="unauthorized" ;;
       403) reason="forbidden" ;;
-      *)   reason="HTTP $http_code" ;;
+      *)   reason="HTTP $VERIFY_HTTP_CODE" ;;
     esac
     echo "Token invalid: $reason" >&2
     exit 1
@@ -926,24 +942,15 @@ auth_status() {
     source_desc="$FORGE_TOKEN_FILE"
   fi
 
-  local result http_code
-  result=$(curl -s -w '\n%{http_code}' -X GET \
-    "$FORGE_URL/api/v1/user" \
-    --config <(printf 'header = "Authorization: token %s"\n' "$TOKEN"))
-  http_code=$(printf '%s' "$result" | tail -1)
-  local body
-  body=$(printf '%s' "$result" | sed '$d')
-
-  if [[ "$http_code" == "200" ]]; then
-    local login
-    login=$(printf '%s' "$body" | jq -r '.login')
-    echo "Authenticated as $login ($source_desc)"
+  verify_token_http "$TOKEN"
+  if [[ "$VERIFY_HTTP_CODE" == "200" ]]; then
+    echo "Authenticated as $VERIFY_LOGIN ($source_desc)"
   else
     local reason
-    case "$http_code" in
+    case "$VERIFY_HTTP_CODE" in
       401) reason="unauthorized" ;;
       403) reason="forbidden" ;;
-      *)   reason="HTTP $http_code" ;;
+      *)   reason="HTTP $VERIFY_HTTP_CODE" ;;
     esac
     echo "Authentication failed: $reason ($source_desc)" >&2
     exit 1

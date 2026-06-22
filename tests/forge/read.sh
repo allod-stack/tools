@@ -7,6 +7,7 @@ assert_contains "$output" "Improve tool" "lists an open pull request"
 assert_contains "$output" "acme:topic → master" "shows pull request branches"
 assert_request 1 GET "/api/v1/repos/acme/widget/pulls?state=open&limit=50" \
   "requests open pull requests"
+assert_auth 1 "test-token" "transmits auth header on normal API call"
 
 reset_requests
 output=$(run_capture -R acme/widget pr view 12)

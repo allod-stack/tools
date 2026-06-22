@@ -81,6 +81,15 @@ printf '%s' "$count" > "$count_file"
 printf '%s' "$method" > "$MOCK_REQUEST_DIR/$count.method"
 printf '%s' "$url" > "$MOCK_REQUEST_DIR/$count.url"
 printf '%s' "$data" > "$MOCK_REQUEST_DIR/$count.data"
+printf '%s' "$auth_header" > "$MOCK_REQUEST_DIR/$count.auth"
+
+# Auth gate: non-verification API calls must carry a valid auth header.
+# Verification calls use -w (write_out) to get the HTTP status code and
+# handle auth failure themselves, so they bypass this gate.
+if [[ "$url" == */api/v1/* && -z "$write_out" && "$auth_header" != *"test-token"* ]]; then
+  echo '{"message":"Unauthorized"}' >&2
+  exit 1
+fi
 
 case "$url" in
   */api/v1/repos/acme/widget)
@@ -189,6 +198,17 @@ request_count() {
     cat "$REQUEST_DIR/count"
   else
     printf '0'
+  fi
+}
+
+assert_auth() {
+  local number="$1" expected="$2" description="$3"
+  local actual_auth
+  actual_auth=$(<"$REQUEST_DIR/$number.auth")
+  if [[ "$actual_auth" == *"$expected"* ]]; then
+    pass "$description"
+  else
+    fail "$description" "expected auth to contain: $expected" "actual auth: $actual_auth"
   fi
 }
 

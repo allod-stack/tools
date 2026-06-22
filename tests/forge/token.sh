@@ -21,7 +21,7 @@ assert_contains "$output" "unauthorized" "stdin invalid token shows reason"
 
 reset_requests
 output=$(printf '' | run_capture token verify 2>&1) || true
-assert_contains "$output" "no token on stdin" "empty stdin gives clear error"
+assert_contains "$output" "stdin is empty" "empty stdin gives clear error"
 
 # --- token verify: rejects --token ---
 
@@ -50,6 +50,30 @@ output=$(printf 'valid-token' | run_capture token verify)
 assert_contains "$output" "authenticated as testuser" "works without configured token"
 export FORGEJO_TOKEN=test-token
 unset FORGE_TOKEN_FILE
+
+# --- token verify: rejects newline in token ---
+
+reset_requests
+output=$(printf 'valid\ninjection' | run_capture token verify 2>&1) || true
+assert_contains "$output" "invalid characters" "rejects token with embedded newline"
+
+# --- token verify: rejects double quote in token ---
+
+reset_requests
+output=$(printf 'valid"injection' | run_capture token verify 2>&1) || true
+assert_contains "$output" "invalid characters" "rejects token with embedded quote"
+
+# --- token verify: rejects backslash in token ---
+
+reset_requests
+output=$(printf 'valid\\injection' | run_capture token verify 2>&1) || true
+assert_contains "$output" "invalid characters" "rejects token with embedded backslash"
+
+# --- token verify: strips carriage return ---
+
+reset_requests
+output=$(printf 'valid-token\r' | run_capture token verify)
+assert_contains "$output" "authenticated as testuser" "strips trailing carriage return"
 
 # --- token verify: TTY detection ---
 
