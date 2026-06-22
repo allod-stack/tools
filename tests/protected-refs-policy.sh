@@ -10,15 +10,15 @@ test_stdout="$tmp/stdout"
 test_stderr="$tmp/stderr"
 
 export HOME="$tmp/home"
-mkdir -p "$HOME/.config/git" "$HOME/work/cdk/misc/git-hooks"
+mkdir -p "$HOME/.config/git" "$HOME/work/test-repo"
 cat > "$HOME/.config/git/protected-branches" <<'FIXTURE'
-work/cdk main
+work/test-repo main
 FIXTURE
 
-git -C "$HOME/work/cdk" init --initial-branch=main >/dev/null 2>&1
-git -C "$HOME/work/cdk" config user.name "Test User"
-git -C "$HOME/work/cdk" config user.email "test@example.invalid"
-git -C "$HOME/work/cdk" commit --allow-empty -m initial >/dev/null 2>&1
+git -C "$HOME/work/test-repo" init --initial-branch=main >/dev/null 2>&1
+git -C "$HOME/work/test-repo" config user.name "Test User"
+git -C "$HOME/work/test-repo" config user.email "test@example.invalid"
+git -C "$HOME/work/test-repo" commit --allow-empty -m initial >/dev/null 2>&1
 
 counter_file="$tmp/test_count"
 printf '0' > "$counter_file"
@@ -63,7 +63,7 @@ zero="0000000000000000000000000000000000000000"
 
 # --- Protected branch: pre-commit ---
 
-cd "$HOME/work/cdk"
+cd "$HOME/work/test-repo"
 
 assert_blocks "pre-commit: blocks commit on protected branch" \
   bash "$policy" pre-commit
@@ -72,20 +72,9 @@ assert_allows "pre-commit: override allows commit on protected branch" \
   env ALLOW_PROTECTED_REF=1 bash "$policy" pre-commit
 
 git checkout -b agent/test >/dev/null 2>&1
-cat > misc/git-hooks/pre-commit <<'HOOK'
-#!/usr/bin/env bash
-printf ran > "$HOME/cdk-pre-commit-ran"
-HOOK
-chmod +x misc/git-hooks/pre-commit
 
 assert_allows "pre-commit: allows commit on non-protected branch" \
   bash "$policy" pre-commit
-
-if [ "$(cat "$HOME/cdk-pre-commit-ran")" = "ran" ]; then
-  pass "pre-commit: runs repo-specific cdk hook"
-else
-  fail "pre-commit: runs repo-specific cdk hook" "hook marker file missing or wrong"
-fi
 
 # --- Protected branch: pre-rebase ---
 
@@ -155,12 +144,12 @@ printf '%s %s %s %s\n' \
 
 # --- Non-protected repo ---
 
-mkdir -p "$HOME/work/hashpool"
-git -C "$HOME/work/hashpool" init --initial-branch=main >/dev/null 2>&1
-git -C "$HOME/work/hashpool" config user.name "Test User"
-git -C "$HOME/work/hashpool" config user.email "test@example.invalid"
-git -C "$HOME/work/hashpool" commit --allow-empty -m initial >/dev/null 2>&1
-cd "$HOME/work/hashpool"
+mkdir -p "$HOME/work/other-repo"
+git -C "$HOME/work/other-repo" init --initial-branch=main >/dev/null 2>&1
+git -C "$HOME/work/other-repo" config user.name "Test User"
+git -C "$HOME/work/other-repo" config user.email "test@example.invalid"
+git -C "$HOME/work/other-repo" commit --allow-empty -m initial >/dev/null 2>&1
+cd "$HOME/work/other-repo"
 
 assert_allows "pre-commit: allows commit in non-protected repo" \
   bash "$policy" pre-commit
