@@ -36,7 +36,7 @@ url=""
 data=""
 write_out=""
 auth_header=""
-config_stdin=false
+config_file=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -51,7 +51,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --config)
-      [[ "$2" == "-" ]] && config_stdin=true
+      config_file="$2"
       shift 2
       ;;
     -d) data="$2"; shift 2 ;;
@@ -62,7 +62,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ "$config_stdin" == true ]]; then
+if [[ -n "${config_file:-}" && -r "$config_file" ]]; then
   while IFS= read -r line; do
     case "$line" in
       header\ =\ \"Authorization:*)
@@ -70,7 +70,7 @@ if [[ "$config_stdin" == true ]]; then
         auth_header="${auth_header%\"}"
         ;;
     esac
-  done
+  done < "$config_file"
 fi
 
 count_file="$MOCK_REQUEST_DIR/count"

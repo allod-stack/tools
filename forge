@@ -206,12 +206,11 @@ api() {
   load_token
   local method="$1"; shift
   local path="$1"; shift
-  printf 'header = "Authorization: token %s"\n' "$TOKEN" | \
-    curl -sf -X "$method" \
-      "$FORGE_URL/api/v1$path" \
-      --config - \
-      -H "Content-Type: application/json" \
-      "$@"
+  curl -sf -X "$method" \
+    "$FORGE_URL/api/v1$path" \
+    --config <(printf 'header = "Authorization: token %s"\n' "$TOKEN") \
+    -H "Content-Type: application/json" \
+    "$@"
 }
 
 # --- PR commands ---
@@ -876,16 +875,17 @@ token_verify() {
     esac
   done
 
+  [[ ! -t 0 ]] || die "token verify reads from stdin; pipe a token to it"
+
   local verify_token
   verify_token=$(cat)
   verify_token="${verify_token%$'\n'}"
   [[ -n "$verify_token" ]] || die "no token on stdin"
 
   local result http_code
-  result=$(printf 'header = "Authorization: token %s"\n' "$verify_token" | \
-    curl -s -w '\n%{http_code}' -X GET \
-      "$FORGE_URL/api/v1/user" \
-      --config -)
+  result=$(curl -s -w '\n%{http_code}' -X GET \
+    "$FORGE_URL/api/v1/user" \
+    --config <(printf 'header = "Authorization: token %s"\n' "$verify_token"))
   http_code=$(printf '%s' "$result" | tail -1)
   local body
   body=$(printf '%s' "$result" | sed '$d')
@@ -927,10 +927,9 @@ auth_status() {
   fi
 
   local result http_code
-  result=$(printf 'header = "Authorization: token %s"\n' "$TOKEN" | \
-    curl -s -w '\n%{http_code}' -X GET \
-      "$FORGE_URL/api/v1/user" \
-      --config -)
+  result=$(curl -s -w '\n%{http_code}' -X GET \
+    "$FORGE_URL/api/v1/user" \
+    --config <(printf 'header = "Authorization: token %s"\n' "$TOKEN"))
   http_code=$(printf '%s' "$result" | tail -1)
   local body
   body=$(printf '%s' "$result" | sed '$d')

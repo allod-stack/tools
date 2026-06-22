@@ -41,4 +41,10 @@ reset_requests
 output=$(printf 'valid-token\n' | run_capture token verify)
 assert_contains "$output" "authenticated as testuser" "handles trailing newline"
 
+# --- token verify: TTY detection ---
+
+reset_requests
+output=$(script -qc "$ROOT/forge token verify" /dev/null 2>&1) || true
+assert_contains "$output" "reads from stdin" "rejects bare invocation on TTY"
+
 finish_tests "token"

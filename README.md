@@ -185,14 +185,34 @@ forge pr find-by-head <branch>             # print PR number if open PR exists f
 repository's default branch. The `gh` short aliases are also supported:
 `-t`, `-b`, `-F`, `-H`, and `-B`.
 
+**Auth commands:**
+
+```bash
+forge auth status       # verify configured credentials
+```
+
+`auth status` checks the configured token source (`FORGEJO_TOKEN` env var or
+token file) without exposing token material in output or process arguments.
+
 **Token commands:**
 
 ```bash
-forge token verify [--token <value> | --token-file <path>]
+extract-token-safely | forge token verify
 ```
 
-Without flags, `token verify` checks the configured token. Use `--token` or
-`--token-file` to validate a replacement before updating local config.
+`token verify` reads a candidate token from stdin and checks it against the
+Forgejo API. It does not use the configured token — stdin is the only input.
+If stdin is a TTY (no pipe), it exits immediately with a usage hint.
+
+Safe calling patterns — avoid putting the token in shell history or argv:
+
+```bash
+# Read interactively without echo, then verify
+read -rs tok; printf '%s' "$tok" | forge token verify
+
+# From a password manager or secret store
+pass show forgejo/token | forge token verify
+```
 
 **Issue commands:**
 
