@@ -53,12 +53,6 @@ reset_requests
 output=$(run_capture auth status --token-file /dev/null 2>&1) || true
 assert_contains "$output" "does not accept" "rejects --token-file flag"
 
-# --- auth status: rejects --show-token ---
-
-reset_requests
-output=$(run_capture auth status --show-token 2>&1) || true
-assert_contains "$output" "does not accept" "rejects --show-token flag"
-
 # --- negative: no auth token command ---
 
 reset_requests

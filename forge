@@ -928,7 +928,7 @@ auth_status() {
   contains_help_flag "$@" && { command_usage "auth status"; return; }
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --token|--token-file|--show-token) die "auth status does not accept $1" ;;
+      --token|--token-file) die "auth status does not accept $1" ;;
       -*) die "unknown option for auth status: $1" ;;
       *) die "unexpected argument for auth status: $1" ;;
     esac
@@ -1100,7 +1100,7 @@ Flags:
 USAGE
       ;;
     "token verify") cat <<'USAGE'
-Usage: producer | forge token verify
+Usage: <command> | forge token verify
 
 Verify a candidate token read from stdin against the Forgejo API.
 Does not use the configured token — stdin is the only input.
