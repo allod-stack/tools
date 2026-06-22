@@ -896,7 +896,6 @@ token_verify() {
   contains_help_flag "$@" && { command_usage "token verify"; return; }
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --token|--token-file) die "token verify reads from stdin; $1 is not supported" ;;
       -*) die "unknown option for token verify: $1" ;;
       *) die "unexpected argument for token verify: $1" ;;
     esac
@@ -928,7 +927,6 @@ auth_status() {
   contains_help_flag "$@" && { command_usage "auth status"; return; }
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --token|--token-file) die "auth status does not accept $1" ;;
       -*) die "unknown option for auth status: $1" ;;
       *) die "unexpected argument for auth status: $1" ;;
     esac

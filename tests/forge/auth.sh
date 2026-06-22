@@ -45,13 +45,13 @@ unset FORGE_TOKEN_FILE
 
 reset_requests
 output=$(run_capture auth status --token foo 2>&1) || true
-assert_contains "$output" "does not accept" "rejects --token flag"
+assert_contains "$output" "unknown option" "rejects --token flag"
 
 # --- auth status: rejects --token-file ---
 
 reset_requests
 output=$(run_capture auth status --token-file /dev/null 2>&1) || true
-assert_contains "$output" "does not accept" "rejects --token-file flag"
+assert_contains "$output" "unknown option" "rejects --token-file flag"
 
 # --- negative: no auth token command ---
 

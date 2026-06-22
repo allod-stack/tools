@@ -27,13 +27,13 @@ assert_contains "$output" "stdin is empty" "empty stdin gives clear error"
 
 reset_requests
 output=$(run_capture token verify --token foo 2>&1) || true
-assert_contains "$output" "not supported" "rejects --token flag"
+assert_contains "$output" "unknown option" "rejects --token flag"
 
 # --- token verify: rejects --token-file ---
 
 reset_requests
 output=$(run_capture token verify --token-file /dev/null 2>&1) || true
-assert_contains "$output" "not supported" "rejects --token-file flag"
+assert_contains "$output" "unknown option" "rejects --token-file flag"
 
 # --- token verify: strips trailing newline from stdin ---
 
