@@ -50,6 +50,12 @@ assert_contains "$output" "--repo" "issue list --help shows --repo flag"
 output=$(run_capture pr review-comments -h)
 assert_contains "$output" "<number>" "pr review-comments -h shows number positional"
 
+output=$(run_capture token verify --help)
+assert_contains "$output" "stdin" "token verify --help mentions stdin"
+
+output=$(run_capture auth status -h)
+assert_contains "$output" "credential" "auth status -h mentions credential"
+
 # --- Resource-level help exits zero ---
 
 output=$(run_capture pr --help)

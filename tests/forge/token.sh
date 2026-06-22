@@ -41,6 +41,16 @@ reset_requests
 output=$(printf 'valid-token\n' | run_capture token verify)
 assert_contains "$output" "authenticated as testuser" "handles trailing newline"
 
+# --- token verify: works without configured token ---
+
+reset_requests
+unset FORGEJO_TOKEN
+export FORGE_TOKEN_FILE=/nonexistent
+output=$(printf 'valid-token' | run_capture token verify)
+assert_contains "$output" "authenticated as testuser" "works without configured token"
+export FORGEJO_TOKEN=test-token
+unset FORGE_TOKEN_FILE
+
 # --- token verify: TTY detection ---
 
 reset_requests

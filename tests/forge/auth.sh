@@ -31,6 +31,16 @@ assert_contains "$output" "$token_file" "shows token file path as source"
 export FORGEJO_TOKEN=test-token
 unset FORGE_TOKEN_FILE
 
+# --- auth status: no credential source ---
+
+reset_requests
+unset FORGEJO_TOKEN
+export FORGE_TOKEN_FILE=/nonexistent
+output=$(run_capture auth status 2>&1) || true
+assert_contains "$output" "no token found" "errors when no credential source exists"
+export FORGEJO_TOKEN=test-token
+unset FORGE_TOKEN_FILE
+
 # --- auth status: rejects --token ---
 
 reset_requests
