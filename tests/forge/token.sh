@@ -76,9 +76,14 @@ output=$(printf 'valid-token\r' | run_capture token verify)
 assert_contains "$output" "authenticated as testuser" "strips trailing carriage return"
 
 # --- token verify: TTY detection ---
+# Uses script(1) to allocate a pseudo-TTY. GNU and BSD have different syntax.
 
 reset_requests
-output=$(script -qc "$ROOT/forge token verify" /dev/null 2>&1) || true
+if [[ "$(uname)" == "Darwin" ]]; then
+  output=$(script -q /dev/null "$ROOT/forge token verify" 2>&1) || true
+else
+  output=$(script -qc "$ROOT/forge token verify" /dev/null 2>&1) || true
+fi
 assert_contains "$output" "reads from stdin" "rejects bare invocation on TTY"
 
 finish_tests "token"
