@@ -171,6 +171,24 @@ case "$hook" in
       if is_active_pr_branch "$remote_url" "$remote_branch"; then
         require_signed_push "$local_sha" "$remote_branch"
       fi
+
+      # Block non-fast-forward (force) pushes on agent/* and active PR branches
+      zero="0000000000000000000000000000000000000000"
+      if [ "$remote_sha" != "$zero" ] && [ "$local_sha" != "$zero" ]; then
+        if ! git merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null; then
+          block_force=0
+          if [[ "$remote_branch" == agent/* ]]; then
+            block_force=1
+          fi
+          if is_active_pr_branch "$remote_url" "$remote_branch"; then
+            block_force=1
+          fi
+          if [ "$block_force" = "1" ] && [ "${ALLOW_PROTECTED_REF:-}" != "1" ]; then
+            echo "ERROR: force-push is not permitted on branch '$remote_branch'. Add commits instead." >&2
+            exit 1
+          fi
+        fi
+      fi
     done < "$hook_stdin"
     ;;
 esac
