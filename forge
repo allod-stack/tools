@@ -632,6 +632,7 @@ pr_close() {
         require_option_value "$1" "$#"
         [[ "$comment_set" == false ]] || die "$1 specified more than once"
         comment="$2"
+        [[ -n "$comment" ]] || die "--comment cannot be empty"
         comment_set=true
         shift 2
         ;;
@@ -662,7 +663,15 @@ pr_close() {
 
   local head_ref=""
   if [[ "$delete_branch" == true ]]; then
-    head_ref=$(api GET "/repos/$REPO/pulls/$PR_NUMBER" | jq -r '.head.ref')
+    local pr_data
+    pr_data=$(api GET "/repos/$REPO/pulls/$PR_NUMBER")
+    head_ref=$(echo "$pr_data" | jq -r '.head.ref')
+    local base_ref
+    base_ref=$(echo "$pr_data" | jq -r '.base.ref')
+    if [[ "$head_ref" == "$base_ref" ]]; then
+      echo "forge: warning: not deleting branch $head_ref (same as base branch)" >&2
+      delete_branch=false
+    fi
   fi
 
   local url
@@ -670,8 +679,12 @@ pr_close() {
     -d '{"state":"closed"}' | jq -r '.html_url')
 
   if [[ "$delete_branch" == true && -n "$head_ref" ]]; then
-    api DELETE "/repos/$REPO/branches/$(urlencode "$head_ref")" >/dev/null
-    echo "PR closed: $url (branch $head_ref deleted)"
+    if api DELETE "/repos/$REPO/branches/$(urlencode "$head_ref")" >/dev/null 2>&1; then
+      echo "PR closed: $url (branch $head_ref deleted)"
+    else
+      echo "PR closed: $url"
+      echo "forge: warning: failed to delete branch $head_ref" >&2
+    fi
   else
     echo "PR closed: $url"
   fi

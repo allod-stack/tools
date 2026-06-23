@@ -120,6 +120,13 @@ case "$url" in
   */api/v1/repos/acme/widget/pulls)
     printf '%s\n' '{"html_url":"https://forge.example/acme/widget/pulls/1"}'
     ;;
+  */api/v1/repos/acme/widget/pulls/99)
+    if [[ "$method" == GET ]]; then
+      printf '%s\n' '{"title":"Self PR","state":"open","body":"","user":{"login":"alice"},"head":{"label":"acme:master","ref":"master"},"base":{"label":"master","ref":"master"}}'
+    else
+      printf '%s\n' '{"html_url":"https://forge.example/acme/widget/pulls/99"}'
+    fi
+    ;;
   */api/v1/repos/acme/widget/pulls/31)
     if [[ "$method" == GET ]]; then
       printf '%s\n' '{"title":"Branch PR","state":"open","body":"","user":{"login":"alice"},"head":{"label":"acme:topic","ref":"topic"},"base":{"label":"master"}}'
@@ -129,7 +136,7 @@ case "$url" in
     ;;
   */api/v1/repos/acme/widget/pulls/12)
     if [[ "$method" == GET ]]; then
-      printf '%s\n' '{"title":"Improve tool","state":"open","body":"PR body","user":{"login":"alice"},"head":{"label":"acme:topic","ref":"topic"},"base":{"label":"master"}}'
+      printf '%s\n' '{"title":"Improve tool","state":"open","body":"PR body","user":{"login":"alice"},"head":{"label":"acme:topic","ref":"topic"},"base":{"label":"master","ref":"master"}}'
     else
       printf '%s\n' '{"html_url":"https://forge.example/acme/widget/pulls/12"}'
     fi

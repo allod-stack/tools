@@ -67,4 +67,12 @@ run_fail "no open PR found" \
 assert_request 1 GET "/api/v1/repos/acme/widget/pulls?state=open&limit=50&head=feat%2Fsub" \
   "encodes slash as %2F in query parameter"
 
+reset_requests
+run_ok pr close 99 -d
+assert_equal "$(request_count)" "2" "skips branch deletion when head equals base"
+assert_request 1 GET "/api/v1/repos/acme/widget/pulls/99" \
+  "fetches PR to check head vs base"
+assert_request 2 PATCH "/api/v1/repos/acme/widget/pulls/99" \
+  "still closes the PR when branch deletion is skipped"
+
 finish_tests "Forge pr-close"
