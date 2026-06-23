@@ -41,7 +41,7 @@ FORGE_TOKEN_FILE="${FORGE_TOKEN_FILE:-$HOME/.config/git/forgejo-token}"
 # --- Helpers ---
 
 urlencode() {
-  printf '%s' "$1" | jq -Rr @uri
+  printf '%s' "$1" | jq -sRr @uri
 }
 
 # --- Dependencies ---
