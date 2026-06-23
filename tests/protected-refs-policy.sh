@@ -68,9 +68,6 @@ cd "$HOME/work/test-repo"
 assert_blocks "pre-commit: blocks commit on protected branch" \
   bash "$policy" pre-commit
 
-assert_allows "pre-commit: override allows commit on protected branch" \
-  env ALLOW_PROTECTED_REF=1 bash "$policy" pre-commit
-
 git checkout -b agent/test >/dev/null 2>&1
 
 assert_allows "pre-commit: allows commit on non-protected branch" \
@@ -83,16 +80,10 @@ git checkout main >/dev/null 2>&1
 assert_blocks "pre-rebase: blocks rebase on protected branch" \
   bash "$policy" pre-rebase origin/main main
 
-assert_allows "pre-rebase: override allows rebase on protected branch" \
-  env ALLOW_PROTECTED_REF=1 bash "$policy" pre-rebase origin/main main
-
 # --- Protected branch: pre-merge-commit ---
 
 assert_blocks "pre-merge-commit: blocks merge into protected branch" \
   bash "$policy" pre-merge-commit
-
-assert_allows "pre-merge-commit: override allows merge into protected branch" \
-  env ALLOW_PROTECTED_REF=1 bash "$policy" pre-merge-commit
 
 # --- Pre-push: external remote blocking ---
 
@@ -100,11 +91,6 @@ printf '%s %s %s %s\n' \
   refs/heads/agent/test "${zero}1" refs/heads/main "${zero}2" \
   | assert_blocks "pre-push: blocks push to unauthorized remote" \
     bash "$policy" pre-push origin ssh://example.invalid/repo.git
-
-printf '%s %s %s %s\n' \
-  refs/heads/agent/test "${zero}1" refs/heads/main "${zero}2" \
-  | assert_allows "pre-push: override allows push to unauthorized remote" \
-    env ALLOW_PROTECTED_REF=1 bash "$policy" pre-push origin ssh://example.invalid/repo.git
 
 # --- Pre-push: force-push blocking ---
 
@@ -126,11 +112,6 @@ printf '%s %s %s %s\n' \
   "refs/heads/agent/feature" "$divergent_sha" "refs/heads/agent/feature" "$feature_sha" \
   | assert_blocks "pre-push: blocks force-push to agent/* branch" \
     bash "$policy" pre-push origin "$forge_url"
-
-printf '%s %s %s %s\n' \
-  "refs/heads/agent/feature" "$divergent_sha" "refs/heads/agent/feature" "$feature_sha" \
-  | assert_allows "pre-push: override allows force-push to agent/* branch" \
-    env ALLOW_PROTECTED_REF=1 bash "$policy" pre-push origin "$forge_url"
 
 printf '%s %s %s %s\n' \
   "refs/heads/my-branch" "$divergent_sha" "refs/heads/my-branch" "$feature_sha" \

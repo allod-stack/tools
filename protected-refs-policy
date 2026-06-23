@@ -74,10 +74,6 @@ require_signed_push() {
   sha="$1"
   branch="$2"
 
-  if [ "${ALLOW_PROTECTED_REF:-}" = "1" ]; then
-    return 0
-  fi
-
   if ! git verify-commit "$sha" 2>/dev/null; then
     echo "ERROR: Commits on '$branch' must be GPG-signed." >&2
     exit 1
@@ -94,10 +90,6 @@ branch_from_ref() {
 require_override() {
   action="$1"
   branch="$2"
-
-  if [ "${ALLOW_PROTECTED_REF:-}" = "1" ]; then
-    return 0
-  fi
 
   echo "ERROR: '$action' is not permitted on protected branch '$branch'." >&2
   exit 1
@@ -147,7 +139,7 @@ case "$hook" in
   pre-push)
     remote_url="${2:-}"
 
-    if ! is_allowed_external_remote "$remote_url" && [ "${ALLOW_PROTECTED_REF:-}" != "1" ]; then
+    if ! is_allowed_external_remote "$remote_url"; then
       echo "ERROR: Push to '$remote_url' is not authorized." >&2
       exit 1
     fi
@@ -183,7 +175,7 @@ case "$hook" in
           if is_active_pr_branch "$remote_url" "$remote_branch"; then
             block_force=1
           fi
-          if [ "$block_force" = "1" ] && [ "${ALLOW_PROTECTED_REF:-}" != "1" ]; then
+          if [ "$block_force" = "1" ]; then
             echo "ERROR: force-push is not permitted on branch '$remote_branch'. Add commits instead." >&2
             exit 1
           fi
