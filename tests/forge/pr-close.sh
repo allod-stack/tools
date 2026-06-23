@@ -35,6 +35,11 @@ assert_request 2 PATCH "/api/v1/repos/acme/widget/pulls/31" \
 assert_json 2 '. == {state: "closed"}' "sends the closed state for branch target"
 
 reset_requests
+run_capture pr close -R acme/gadget 5 >/dev/null
+assert_request 1 PATCH "/api/v1/repos/acme/gadget/pulls/5" \
+  "uses command-level repo override for pr close"
+
+reset_requests
 run_ok pr close 12 -d
 assert_equal "$(request_count)" "3" "close with delete-branch makes three API requests"
 assert_request 1 GET "/api/v1/repos/acme/widget/pulls/12" \

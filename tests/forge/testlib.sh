@@ -162,9 +162,13 @@ case "$url" in
     fi
     ;;
   */api/v1/repos/acme/widget/branches/topic)
+    # Branch deletion returns 204 No Content; empty body is intentional.
     ;;
   */api/v1/repos/acme/gadget/pulls)
     printf '%s\n' '{"html_url":"https://forge.example/acme/gadget/pulls/1"}'
+    ;;
+  */api/v1/repos/acme/gadget/pulls/5)
+    printf '%s\n' '{"html_url":"https://forge.example/acme/gadget/pulls/5"}'
     ;;
   */api/v1/repos/acme/gadget/issues\?type=issues\&state=open\&limit=50)
     printf '%s\n' '[{"number":21,"title":"Gadget issue","user":{"login":"zoe"}}]'
