@@ -135,6 +135,66 @@ cd "$HOME/work/other-repo"
 assert_allows "pre-commit: allows commit in non-protected repo" \
   bash "$policy" pre-commit
 
+# --- Tracked hook dispatch: .hookspath ---
+
+hookspath_repo="$HOME/work/hookspath-repo"
+mkdir -p "$hookspath_repo"
+git -C "$hookspath_repo" init --initial-branch=dev >/dev/null 2>&1
+git -C "$hookspath_repo" config user.name "Test User"
+git -C "$hookspath_repo" config user.email "test@example.invalid"
+git -C "$hookspath_repo" commit --allow-empty -m initial >/dev/null 2>&1
+
+mkdir -p "$hookspath_repo/misc/git-hooks"
+printf '#!/usr/bin/env bash\nprintf "hookspath-ran\n"\n' > "$hookspath_repo/misc/git-hooks/pre-commit"
+chmod +x "$hookspath_repo/misc/git-hooks/pre-commit"
+printf 'misc/git-hooks\n' > "$hookspath_repo/.hookspath"
+
+cd "$hookspath_repo"
+
+assert_allows "tracked hook: runs hook found via .hookspath" \
+  bash "$policy" pre-commit
+
+grep -q "hookspath-ran" "$test_stdout" \
+  && pass "tracked hook: .hookspath hook produced expected output" \
+  || fail "tracked hook: .hookspath hook produced expected output" \
+    "expected 'hookspath-ran' in stdout, got: $(cat "$test_stdout")"
+
+# --- Tracked hook dispatch: .hooks/ fallback ---
+
+fallback_repo="$HOME/work/fallback-repo"
+mkdir -p "$fallback_repo"
+git -C "$fallback_repo" init --initial-branch=dev >/dev/null 2>&1
+git -C "$fallback_repo" config user.name "Test User"
+git -C "$fallback_repo" config user.email "test@example.invalid"
+git -C "$fallback_repo" commit --allow-empty -m initial >/dev/null 2>&1
+
+mkdir -p "$fallback_repo/.hooks"
+printf '#!/usr/bin/env bash\nprintf "fallback-ran\n"\n' > "$fallback_repo/.hooks/pre-commit"
+chmod +x "$fallback_repo/.hooks/pre-commit"
+
+cd "$fallback_repo"
+
+assert_allows "tracked hook: runs hook found via .hooks/ fallback" \
+  bash "$policy" pre-commit
+
+grep -q "fallback-ran" "$test_stdout" \
+  && pass "tracked hook: .hooks/ fallback hook produced expected output" \
+  || fail "tracked hook: .hooks/ fallback hook produced expected output" \
+    "expected 'fallback-ran' in stdout, got: $(cat "$test_stdout")"
+
+# --- Tracked hook dispatch: no hooks present ---
+
+nohook_repo="$HOME/work/nohook-repo"
+mkdir -p "$nohook_repo"
+git -C "$nohook_repo" init --initial-branch=dev >/dev/null 2>&1
+git -C "$nohook_repo" config user.name "Test User"
+git -C "$nohook_repo" config user.email "test@example.invalid"
+git -C "$nohook_repo" commit --allow-empty -m initial >/dev/null 2>&1
+cd "$nohook_repo"
+
+assert_allows "tracked hook: succeeds silently when no .hookspath or .hooks/" \
+  bash "$policy" pre-commit
+
 total=$(<"$counter_file")
 printf '\nTests run: %d\n' "$total"
 printf '✅ All %d protected-refs-policy tests passed.\n' "$total"

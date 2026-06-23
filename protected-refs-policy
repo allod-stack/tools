@@ -106,15 +106,26 @@ run_repo_hook() {
   fi
 }
 
-run_cdk_tracked_hook() {
-  case "$hook" in
-    pre-commit)
-      cdk_hook="$repo/misc/git-hooks/pre-commit"
-      if [ "$repo" = "$HOME/work/cdk" ] && [ -x "$cdk_hook" ]; then
-        "$cdk_hook" "$@"
-      fi
-      ;;
-  esac
+run_tracked_hook() {
+  local hookspath_file="$repo/.hookspath"
+  local hooks_dir=""
+
+  if [ -r "$hookspath_file" ]; then
+    hooks_dir="$(head -1 "$hookspath_file")"
+  elif [ -d "$repo/.hooks" ]; then
+    hooks_dir=".hooks"
+  fi
+
+  [ -n "$hooks_dir" ] || return 0
+
+  local tracked_hook="$repo/$hooks_dir/$hook"
+  if [ -x "$tracked_hook" ]; then
+    if [ -n "$hook_stdin" ]; then
+      "$tracked_hook" "$@" < "$hook_stdin"
+    else
+      "$tracked_hook" "$@"
+    fi
+  fi
 }
 
 case "$hook" in
@@ -185,5 +196,5 @@ case "$hook" in
     ;;
 esac
 
-run_cdk_tracked_hook "$@"
+run_tracked_hook "$@"
 run_repo_hook "$@"
