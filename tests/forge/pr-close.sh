@@ -61,4 +61,10 @@ reset_requests
 run_fail "no open PR found for branch" \
   "rejects a branch with no matching PR" pr close nonexistent
 
+reset_requests
+run_fail "no open PR found" \
+  "URL-encodes slashes in branch lookup" pr close "feat/sub"
+assert_request 1 GET "/api/v1/repos/acme/widget/pulls?state=open&limit=50&head=feat%2Fsub" \
+  "encodes slash as %2F in query parameter"
+
 finish_tests "Forge pr-close"

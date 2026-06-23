@@ -38,6 +38,12 @@ set -euo pipefail
 FORGE_URL="${FORGE_URL:-https://forge.anarch.diy}"
 FORGE_TOKEN_FILE="${FORGE_TOKEN_FILE:-$HOME/.config/git/forgejo-token}"
 
+# --- Helpers ---
+
+urlencode() {
+  printf '%s' "$1" | jq -Rr @uri
+}
+
 # --- Dependencies ---
 
 if ! command -v jq &>/dev/null; then
@@ -574,7 +580,7 @@ pr_find_by_head() {
   require_repo
   local head_branch="${POSITIONAL_ARGS[0]}"
   # Prints the PR number if an open PR exists for this head branch; prints nothing if not found.
-  api GET "/repos/$REPO/pulls?state=open&limit=50&head=${head_branch}" \
+  api GET "/repos/$REPO/pulls?state=open&limit=50&head=$(urlencode "$head_branch")" \
     | jq -r 'first(.[] | .number) // empty'
 }
 
@@ -606,7 +612,7 @@ resolve_pr_target() {
   fi
 
   require_repo
-  PR_NUMBER=$(api GET "/repos/$REPO/pulls?state=open&limit=50&head=${target}" \
+  PR_NUMBER=$(api GET "/repos/$REPO/pulls?state=open&limit=50&head=$(urlencode "$target")" \
     | jq -r 'first(.[] | .number) // empty')
   [[ -n "$PR_NUMBER" ]] || die "no open PR found for branch: $target"
 }
@@ -664,7 +670,7 @@ pr_close() {
     -d '{"state":"closed"}' | jq -r '.html_url')
 
   if [[ "$delete_branch" == true && -n "$head_ref" ]]; then
-    api DELETE "/repos/$REPO/branches/$head_ref" >/dev/null
+    api DELETE "/repos/$REPO/branches/$(urlencode "$head_ref")" >/dev/null
     echo "PR closed: $url (branch $head_ref deleted)"
   else
     echo "PR closed: $url"
