@@ -14,6 +14,10 @@ output=$(run_capture issue create --help)
 assert_contains "$output" "--title" "issue create --help shows --title flag"
 assert_contains "$output" "--body-file" "issue create --help shows --body-file flag"
 
+output=$(run_capture pr close --help)
+assert_contains "$output" "--comment" "pr close --help shows --comment flag"
+assert_contains "$output" "--delete-branch" "pr close --help shows --delete-branch flag"
+
 output=$(run_capture issue close --help)
 assert_contains "$output" "--comment" "issue close --help shows --comment flag"
 assert_contains "$output" "--reason" "issue close --help shows --reason flag"

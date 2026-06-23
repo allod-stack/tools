@@ -35,7 +35,8 @@ assert_request 2 PATCH "/api/v1/repos/acme/widget/pulls/31" \
 assert_json 2 '. == {state: "closed"}' "sends the closed state for branch target"
 
 reset_requests
-run_capture pr close -R acme/gadget 5 >/dev/null
+output=$(run_capture pr close -R acme/gadget 5) ||
+  fail "runs pr close with repo override" "command output:" "$output"
 assert_request 1 PATCH "/api/v1/repos/acme/gadget/pulls/5" \
   "uses command-level repo override for pr close"
 
@@ -61,6 +62,18 @@ assert_request 3 PATCH "/api/v1/repos/acme/widget/pulls/12" \
   "closes the PR"
 assert_request 4 DELETE "/api/v1/repos/acme/widget/branches/topic" \
   "deletes the branch after closing"
+
+reset_requests
+run_ok pr close topic -d
+assert_equal "$(request_count)" "4" "branch target with delete-branch makes four API requests"
+assert_request 1 GET "/api/v1/repos/acme/widget/pulls?state=open&limit=50&head=topic" \
+  "resolves branch name before fetching PR details"
+assert_request 2 GET "/api/v1/repos/acme/widget/pulls/31" \
+  "fetches PR details for branch-resolved target"
+assert_request 3 PATCH "/api/v1/repos/acme/widget/pulls/31" \
+  "closes the branch-resolved PR"
+assert_request 4 DELETE "/api/v1/repos/acme/widget/branches/topic" \
+  "deletes the branch for branch-resolved target"
 
 reset_requests
 run_fail "no open PR found for branch" \

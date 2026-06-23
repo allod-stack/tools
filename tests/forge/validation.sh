@@ -42,6 +42,8 @@ run_fail "PR target must be a number, URL" "rejects a malformed PR URL" \
   pr close https://forge.example/acme/widget/issues/12
 run_fail "--comment cannot be empty" "rejects an empty PR closing comment" \
   pr close 12 -c ""
+run_fail "specified more than once" "rejects duplicate pr close comment flag" \
+  pr close 12 -c "first" -c "second"
 assert_equal "$(request_count)" "0" "makes no API requests for invalid commands"
 
 finish_tests "Forge validation"

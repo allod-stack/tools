@@ -129,7 +129,7 @@ case "$url" in
     ;;
   */api/v1/repos/acme/widget/pulls/31)
     if [[ "$method" == GET ]]; then
-      printf '%s\n' '{"title":"Branch PR","state":"open","body":"","user":{"login":"alice"},"head":{"label":"acme:topic","ref":"topic"},"base":{"label":"master"}}'
+      printf '%s\n' '{"title":"Branch PR","state":"open","body":"","user":{"login":"alice"},"head":{"label":"acme:topic","ref":"topic"},"base":{"label":"master","ref":"master"}}'
     else
       printf '%s\n' '{"html_url":"https://forge.example/acme/widget/pulls/31"}'
     fi
