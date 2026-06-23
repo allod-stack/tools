@@ -33,6 +33,13 @@ run_fail "issue target must be a number or URL" "rejects a foreign issue URL" \
   issue close https://other.example/acme/widget/issues/20
 run_fail "duplicate target must be a number or URL" \
   "rejects an invalid duplicate target" issue close 20 --duplicate-of nope
+run_fail "usage: forge pr close" "requires a PR close target" pr close
+run_fail "unknown option" "rejects an unknown PR close option" \
+  pr close 12 --unknown
+run_fail "PR target must be a number, URL" "rejects a foreign PR URL" \
+  pr close https://other.example/acme/widget/pulls/12
+run_fail "PR target must be a number, URL" "rejects a malformed PR URL" \
+  pr close https://forge.example/acme/widget/issues/12
 assert_equal "$(request_count)" "0" "makes no API requests for invalid commands"
 
 finish_tests "Forge validation"

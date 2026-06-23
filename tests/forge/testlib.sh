@@ -98,6 +98,9 @@ case "$url" in
   */api/v1/repos/acme/widget/pulls\?state=open\&limit=50\&head=topic)
     printf '%s\n' '[{"number":31}]'
     ;;
+  */api/v1/repos/acme/widget/pulls\?state=open\&limit=50\&head=*)
+    printf '%s\n' '[]'
+    ;;
   */api/v1/repos/acme/widget/pulls\?state=open\&limit=50)
     printf '%s\n' '[{"number":12,"title":"Improve tool","user":{"login":"alice"},"head":{"label":"acme:topic"},"base":{"label":"master"}}]'
     ;;
@@ -117,9 +120,16 @@ case "$url" in
   */api/v1/repos/acme/widget/pulls)
     printf '%s\n' '{"html_url":"https://forge.example/acme/widget/pulls/1"}'
     ;;
+  */api/v1/repos/acme/widget/pulls/31)
+    if [[ "$method" == GET ]]; then
+      printf '%s\n' '{"title":"Branch PR","state":"open","body":"","user":{"login":"alice"},"head":{"label":"acme:topic","ref":"topic"},"base":{"label":"master"}}'
+    else
+      printf '%s\n' '{"html_url":"https://forge.example/acme/widget/pulls/31"}'
+    fi
+    ;;
   */api/v1/repos/acme/widget/pulls/12)
     if [[ "$method" == GET ]]; then
-      printf '%s\n' '{"title":"Improve tool","state":"open","body":"PR body","user":{"login":"alice"},"head":{"label":"acme:topic"},"base":{"label":"master"}}'
+      printf '%s\n' '{"title":"Improve tool","state":"open","body":"PR body","user":{"login":"alice"},"head":{"label":"acme:topic","ref":"topic"},"base":{"label":"master"}}'
     else
       printf '%s\n' '{"html_url":"https://forge.example/acme/widget/pulls/12"}'
     fi
@@ -143,6 +153,8 @@ case "$url" in
     else
       printf '%s\n' '{"html_url":"https://forge.example/acme/widget/issues/20"}'
     fi
+    ;;
+  */api/v1/repos/acme/widget/branches/topic)
     ;;
   */api/v1/repos/acme/gadget/pulls)
     printf '%s\n' '{"html_url":"https://forge.example/acme/gadget/pulls/1"}'
