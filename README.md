@@ -25,10 +25,10 @@ lib/                      shared shell libraries
 
 ## Documentation
 
-- [Workspace tools](docs/workspace.md) — `pull-all`, `work-diff`
-- [Flake tools](docs/flake.md) — `flake-status`, `flake-update-cascade`
+- [Workspace tools](workspace/README.md) — `pull-all`, `work-diff`
+- [Flake tools](flake/README.md) — `flake-status`, `flake-update-cascade`
 - [forge](docs/forge.md) — Forgejo CLI
-- [Git hooks](docs/git-hooks.md) — `protected-refs-policy`, `setup-tracked-hooks`
+- [Git hooks](git-hooks/README.md) — `protected-refs-policy`, `setup-tracked-hooks`
 
 ## Shared Library
 
