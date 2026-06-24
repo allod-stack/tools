@@ -1,0 +1,532 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! declare -F workspace_is_repo_root >/dev/null; then
+  # shellcheck source=/dev/null
+  source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/workspace.sh"
+fi
+
+PROTECTED_BRANCHES_FILE="${HOME}/.config/git/protected-branches"
+declare -a TEMP_FILES=()
+
+cleanup_temp_files() {
+  local file
+  for file in "${TEMP_FILES[@]}"; do
+    rm -f "$file"
+  done
+}
+trap cleanup_temp_files EXIT
+
+usage() {
+  cat <<'EOF'
+Usage: allod change <command> [options]
+
+Commands:
+  begin    Prepare a change workspace
+  record   Stage, commit, and push changes
+  submit   Create a pull request for the current branch
+  cleanup  Remove a completed change worktree
+EOF
+}
+
+change_usage() {
+  cat <<'EOF'
+Usage:
+  allod change begin [-d <description>] [<repo-path>]
+  allod change record -m <message> [--files <file>...]
+  allod change record -M <file|-> [--files <file>...]
+  allod change submit -t <title> (-b <body> | -F <file|->) [--base <branch>] [--depends-on <text>] [--dry-run]
+  allod change cleanup <worktree-path>
+EOF
+}
+
+die() {
+  local code="$1"
+  shift
+  printf 'allod: %s\n' "$*" >&2
+  exit "$code"
+}
+
+require_option_value() {
+  local option="$1"
+  local count="$2"
+  [[ "$count" -ge 2 ]] || die 1 "$option requires a value"
+}
+
+read_value() {
+  local source="$1"
+  if [[ "$source" == "-" ]]; then
+    cat
+  else
+    [[ -r "$source" ]] || die 1 "cannot read file: $source"
+    cat "$source"
+  fi
+}
+
+make_temp_file() {
+  local file
+  file=$(mktemp)
+  TEMP_FILES+=("$file")
+  printf '%s\n' "$file"
+}
+
+resolve_git_repo() {
+  local input="${1:-$PWD}"
+  local top
+  [[ -d "$input" ]] || die 1 "not a directory: $input"
+  top=$(git -C "$input" rev-parse --show-toplevel 2>/dev/null) ||
+    die 1 "not a git repository: $input"
+  workspace_is_repo_root "$top" ||
+    die 1 "could not resolve git repository root for: $input"
+  printf '%s\n' "$top"
+}
+
+main_repo_dir_for_dir() {
+  local dir="$1"
+  local common_dir
+  common_dir=$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) ||
+    die 1 "not a git repository: $dir"
+  dirname "$common_dir"
+}
+
+repo_lookup_key_for_dir() {
+  local dir="$1"
+  local main_repo
+  main_repo=$(main_repo_dir_for_dir "$dir")
+  case "$main_repo" in
+    "$HOME"/*) printf '%s\n' "${main_repo#"$HOME"/}" ;;
+    *) return 1 ;;
+  esac
+}
+
+protected_branch_for_dir() {
+  local dir="$1"
+  local key
+  key=$(repo_lookup_key_for_dir "$dir") || return 1
+  [[ -r "$PROTECTED_BRANCHES_FILE" ]] || return 1
+  awk -v repo="$key" '
+    /^[[:space:]]*(#|$)/ { next }
+    $1 == repo && $2 != "" { print $2; found = 1; exit }
+    END { exit found ? 0 : 1 }
+  ' "$PROTECTED_BRANCHES_FILE"
+}
+
+sanitize_slug() {
+  LC_ALL=C sed 's/[^a-zA-Z0-9._-]/-/g'
+}
+
+repo_slug_for_dir() {
+  local dir="$1"
+  local key main_repo
+  if key=$(repo_lookup_key_for_dir "$dir"); then
+    printf '%s' "$key" | sanitize_slug
+  else
+    main_repo=$(main_repo_dir_for_dir "$dir")
+    basename "$main_repo" | sanitize_slug
+  fi
+}
+
+current_branch_or_die() {
+  local dir="$1"
+  local branch
+  branch=$(git -C "$dir" branch --show-current 2>/dev/null || true)
+  [[ -n "$branch" ]] || die 1 "HEAD is detached; check out a branch before continuing"
+  printf '%s\n' "$branch"
+}
+
+ref_exists_local() {
+  local dir="$1"
+  local branch="$2"
+  git -C "$dir" show-ref --verify --quiet "refs/heads/$branch"
+}
+
+ref_exists_remote() {
+  local dir="$1"
+  local branch="$2"
+  local output status
+  set +e
+  output=$(git -C "$dir" ls-remote --exit-code --heads origin "$branch" 2>&1)
+  status=$?
+  set -e
+  case "$status" in
+    0) return 0 ;;
+    2) return 1 ;;
+    *)
+      printf '%s\n' "$output" >&2
+      die 1 "could not check origin for branch '$branch'"
+      ;;
+  esac
+}
+
+validate_description() {
+  local desc="$1"
+  if [[ -z "$desc" || ! "$desc" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+    die 1 "invalid description '$desc'; use only letters, numbers, '.', '_', and '-'"
+  fi
+  if ! git check-ref-format --branch "agent/$desc" >/dev/null 2>&1; then
+    die 1 "invalid description '$desc'; agent/$desc is not a valid branch name"
+  fi
+}
+
+default_remote_branch_for_dir() {
+  local dir="$1"
+  workspace_repo_default_branch "$dir"
+}
+
+has_unpushed_commits() {
+  local dir="$1"
+  local branch upstream base default_branch count
+
+  branch=$(git -C "$dir" branch --show-current 2>/dev/null || true)
+  [[ -n "$branch" ]] || return 1
+
+  upstream=$(git -C "$dir" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)
+  if [[ -n "$upstream" ]]; then
+    base="$upstream"
+  elif git -C "$dir" rev-parse --verify --quiet "refs/remotes/origin/${branch}^{commit}" >/dev/null; then
+    base="refs/remotes/origin/${branch}"
+  elif git -C "$dir" remote get-url origin >/dev/null 2>&1; then
+    default_branch=$(default_remote_branch_for_dir "$dir")
+    if git -C "$dir" rev-parse --verify --quiet "refs/remotes/origin/${default_branch}^{commit}" >/dev/null; then
+      base="refs/remotes/origin/${default_branch}"
+    else
+      return 1
+    fi
+  else
+    return 1
+  fi
+
+  count=$(git -C "$dir" rev-list --count "${base}..HEAD" 2>/dev/null || printf '0')
+  [[ "$count" =~ ^[0-9]+$ && "$count" -gt 0 ]]
+}
+
+refuse_protected_branch_record() {
+  local dir="$1"
+  local branch="$2"
+  local protected_branch
+  protected_branch=$(protected_branch_for_dir "$dir" || true)
+  if [[ -n "$protected_branch" && "$branch" == "$protected_branch" ]]; then
+    die 2 "refusing to commit directly to protected branch '$branch'; run 'allod change begin' first"
+  fi
+}
+
+change_begin() {
+  local desc="" desc_set=false repo_arg="" repo="" protected_branch="" branch=""
+  local slug worktree_path output status
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -d)
+        require_option_value "$1" "$#"
+        desc="$2"
+        desc_set=true
+        shift 2
+        ;;
+      -h|--help)
+        change_usage
+        exit 0
+        ;;
+      -*)
+        die 1 "unknown option for change begin: $1"
+        ;;
+      *)
+        [[ -z "$repo_arg" ]] || die 1 "change begin accepts at most one repo path"
+        repo_arg="$1"
+        shift
+        ;;
+    esac
+  done
+
+  repo=$(resolve_git_repo "${repo_arg:-$PWD}")
+  protected_branch=$(protected_branch_for_dir "$repo" || true)
+  if [[ -z "$protected_branch" ]]; then
+    printf '%s\n' "$repo"
+    return 0
+  fi
+
+  [[ "$desc_set" == true ]] ||
+    die 1 "change begin requires -d <description> for protected repo '$repo'"
+  validate_description "$desc"
+  branch="agent/$desc"
+
+  if ref_exists_local "$repo" "$branch"; then
+    die 5 "branch '$branch' already exists locally; use a different -d or clean it up"
+  fi
+  if ref_exists_remote "$repo" "$branch"; then
+    die 5 "branch '$branch' already exists on origin; use a different -d or clean it up"
+  fi
+
+  output=$(git -C "$repo" fetch origin 2>&1) || {
+    status=$?
+    printf '%s\n' "$output" >&2
+    exit "$status"
+  }
+
+  slug=$(repo_slug_for_dir "$repo")
+  worktree_path=$(mktemp -d "/tmp/allod-change-${slug}-${desc}-XXXXXX")
+  output=$(git -C "$repo" worktree add "$worktree_path" -b "$branch" "origin/$protected_branch" 2>&1) || {
+    status=$?
+    rm -rf "$worktree_path"
+    printf '%s\n' "$output" >&2
+    exit "$status"
+  }
+  printf '%s\n' "$worktree_path"
+}
+
+change_record() {
+  local repo branch message="" message_set=false message_file="" message_tmp=""
+  local should_commit=true commit_sha
+  local -a files=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -m|--message)
+        require_option_value "$1" "$#"
+        [[ "$message_set" == false ]] || die 1 "commit message specified more than once"
+        message="$2"
+        message_set=true
+        shift 2
+        ;;
+      -M|--message-file)
+        require_option_value "$1" "$#"
+        [[ "$message_set" == false ]] || die 1 "commit message specified more than once"
+        message_file="$2"
+        message=$(read_value "$message_file")
+        message_set=true
+        shift 2
+        ;;
+      -f|--files)
+        require_option_value "$1" "$#"
+        files+=("$2")
+        shift 2
+        ;;
+      -h|--help)
+        change_usage
+        exit 0
+        ;;
+      -*)
+        die 1 "unknown option for change record: $1"
+        ;;
+      *)
+        die 1 "unexpected argument for change record: $1"
+        ;;
+    esac
+  done
+
+  repo=$(resolve_git_repo "$PWD")
+  branch=$(current_branch_or_die "$repo")
+  refuse_protected_branch_record "$repo" "$branch"
+
+  if [[ "${#files[@]}" -gt 0 ]]; then
+    git -C "$repo" add -- "${files[@]}"
+  else
+    git -C "$repo" add -u
+  fi
+
+  if git -C "$repo" diff --cached --quiet; then
+    if has_unpushed_commits "$repo"; then
+      should_commit=false
+    else
+      die 4 "nothing to commit and no unpushed commits to push"
+    fi
+  fi
+
+  if [[ "$should_commit" == true ]]; then
+    [[ "$message_set" == true && -n "$message" ]] ||
+      die 1 "change record requires a non-empty commit message"
+    message_tmp=$(make_temp_file)
+    printf '%s' "$message" > "$message_tmp"
+    git -C "$repo" commit -F "$message_tmp"
+  fi
+
+  git -C "$repo" push -u origin HEAD
+  commit_sha=$(git -C "$repo" rev-parse --short HEAD)
+  printf 'Branch: %s\n' "$branch"
+  printf 'Commit: %s\n' "$commit_sha"
+}
+
+body_has_validation_heading() {
+  local body="$1"
+  printf '%s\n' "$body" | grep -Eq '^##[[:space:]]+Validation[[:space:]]*$'
+}
+
+change_submit() {
+  local repo branch title="" title_set=false body="" body_set=false body_source=""
+  local base="" depends_on="" dry_run=false body_tmp="" existing_pr output status
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -t|--title)
+        require_option_value "$1" "$#"
+        [[ "$title_set" == false ]] || die 1 "title specified more than once"
+        title="$2"
+        title_set=true
+        shift 2
+        ;;
+      -b|--body)
+        require_option_value "$1" "$#"
+        [[ "$body_set" == false ]] || die 1 "$1 cannot be combined with $body_source"
+        body="$2"
+        body_set=true
+        body_source="$1"
+        shift 2
+        ;;
+      -F|--body-file)
+        require_option_value "$1" "$#"
+        [[ "$body_set" == false ]] || die 1 "$1 cannot be combined with $body_source"
+        body=$(read_value "$2")
+        body_set=true
+        body_source="$1"
+        shift 2
+        ;;
+      --base)
+        require_option_value "$1" "$#"
+        [[ -n "$2" ]] || die 1 "--base cannot be empty"
+        base="$2"
+        shift 2
+        ;;
+      --depends-on)
+        require_option_value "$1" "$#"
+        [[ -z "$depends_on" ]] || die 1 "--depends-on specified more than once"
+        depends_on="$2"
+        shift 2
+        ;;
+      --dry-run)
+        dry_run=true
+        shift
+        ;;
+      -h|--help)
+        change_usage
+        exit 0
+        ;;
+      -*)
+        die 1 "unknown option for change submit: $1"
+        ;;
+      *)
+        die 1 "unexpected argument for change submit: $1"
+        ;;
+    esac
+  done
+
+  [[ "$title_set" == true && -n "$title" ]] ||
+    die 1 "change submit requires a non-empty title"
+
+  repo=$(resolve_git_repo "$PWD")
+  branch=$(current_branch_or_die "$repo")
+  [[ -n "$base" ]] || base=$(default_remote_branch_for_dir "$repo")
+
+  if [[ "$dry_run" == false ]] && ! command -v forge >/dev/null 2>&1; then
+    die 1 "'forge' not found on PATH"
+  fi
+
+  if ! body_has_validation_heading "$body"; then
+    die 3 "PR body must contain a '## Validation' section"
+  fi
+
+  if [[ -n "$depends_on" ]]; then
+    body="${body}"$'\n\n'"Depends on: ${depends_on}"
+  fi
+
+  if [[ "$dry_run" == true ]]; then
+    printf 'Branch: %s\n' "$branch"
+    printf 'Base: %s\n' "$base"
+    printf 'Title: %s\n' "$title"
+    printf 'Body:\n%s\n' "$body"
+    return 0
+  fi
+
+  set +e
+  existing_pr=$(forge pr find-by-head "$branch" 2>&1)
+  status=$?
+  set -e
+  if [[ "$status" -ne 0 ]]; then
+    printf '%s\n' "$existing_pr" >&2
+    exit "$status"
+  fi
+  if [[ -n "$existing_pr" ]]; then
+    die 6 "PR #$existing_pr already exists for '$branch'; use 'forge pr edit' instead"
+  fi
+
+  body_tmp=$(make_temp_file)
+  printf '%s' "$body" > "$body_tmp"
+
+  set +e
+  output=$(forge pr create -t "$title" -H "$branch" -B "$base" -F "$body_tmp" 2>&1)
+  status=$?
+  set -e
+  if [[ "$status" -ne 0 ]]; then
+    printf '%s\n' "$output" >&2
+    exit "$status"
+  fi
+  printf '%s\n' "$output"
+}
+
+change_cleanup() {
+  local path="${1:-}" extra="${2:-}" repo branch git_dir common_dir main_repo
+
+  [[ -n "$path" && -z "$extra" ]] ||
+    die 1 "usage: allod change cleanup <worktree-path>"
+
+  repo=$(resolve_git_repo "$path")
+  git_dir=$(git -C "$repo" rev-parse --path-format=absolute --git-dir)
+  common_dir=$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)
+  if [[ "$git_dir" == "$common_dir" ]]; then
+    die 1 "'$repo' is a regular repository, not a linked worktree"
+  fi
+
+  branch=$(current_branch_or_die "$repo")
+
+  if [[ -n "$(git -C "$repo" status --porcelain)" ]]; then
+    die 1 "worktree '$repo' is dirty; clean it before cleanup"
+  fi
+
+  if has_unpushed_commits "$repo"; then
+    die 1 "worktree '$repo' has unpushed commits; push or handle them before cleanup"
+  fi
+
+  main_repo=$(dirname "$common_dir")
+  git -C "$main_repo" worktree remove "$repo"
+  if [[ "$branch" == agent/* ]]; then
+    git -C "$main_repo" branch -D "$branch"
+  else
+    printf 'allod: removed worktree; leaving non-agent branch %s\n' "$branch" >&2
+  fi
+  git -C "$main_repo" worktree prune
+}
+
+change_main() {
+  local command="${1:-}"
+  [[ $# -gt 0 ]] || {
+    change_usage >&2
+    exit 1
+  }
+  shift
+
+  case "$command" in
+    begin) change_begin "$@" ;;
+    record) change_record "$@" ;;
+    submit) change_submit "$@" ;;
+    cleanup) change_cleanup "$@" ;;
+    -h|--help) change_usage ;;
+    *) die 1 "unknown change command: $command" ;;
+  esac
+}
+
+main() {
+  local namespace="${1:-}"
+  case "$namespace" in
+    change)
+      shift
+      change_main "$@"
+      ;;
+    -h|--help|"")
+      usage
+      [[ -n "$namespace" ]] || exit 1
+      ;;
+    *)
+      die 1 "unknown command namespace: $namespace"
+      ;;
+  esac
+}
+
+main "$@"
