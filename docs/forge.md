@@ -27,6 +27,7 @@ forge pr create --title <title> [--head <branch>] [--base <branch>] \
   [--body <text> | --body-file <file>]
 forge pr comment <number> [--body <text> | --body-file <file>]
 forge pr edit <number> [--title <title>] [--body <text> | --body-file <file>]
+forge pr close {<number> | <url> | <branch>} [--comment <text>] [--delete-branch]
 forge pr review-comments <number>          # list inline comments with IDs
 forge pr reply <number> <comment-id> [--body <text> | --body-file <file>]
 forge pr find-by-head <branch>             # print PR number if open PR exists for branch
@@ -35,6 +36,10 @@ forge pr find-by-head <branch>             # print PR number if open PR exists f
 `pr create` defaults `--head` to the current branch and `--base` to the
 repository's default branch. The `gh` short aliases are also supported:
 `-t`, `-b`, `-F`, `-H`, and `-B`.
+
+`pr close` accepts a PR number, full URL, or head branch name as its target.
+Use `-c`/`--comment` to leave a closing comment and `-d`/`--delete-branch` to
+delete the remote head branch after closing.
 
 ## Auth commands
 
