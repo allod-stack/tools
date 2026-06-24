@@ -248,6 +248,41 @@ in the closing comment.
 
 ---
 
+### `setup-tracked-hooks`
+
+Sets up `.hookspath` for repos that declare a `hookspath` field in the
+repository registry (`inventory/scripts/repositories.json`). For each
+matching repo cloned under `~/work/`:
+
+1. Writes `.hookspath` in the repo root pointing to the declared hooks directory
+2. Adds `.hookspath` to `.git/info/exclude` so it doesn't dirty `git status`
+
+Idempotent — safe to run repeatedly. Exits cleanly if the registry or repo
+is missing.
+
+```
+setup-tracked-hooks
+```
+
+Runs automatically on every `nixos-rebuild switch` via home-manager
+activation. Useful for upstream repos (e.g. `cdk`) where you can't commit
+`.hookspath` to the repo itself. The `protected-refs-policy` hook dispatcher
+picks up the hooks via `run_tracked_hook()`.
+
+To add tracked hooks for a new repo, add a `hookspath` field to its entry in
+`repositories.json`:
+
+```json
+"cdk-upstream": {
+  "source": "git",
+  "remote": "https://github.com/cashubtc/cdk.git",
+  "checkout": "cdk",
+  "hookspath": "misc/git-hooks"
+}
+```
+
+---
+
 ## Workflow
 
 ### Morning sync / getting up to speed
