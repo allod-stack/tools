@@ -53,6 +53,10 @@ done
 # --- Parallel infrastructure ---
 
 FLAKE_STATUS_JOBS="${FLAKE_STATUS_JOBS:-4}"
+if ! [[ "$FLAKE_STATUS_JOBS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "flake-status: FLAKE_STATUS_JOBS must be a positive integer, got: $FLAKE_STATUS_JOBS" >&2
+  exit 1
+fi
 _PTMP=""
 
 _parallel_init() {
@@ -181,8 +185,11 @@ _resolve_one_url() {
 
 # Collect unique URLs from $_PTMP/urls/*, resolve each in parallel.
 _resolve_all_upstreams() {
-  cat "$_PTMP"/urls/* 2>/dev/null | cut -f2 | sort -u \
-    > "$_PTMP/unique_urls" 2>/dev/null || true
+  local -a url_files=()
+  local f
+  for f in "$_PTMP"/urls/*; do [[ -f "$f" ]] && url_files+=("$f"); done
+  (( ${#url_files[@]} > 0 )) || return 0
+  cat "${url_files[@]}" | cut -f2 | sort -u > "$_PTMP/unique_urls"
   [[ -s "$_PTMP/unique_urls" ]] || return 0
   local count
   count=$(wc -l < "$_PTMP/unique_urls")
@@ -439,7 +446,7 @@ show_all_inputs() {
         local url=""
         local urls_file="$_PTMP/urls/$i"
         if [[ -f "$urls_file" ]]; then
-          url=$(grep -m1 "^${name}"$'\t' "$urls_file" 2>/dev/null | cut -f2 || true)
+          url=$(awk -F'\t' -v n="$name" '$1==n{print $2;exit}' "$urls_file")
         fi
         if [[ -n "$url" ]]; then
           local urev=""
