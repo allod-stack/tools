@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# setup-tracked-hooks - set up .hookspath and .git/info/exclude for repos
+#                       that declare a hookspath in the repository registry
+#
+# Reads repositories.json from the inventory checkout and, for each repo
+# with a "hookspath" field whose checkout exists under ~/work:
+#   1. Writes .hookspath in the repo root (idempotent)
+#   2. Adds .hookspath to .git/info/exclude if not already present
+#
+# Options:
+#   -h, --help    Show this help message
+
+set -euo pipefail
+
+for arg in "$@"; do
+  case "$arg" in
+    -h|--help)
+      sed -n '2,${/^#/!q; s/^# \{0,1\}//; p;}' "$0"
+      exit 0
+      ;;
+    *)
+      printf 'setup-tracked-hooks: unknown option: %s\n' "$arg" >&2
+      exit 1
+      ;;
+  esac
+done
+
+WORK_DIR="${HOME}/work"
+REGISTRY="${WORK_DIR}/allod/inventory/scripts/repositories.json"
+
+if [[ ! -r "$REGISTRY" ]]; then
+  echo "setup-tracked-hooks: registry not found: ${REGISTRY}" >&2
+  exit 0
+fi
+
+jq -r '
+  .repositories | to_entries[]
+  | select(.value.hookspath and .value.checkout)
+  | "\(.value.checkout) \(.value.hookspath)"
+' "$REGISTRY" | while read -r checkout hookspath; do
+  repo_dir="${WORK_DIR}/${checkout}"
+
+  [[ -d "$repo_dir/.git" ]] || continue
+
+  # Write .hookspath if missing or stale
+  hookspath_file="${repo_dir}/.hookspath"
+  if [[ ! -f "$hookspath_file" ]] || [[ "$(cat "$hookspath_file")" != "$hookspath" ]]; then
+    printf '%s\n' "$hookspath" > "$hookspath_file"
+    echo "  ${checkout}: wrote .hookspath → ${hookspath}"
+  fi
+
+  # Ensure .hookspath is in .git/info/exclude
+  exclude_file="${repo_dir}/.git/info/exclude"
+  mkdir -p "$(dirname "$exclude_file")"
+  if ! grep -qxF '.hookspath' "$exclude_file" 2>/dev/null; then
+    printf '%s\n' '.hookspath' >> "$exclude_file"
+    echo "  ${checkout}: added .hookspath to .git/info/exclude"
+  fi
+done
