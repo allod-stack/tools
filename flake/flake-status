@@ -50,19 +50,31 @@ for arg in "$@"; do
   esac
 done
 
-# --- Upstream cache ---
-declare -A _LS_REMOTE_CACHE=()
+# --- Parallel infrastructure ---
 
-cached_ls_remote() {
-  local url="$1"
-  if [[ -v _LS_REMOTE_CACHE["$url"] ]]; then
-    printf '%s' "${_LS_REMOTE_CACHE[$url]}"
-    return
-  fi
-  local rev
-  rev=$(git ls-remote "$url" HEAD 2>/dev/null | cut -f1 | head -1 || true)
-  _LS_REMOTE_CACHE["$url"]="${rev:-}"
-  printf '%s' "${rev:-}"
+FLAKE_STATUS_JOBS="${FLAKE_STATUS_JOBS:-4}"
+_PTMP=""
+
+_parallel_init() {
+  _PTMP=$(mktemp -d)
+  mkdir -p "$_PTMP/repo" "$_PTMP/urls" "$_PTMP/upstream"
+}
+
+trap '[[ -n "${_PTMP:-}" ]] && rm -rf "$_PTMP"' EXIT
+
+# Run "$@ $i" for i in 0..(count-1), bounded by FLAKE_STATUS_JOBS.
+_parallel_for() {
+  local count="$1"; shift
+  local running=0 i
+  for (( i=0; i<count; i++ )); do
+    "$@" "$i" &
+    running=$((running + 1))
+    if (( running >= FLAKE_STATUS_JOBS )); then
+      wait -n 2>/dev/null || true
+      running=$((running - 1))
+    fi
+  done
+  wait
 }
 
 # --- jq helpers ---
@@ -121,7 +133,6 @@ get_upstream_url() {
 
 # --- Git helpers ---
 
-# Return the default branch from the local remote-tracking ref (no network).
 # Output health warning strings for a repo (space-separated, may be empty).
 repo_health_warnings() {
   local dir="$1"
@@ -156,34 +167,100 @@ repo_health_warnings() {
   fi
 }
 
+# --- Upstream resolution ---
+
+# Resolve a single URL from $_PTMP/unique_urls (line $1+1) into $_PTMP/upstream/$1.
+_resolve_one_url() {
+  local idx="$1"
+  local url
+  url=$(sed -n "$((idx + 1))p" "$_PTMP/unique_urls")
+  local rev
+  rev=$(git ls-remote "$url" HEAD 2>/dev/null | cut -f1 | head -1 || true)
+  printf '%s' "${rev:-}" > "$_PTMP/upstream/$idx"
+}
+
+# Collect unique URLs from $_PTMP/urls/*, resolve each in parallel.
+_resolve_all_upstreams() {
+  cat "$_PTMP"/urls/* 2>/dev/null | cut -f2 | sort -u \
+    > "$_PTMP/unique_urls" 2>/dev/null || true
+  [[ -s "$_PTMP/unique_urls" ]] || return 0
+  local count
+  count=$(wc -l < "$_PTMP/unique_urls")
+  (( count > 0 )) && _parallel_for "$count" _resolve_one_url
+}
+
+# Look up resolved rev for a URL. Prints the rev or nothing.
+_lookup_upstream_rev() {
+  local url="$1"
+  [[ -f "$_PTMP/unique_urls" ]] || return 0
+  local line_num
+  line_num=$(grep -nxF "$url" "$_PTMP/unique_urls" | head -1 | cut -d: -f1 || true)
+  [[ -n "$line_num" ]] || return 0
+  local file="$_PTMP/upstream/$((line_num - 1))"
+  [[ -f "$file" ]] && cat "$file" || true
+}
+
 # --- Named input mode ---
+
+# Collect data for one repo. Writes a single TSV line to $_PTMP/repo/$1:
+#   status \t rev \t date \t health
+# Also writes "$INPUT_NAME \t url" to $_PTMP/urls/$1 when upstream is requested.
+_collect_named() {
+  local i="$1"
+  local repo="${REPOS[$i]}"
+  local dir="${WORK_DIR}/${repo}"
+  local out="$_PTMP/repo/$i"
+
+  if [[ ! -d "$dir" ]] || [[ ! -f "${dir}/flake.lock" ]]; then
+    printf 'skip\t\t\t\n' > "$out"
+    return
+  fi
+
+  local health=""
+  health=$(repo_health_warnings "$dir")
+
+  local pin=""
+  pin=$(get_input_pin "${dir}/flake.lock" "$INPUT_NAME")
+
+  if [[ -z "$pin" ]]; then
+    printf 'not-input\t\t\t%s\n' "$health" > "$out"
+  else
+    local rev date
+    rev=$(printf '%s' "$pin" | cut -f1)
+    date=$(printf '%s' "$pin" | cut -f2)
+    printf 'ok\t%s\t%s\t%s\n' "$rev" "$date" "$health" > "$out"
+
+    if [[ "$CHECK_UPSTREAM" == true ]]; then
+      local url=""
+      url=$(get_upstream_url "${dir}/flake.lock" "$INPUT_NAME")
+      [[ -n "$url" ]] && printf '%s\t%s\n' "$INPUT_NAME" "$url" > "$_PTMP/urls/$i"
+    fi
+  fi
+}
 
 show_named_input() {
   local input_name="$1"
+
+  _parallel_init
+  _parallel_for "${#REPOS[@]}" _collect_named
+
+  # Read collected data in workspace order
   local -a names=() revs=() dates=() statuses=() healths=()
+  local i
+  for (( i=0; i<${#REPOS[@]}; i++ )); do
+    local file="$_PTMP/repo/$i"
+    [[ -f "$file" ]] || continue
 
-  for repo in "${REPOS[@]}"; do
-    local dir="${WORK_DIR}/${repo}"
-    [[ -d "$dir" ]] || continue
+    local status rev date health
+    IFS=$'\t' read -r status rev date health < "$file"
 
-    local health=""
-    health=$(repo_health_warnings "$dir")
+    [[ "$status" == "skip" ]] && continue
 
-    [[ -f "${dir}/flake.lock" ]] || continue
-
-    local pin=""
-    pin=$(get_input_pin "${dir}/flake.lock" "$input_name")
-
-    if [[ -z "$pin" ]]; then
-      names+=("$repo"); revs+=(""); dates+=("")
-      statuses+=("not-input"); healths+=("$health")
-    else
-      local rev date
-      rev=$(printf '%s' "$pin" | cut -f1)
-      date=$(printf '%s' "$pin" | cut -f2)
-      names+=("$repo"); revs+=("$rev"); dates+=("$date")
-      statuses+=("ok"); healths+=("$health")
-    fi
+    names+=("${REPOS[$i]}")
+    statuses+=("$status")
+    revs+=("$rev")
+    dates+=("$date")
+    healths+=("$health")
   done
 
   if [[ ${#names[@]} -eq 0 ]]; then
@@ -256,19 +333,20 @@ show_named_input() {
 
   # Upstream check
   if [[ "$CHECK_UPSTREAM" == true && "$ok_count" -gt 0 ]]; then
+    _resolve_all_upstreams
+
     local upstream_url=""
-    for i in "${!statuses[@]}"; do
-      if [[ "${statuses[$i]}" == "ok" ]]; then
-        local dir="${WORK_DIR}/${names[$i]}"
-        upstream_url=$(get_upstream_url "${dir}/flake.lock" "$input_name")
-        [[ -n "$upstream_url" ]] && break
-      fi
+    for (( i=0; i<${#REPOS[@]}; i++ )); do
+      local uf="$_PTMP/urls/$i"
+      [[ -f "$uf" ]] || continue
+      upstream_url=$(head -1 "$uf" | cut -f2)
+      [[ -n "$upstream_url" ]] && break
     done
 
     echo ""
     if [[ -n "$upstream_url" ]]; then
       local upstream_rev=""
-      upstream_rev=$(cached_ls_remote "$upstream_url")
+      upstream_rev=$(_lookup_upstream_rev "$upstream_url")
       if [[ -n "$upstream_rev" ]]; then
         local short_upstream="${upstream_rev:0:7}"
         if [[ "$majority_rev" == "$short_upstream" ]]; then
@@ -287,36 +365,85 @@ show_named_input() {
 
 # --- All-inputs mode ---
 
+# Collect data for one repo. Writes to $_PTMP/repo/$1:
+#   Line 1: included \t health
+#   Lines 2+: name \t rev \t date (one per input)
+# Also writes "name \t url" lines to $_PTMP/urls/$1 when upstream is requested.
+_collect_all() {
+  local i="$1"
+  local repo="${REPOS[$i]}"
+  local dir="${WORK_DIR}/${repo}"
+  local out="$_PTMP/repo/$i"
+
+  if [[ ! -d "$dir" ]] || [[ ! -f "${dir}/flake.lock" ]]; then
+    printf '0\t\n' > "$out"
+    return
+  fi
+
+  local inputs=""
+  inputs=$(get_all_inputs "${dir}/flake.lock")
+  if [[ -z "$inputs" ]]; then
+    printf '0\t\n' > "$out"
+    return
+  fi
+
+  local health=""
+  health=$(repo_health_warnings "$dir")
+
+  {
+    printf '1\t%s\n' "$health"
+    printf '%s\n' "$inputs"
+  } > "$out"
+
+  if [[ "$CHECK_UPSTREAM" == true ]]; then
+    local urls_out="$_PTMP/urls/$i"
+    while IFS=$'\t' read -r name _rev _date; do
+      local url=""
+      url=$(get_upstream_url "${dir}/flake.lock" "$name")
+      [[ -n "$url" ]] && printf '%s\t%s\n' "$name" "$url"
+    done <<< "$inputs" > "$urls_out"
+    [[ -s "$urls_out" ]] || rm -f "$urls_out"
+  fi
+}
+
 show_all_inputs() {
-  local first=true
+  _parallel_init
+  _parallel_for "${#REPOS[@]}" _collect_all
+
+  if [[ "$CHECK_UPSTREAM" == true ]]; then
+    _resolve_all_upstreams
+  fi
+
+  local first=true i
   declare -A _outdated_local=()
   declare -A _outdated_external=()
 
-  for repo in "${REPOS[@]}"; do
-    local dir="${WORK_DIR}/${repo}"
-    [[ -d "$dir" ]] || continue
-    [[ -f "${dir}/flake.lock" ]] || continue
+  for (( i=0; i<${#REPOS[@]}; i++ )); do
+    local file="$_PTMP/repo/$i"
+    [[ -f "$file" ]] || continue
 
-    local inputs=""
-    inputs=$(get_all_inputs "${dir}/flake.lock")
-    [[ -n "$inputs" ]] || continue
+    local included health
+    IFS=$'\t' read -r included health < "$file"
+    [[ "$included" == "1" ]] || continue
 
     [[ "$first" == true ]] && first=false || echo ""
 
-    local health="" health_str=""
-    health=$(repo_health_warnings "$dir")
+    local health_str=""
     [[ -n "$health" ]] && health_str="  ${health}"
 
-    echo "==> ${repo}${health_str}"
+    echo "==> ${REPOS[$i]}${health_str}"
 
     while IFS=$'\t' read -r name rev date; do
       local suffix=""
       if [[ "$CHECK_UPSTREAM" == true ]]; then
         local url=""
-        url=$(get_upstream_url "${dir}/flake.lock" "$name")
+        local urls_file="$_PTMP/urls/$i"
+        if [[ -f "$urls_file" ]]; then
+          url=$(grep -m1 "^${name}"$'\t' "$urls_file" 2>/dev/null | cut -f2 || true)
+        fi
         if [[ -n "$url" ]]; then
           local urev=""
-          urev=$(cached_ls_remote "$url")
+          urev=$(_lookup_upstream_rev "$url")
           if [[ -n "$urev" ]]; then
             local short_urev="${urev:0:7}"
             if [[ "$rev" != "$short_urev" ]]; then
@@ -331,7 +458,7 @@ show_all_inputs() {
         fi
       fi
       printf '  %-20s  %-7s  %-10s%s\n' "$name" "$rev" "$date" "$suffix"
-    done <<< "$inputs"
+    done < <(tail -n +2 "$file")
   done
 
   if [[ ${#_outdated_local[@]} -gt 0 || ${#_outdated_external[@]} -gt 0 ]]; then
