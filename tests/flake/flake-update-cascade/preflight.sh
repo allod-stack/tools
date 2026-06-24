@@ -19,7 +19,7 @@ write_follow_lock "$HOME/work/follows"
 write_direct_lock "$HOME/work/protected"
 printf '%s\n' "work/protected master" > "$HOME/.config/git/protected-branches"
 export MOCK_SCENARIO=skips
-output=$(bash "$ROOT/flake-update-cascade" demo)
+output=$(bash "$ROOT/flake/flake-update-cascade" demo)
 assert_contains "$output" "no flake.lock, skipping" \
   "skips repositories without a lock file"
 assert_contains "$output" "no directly pinned demo input found, skipping" \

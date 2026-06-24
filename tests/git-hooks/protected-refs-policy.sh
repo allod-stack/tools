@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-policy="$repo_root/protected-refs-policy"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+policy="$repo_root/git-hooks/protected-refs-policy"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT

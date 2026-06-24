@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -133,7 +133,7 @@ fail() {
 }
 
 before=$(sha256sum "$REPO/flake.lock")
-output=$(bash "$ROOT/flake-update-cascade" nixpkgs allod-tools --dry-run)
+output=$(bash "$ROOT/flake/flake-update-cascade" nixpkgs allod-tools --dry-run)
 after=$(sha256sum "$REPO/flake.lock")
 
 [[ "$before" == "$after" ]] || fail "dry-run changed flake.lock"
@@ -149,7 +149,7 @@ grep -Fq \
 
 : > "$MOCK_LOG"
 export MOCK_MODE=direct
-output=$(bash "$ROOT/flake-update-cascade" nixpkgs allod-tools)
+output=$(bash "$ROOT/flake/flake-update-cascade" nixpkgs allod-tools)
 [[ "$output" == *"committed and pushed"* ]] ||
   fail "direct update did not complete"
 [[ "$(grep -c $'^nix\tflake update' "$MOCK_LOG")" == 1 ]] ||
@@ -159,7 +159,7 @@ grep -Fq $'git\tcommit -m flake.lock: update nixpkgs, allod-tools' "$MOCK_LOG" |
 
 : > "$MOCK_LOG"
 export MOCK_MODE=preflight-fail
-if bash "$ROOT/flake-update-cascade" nixpkgs allod-tools --dry-run >/dev/null 2>&1; then
+if bash "$ROOT/flake/flake-update-cascade" nixpkgs allod-tools --dry-run >/dev/null 2>&1; then
   fail "pre-flight failure returned success"
 fi
 [[ "$(grep -c $'^nix\t' "$MOCK_LOG" || true)" == 0 ]] ||

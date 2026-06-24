@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -130,7 +130,7 @@ assert_log_not_contains() {
 
 # --- Default mode (no flags): pull current branch, no switching ---
 
-output=$("$ROOT/pull-all")
+output=$("$ROOT/workspace/pull-all")
 
 assert_output_contains "clean                     up to date [master]" \
   "default: reports an up-to-date default branch"
@@ -155,7 +155,7 @@ assert_log_not_contains $'^dirty\tpull$' \
 # --- --switch mode: switch clean branches ---
 
 : > "$MOCK_LOG"
-output=$("$ROOT/pull-all" --switch)
+output=$("$ROOT/workspace/pull-all" --switch)
 
 assert_output_contains "clean                     up to date [master]" \
   "--switch: reports an up-to-date default branch"
@@ -184,7 +184,7 @@ assert_log_not_contains $'^(dirty|local|unpushed)\tpull$' \
 
 # --- --help ---
 
-help_output=$("$ROOT/pull-all" --help)
+help_output=$("$ROOT/workspace/pull-all" --help)
 
 if [[ "$help_output" == *"--switch"* ]]; then
   pass "--help mentions --switch flag"

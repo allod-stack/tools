@@ -5,7 +5,7 @@ new_home dry-run
 write_direct_lock "$HOME/work/app"
 before=$(sha256sum "$HOME/work/app/flake.lock")
 export MOCK_SCENARIO=dry-run
-output=$(bash "$ROOT/flake-update-cascade" demo --dry-run)
+output=$(bash "$ROOT/flake/flake-update-cascade" demo --dry-run)
 assert_contains "$output" "demo: aaaaaaa → bbbbbbb" \
   "reports the proposed revision change"
 assert_contains "$output" "dry-run: no changes made" \

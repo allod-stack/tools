@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -117,7 +117,7 @@ assert_not_contains() {
   fi
 }
 
-output=$(bash "$ROOT/flake-status" demo)
+output=$(bash "$ROOT/flake/flake-status" demo)
 assert_contains "$output" "demo — INCONSISTENT (1 repo differs)" \
   "reports inconsistent revisions"
 assert_contains "$output" "alpha                 aaaaaaa  1970-01-01" \
@@ -137,18 +137,18 @@ assert_contains "$output" "gamma                 (not an input)" \
 assert_not_contains "$output" "no-lock" \
   "omits repositories without a lock file"
 
-upstream=$(bash "$ROOT/flake-status" demo --upstream)
+upstream=$(bash "$ROOT/flake/flake-status" demo --upstream)
 assert_contains "$upstream" "upstream: ccccccc (local pins are behind)" \
   "reports when local pins are behind upstream"
 
-if output=$(bash "$ROOT/flake-status" demo --check-upstream 2>&1); then
+if output=$(bash "$ROOT/flake/flake-status" demo --check-upstream 2>&1); then
   fail "rejects the removed --check-upstream alias" \
     "command unexpectedly succeeded" "$output"
 fi
 assert_contains "$output" "unknown option: --check-upstream" \
   "rejects the removed --check-upstream alias"
 
-all=$(bash "$ROOT/flake-status")
+all=$(bash "$ROOT/flake/flake-status")
 assert_contains "$all" "==> alpha" \
   "shows repository headings in all-input mode"
 assert_contains "$all" "demo                  aaaaaaa  1970-01-01" \
@@ -156,7 +156,7 @@ assert_contains "$all" "demo                  aaaaaaa  1970-01-01" \
 assert_not_contains "$all" "followed" \
   "omits follows inputs from all-input mode"
 
-all_upstream=$(bash "$ROOT/flake-status" --upstream)
+all_upstream=$(bash "$ROOT/flake/flake-status" --upstream)
 assert_contains "$all_upstream" "→ ccccccc" \
   "shows upstream arrow inline in all-input mode"
 assert_not_contains "$all_upstream" "upstream:" \
@@ -166,16 +166,16 @@ assert_contains "$all_upstream" "flake-update-cascade demo" \
 assert_contains "$all_upstream" "Outdated (external):" \
   "labels github inputs as external"
 
-help=$(bash "$ROOT/flake-status" --help)
+help=$(bash "$ROOT/flake/flake-status" --help)
 assert_contains "$help" "Usage: flake-status" "prints usage for --help"
 
-if output=$(bash "$ROOT/flake-status" --invalid 2>&1); then
+if output=$(bash "$ROOT/flake/flake-status" --invalid 2>&1); then
   fail "rejects an unknown option" "command unexpectedly succeeded" "$output"
 fi
 assert_contains "$output" "unknown option: --invalid" \
   "explains an unknown-option failure"
 
-if output=$(bash "$ROOT/flake-status" one two 2>&1); then
+if output=$(bash "$ROOT/flake/flake-status" one two 2>&1); then
   fail "rejects an extra positional argument" "command unexpectedly succeeded" "$output"
 fi
 assert_contains "$output" "unexpected argument: two" \

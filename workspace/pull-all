@@ -31,11 +31,9 @@ for arg in "$@"; do
   esac
 done
 
-WORK_DIR="${HOME}/work"
-
 if ! declare -F workspace_collect_repos >/dev/null; then
   # shellcheck source=/dev/null
-  source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/workspace.sh"
+  source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/../lib/workspace.sh"
 fi
 
 mapfile -t REPOS < <(workspace_collect_repos "$WORK_DIR")

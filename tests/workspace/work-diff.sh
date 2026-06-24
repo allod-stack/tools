@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -60,7 +60,7 @@ assert_not_contains() {
   fi
 }
 
-output=$(bash "$ROOT/work-diff")
+output=$(bash "$ROOT/workspace/work-diff")
 assert_not_contains "$output" "$WORK  [" \
   "ignores an invalid .git marker at the workspace root"
 assert_contains "$output" "clean  [master]" "discovers a top-level clean repository"
@@ -77,25 +77,25 @@ assert_contains "$output" "group/nested  [master]" "recursively discovers a nest
 embedded="$TMP/work-diff-embedded"
 {
   cat "$ROOT/lib/workspace.sh"
-  cat "$ROOT/work-diff"
+  cat "$ROOT/workspace/work-diff"
 } > "$embedded"
 embedded_output=$(bash "$embedded")
 assert_contains "$embedded_output" "group/nested  [master]" \
   "works when the shared library is embedded by Nix packaging"
 
-target=$(bash "$ROOT/work-diff" changed)
+target=$(bash "$ROOT/workspace/work-diff" changed)
 assert_contains "$target" "changed  [master]" "shows the requested repository in targeted mode"
 assert_not_contains "$target" "clean  [master]" "excludes other repositories in targeted mode"
 
-help=$(bash "$ROOT/work-diff" --help)
+help=$(bash "$ROOT/workspace/work-diff" --help)
 assert_contains "$help" "Usage: work-diff" "prints usage for --help"
 
-if output=$(bash "$ROOT/work-diff" --invalid 2>&1); then
+if output=$(bash "$ROOT/workspace/work-diff" --invalid 2>&1); then
   fail "rejects an unknown option" "command unexpectedly succeeded" "$output"
 fi
 assert_contains "$output" "Unknown option: --invalid" "explains an unknown-option failure"
 
-if output=$(bash "$ROOT/work-diff" missing 2>&1); then
+if output=$(bash "$ROOT/workspace/work-diff" missing 2>&1); then
   fail "rejects a missing repository" "command unexpectedly succeeded" "$output"
 fi
 assert_contains "$output" "Error: 'missing' not found" "explains a missing-repository failure"

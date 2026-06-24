@@ -1,3 +1,5 @@
+WORK_DIR="${WORK_DIR:-${HOME}/work}"
+
 workspace_is_repo_root() {
   local dir="$1" top
   [[ -e "$dir/.git" ]] || return 1

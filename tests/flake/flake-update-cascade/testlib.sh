@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -154,7 +154,7 @@ run_fail() {
   local expected="$1" description="$2"
   shift 2
   local output
-  if output=$(bash "$ROOT/flake-update-cascade" "$@" 2>&1); then
+  if output=$(bash "$ROOT/flake/flake-update-cascade" "$@" 2>&1); then
     fail "$description" "command unexpectedly succeeded: $*" "$output"
   elif [[ "$output" == *"$expected"* ]]; then
     pass "$description"

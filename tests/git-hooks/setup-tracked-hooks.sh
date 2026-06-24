@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-script="$repo_root/setup-tracked-hooks"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+script="$repo_root/git-hooks/setup-tracked-hooks"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT

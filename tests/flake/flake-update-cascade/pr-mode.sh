@@ -4,7 +4,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/testlib.sh"
 new_home pr
 write_direct_lock "$HOME/work/app"
 export MOCK_SCENARIO=pr
-output=$(bash "$ROOT/flake-update-cascade" demo --pr)
+output=$(bash "$ROOT/flake/flake-update-cascade" demo --pr)
 assert_contains "$output" "aaaaaaa → bbbbbbb" "reports the updated revision"
 assert_contains "$output" "PR #42 updated" "reports an existing PR update"
 assert_log_contains $'git\tapp\tcheckout -B agent/flake-update-demo' \
