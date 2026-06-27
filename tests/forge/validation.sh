@@ -20,6 +20,8 @@ run_fail "requires --title, --body, or --body-file" \
   "requires a change when editing an issue" issue edit 20
 run_fail "requires --body or --body-file" "requires a pull request comment body" \
   pr comment 12
+run_fail "requires --body or --body-file" "requires an issue comment body" \
+  issue comment 20
 run_fail "unexpected argument" "rejects legacy positional PR creation" \
   pr create "legacy title" topic
 run_fail "unknown option" "rejects an unknown PR edit option" \

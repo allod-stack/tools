@@ -149,7 +149,11 @@ case "$url" in
     fi
     ;;
   */api/v1/repos/acme/widget/issues/20/comments)
-    printf '%s\n' '[{"body":"Issue note","created_at":"2026-06-03T00:00:00Z","user":{"login":"erin"}}]'
+    if [[ "$method" == GET ]]; then
+      printf '%s\n' '[{"body":"Issue note","created_at":"2026-06-03T00:00:00Z","user":{"login":"erin"}}]'
+    else
+      printf '%s\n' '{"html_url":"https://forge.example/acme/widget/issues/20#comment-2"}'
+    fi
     ;;
   */api/v1/repos/acme/widget/issues)
     printf '%s\n' '{"html_url":"https://forge.example/acme/widget/issues/20"}'

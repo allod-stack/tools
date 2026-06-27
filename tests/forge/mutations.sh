@@ -73,4 +73,18 @@ assert_request 1 PATCH "/api/v1/repos/acme/widget/issues/20" "updates an issue"
 assert_json 1 '. == {title: "Updated", body: "stdin body\n\n"}' \
   "preserves issue body content read from stdin"
 
+reset_requests
+run_ok issue comment 20 -b "issue comment body"
+assert_request 1 POST "/api/v1/repos/acme/widget/issues/20/comments" \
+  "posts an issue comment"
+assert_json 1 '.body == "issue comment body"' \
+  "sends the issue comment body"
+
+reset_requests
+run_ok issue comment 20 -F "$TMP/pr-body.md"
+assert_request 1 POST "/api/v1/repos/acme/widget/issues/20/comments" \
+  "posts an issue comment from file"
+assert_json 1 '.body == "line one\n`code`\n\n"' \
+  "preserves multiline issue comment content from file"
+
 finish_tests "Forge mutation"

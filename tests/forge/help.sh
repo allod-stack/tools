@@ -29,6 +29,9 @@ assert_contains "$output" "--title" "pr edit --help shows --title flag"
 output=$(run_capture pr comment --help)
 assert_contains "$output" "--body" "pr comment --help shows --body flag"
 
+output=$(run_capture issue comment --help)
+assert_contains "$output" "--body" "issue comment --help shows --body flag"
+
 output=$(run_capture pr reply --help)
 assert_contains "$output" "--body" "pr reply --help shows --body flag"
 assert_contains "$output" "<comment-id>" "pr reply --help shows comment-id positional"

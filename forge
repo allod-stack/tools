@@ -26,6 +26,7 @@
 #   forge issue view <number>                   Show issue details and comments
 #   forge issue create --title <title> [flags]  Create an issue
 #   forge issue edit <number> [flags]           Edit an issue
+#   forge issue comment <number> --body <text>  Post a comment on an issue
 #   forge issue close <number-or-url> [flags]    Close an issue
 #
 # Config (env vars):
@@ -841,6 +842,42 @@ issue_edit() {
   echo "Issue updated: $url"
 }
 
+issue_comment() {
+  contains_help_flag "$@" && { command_usage "issue comment"; return; }
+  local number="" number_set=false
+  reset_body_option
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -R|--repo)
+        set_repo_option "$@"
+        shift 2
+        ;;
+      -b|--body|-F|--body-file)
+        require_option_value "$1" "$#"
+        set_body_option "$1" "$2"
+        shift 2
+        ;;
+      -*) die "unknown option for issue comment: $1" ;;
+      *)
+        [[ "$number_set" == false ]] || die "unexpected argument for issue comment: $1"
+        number="$1"
+        number_set=true
+        shift
+        ;;
+    esac
+  done
+  [[ "$number_set" == true && -n "$number" ]] || {
+    die "usage: forge issue comment <number> [--body <text> | --body-file <file>]"
+  }
+  [[ "$BODY_SET" == true ]] || die "issue comment requires --body or --body-file"
+  require_repo
+
+  local url
+  url=$(api POST "/repos/$REPO/issues/$number/comments" \
+    -d "$(jq -n --arg body "$BODY" '{body: $body}')" | jq -r '.html_url')
+  echo "Comment posted: $url"
+}
+
 resolve_issue_target() {
   local target="$1"
   if [[ "$target" =~ ^[0-9]+$ ]]; then
@@ -1197,6 +1234,17 @@ Flags:
   -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
 USAGE
       ;;
+    "issue comment") cat <<'USAGE'
+Usage: forge issue comment <number> [-b <text> | -F <file>] [-R <owner/repo>]
+
+Post a comment on an issue.
+
+Flags:
+  -b, --body <text>         Comment body
+  -F, --body-file <file>    Read body from file (use "-" for stdin)
+  -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
+USAGE
+      ;;
     "issue edit") cat <<'USAGE'
 Usage: forge issue edit <number> [-t <title>] [-b <text> | -F <file>] [-R <owner/repo>]
 
@@ -1288,6 +1336,8 @@ Issue commands:
       Create an issue
   forge issue edit <number> [-t <title>] [-b <text> | -F <file>]
       Update issue title and/or description
+  forge issue comment <number> [-b <text> | -F <file>]
+      Post a comment on an issue
   forge issue close {<number> | <url>} [-c <text>] [-r <reason>] [--duplicate-of <issue>]
       Close an issue; reasons: completed, not planned, duplicate
 
@@ -1332,7 +1382,8 @@ case "$RESOURCE" in
       list)   issue_list "$@" ;;
       view)   issue_view "$@" ;;
       create) issue_create "$@" ;;
-      edit)   issue_edit "$@" ;;
+      edit)    issue_edit "$@" ;;
+      comment) issue_comment "$@" ;;
       close)  issue_close "$@" ;;
       -h|--help) usage ;;
       *)      usage; exit 1 ;;
