@@ -387,8 +387,9 @@ pr_edit() {
   echo "PR updated: $url"
 }
 
-pr_comment() {
-  contains_help_flag "$@" && { command_usage "pr comment"; return; }
+post_comment() {
+  local context="$1"; shift
+  contains_help_flag "$@" && { command_usage "$context"; return; }
   local number="" number_set=false
   reset_body_option
   while [[ $# -gt 0 ]]; do
@@ -402,9 +403,9 @@ pr_comment() {
         set_body_option "$1" "$2"
         shift 2
         ;;
-      -*) die "unknown option for pr comment: $1" ;;
+      -*) die "unknown option for $context: $1" ;;
       *)
-        [[ "$number_set" == false ]] || die "unexpected argument for pr comment: $1"
+        [[ "$number_set" == false ]] || die "unexpected argument for $context: $1"
         number="$1"
         number_set=true
         shift
@@ -412,9 +413,9 @@ pr_comment() {
     esac
   done
   [[ "$number_set" == true && -n "$number" ]] || {
-    die "usage: forge pr comment <number> [--body <text> | --body-file <file>]"
+    die "usage: forge $context <number> [--body <text> | --body-file <file>]"
   }
-  [[ "$BODY_SET" == true ]] || die "pr comment requires --body or --body-file"
+  [[ "$BODY_SET" == true ]] || die "$context requires --body or --body-file"
   require_repo
 
   local url
@@ -422,6 +423,9 @@ pr_comment() {
     -d "$(jq -n --arg body "$BODY" '{body: $body}')" | jq -r '.html_url')
   echo "Comment posted: $url"
 }
+
+pr_comment() { post_comment "pr comment" "$@"; }
+
 
 pr_reply() {
   contains_help_flag "$@" && { command_usage "pr reply"; return; }
@@ -842,41 +846,7 @@ issue_edit() {
   echo "Issue updated: $url"
 }
 
-issue_comment() {
-  contains_help_flag "$@" && { command_usage "issue comment"; return; }
-  local number="" number_set=false
-  reset_body_option
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      -R|--repo)
-        set_repo_option "$@"
-        shift 2
-        ;;
-      -b|--body|-F|--body-file)
-        require_option_value "$1" "$#"
-        set_body_option "$1" "$2"
-        shift 2
-        ;;
-      -*) die "unknown option for issue comment: $1" ;;
-      *)
-        [[ "$number_set" == false ]] || die "unexpected argument for issue comment: $1"
-        number="$1"
-        number_set=true
-        shift
-        ;;
-    esac
-  done
-  [[ "$number_set" == true && -n "$number" ]] || {
-    die "usage: forge issue comment <number> [--body <text> | --body-file <file>]"
-  }
-  [[ "$BODY_SET" == true ]] || die "issue comment requires --body or --body-file"
-  require_repo
-
-  local url
-  url=$(api POST "/repos/$REPO/issues/$number/comments" \
-    -d "$(jq -n --arg body "$BODY" '{body: $body}')" | jq -r '.html_url')
-  echo "Comment posted: $url"
-}
+issue_comment() { post_comment "issue comment" "$@"; }
 
 resolve_issue_target() {
   local target="$1"
