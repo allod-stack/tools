@@ -332,8 +332,9 @@ pr_review_comments() {
   done <<< "$review_ids"
 }
 
-pr_edit() {
-  contains_help_flag "$@" && { command_usage "pr edit"; return; }
+edit_resource() {
+  local context="$1" api_path="$2" label="$3"; shift 3
+  contains_help_flag "$@" && { command_usage "$context"; return; }
   local number="" number_set=false
   local title="" title_set=false
   reset_body_option
@@ -355,9 +356,9 @@ pr_edit() {
         set_body_option "$1" "$2"
         shift 2
         ;;
-      -*) die "unknown option for pr edit: $1" ;;
+      -*) die "unknown option for $context: $1" ;;
       *)
-        [[ "$number_set" == false ]] || die "unexpected argument for pr edit: $1"
+        [[ "$number_set" == false ]] || die "unexpected argument for $context: $1"
         number="$1"
         number_set=true
         shift
@@ -366,10 +367,10 @@ pr_edit() {
   done
 
   [[ "$number_set" == true && -n "$number" ]] || {
-    die "usage: forge pr edit <number> [--title <title>] [--body <text> | --body-file <file>]"
+    die "usage: forge $context <number> [--title <title>] [--body <text> | --body-file <file>]"
   }
   [[ "$title_set" == true || "$BODY_SET" == true ]] || {
-    die "pr edit requires --title, --body, or --body-file"
+    die "$context requires --title, --body, or --body-file"
   }
   [[ "$title_set" == false || -n "$title" ]] || die "--title cannot be empty"
   require_repo
@@ -383,9 +384,11 @@ pr_edit() {
     '{} | if $title_set then . + {title: $title} else . end
         | if $body_set  then . + {body: $body}  else . end')
   local url
-  url=$(api PATCH "/repos/$REPO/pulls/$number" -d "$payload" | jq -r '.html_url')
-  echo "PR updated: $url"
+  url=$(api PATCH "/repos/$REPO/$api_path/$number" -d "$payload" | jq -r '.html_url')
+  echo "$label updated: $url"
 }
+
+pr_edit() { edit_resource "pr edit" "pulls" "PR" "$@"; }
 
 post_comment() {
   local context="$1"; shift
@@ -791,60 +794,7 @@ issue_create() {
   echo "Issue created: $url"
 }
 
-issue_edit() {
-  contains_help_flag "$@" && { command_usage "issue edit"; return; }
-  local number="" number_set=false
-  local title="" title_set=false
-  reset_body_option
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      -R|--repo)
-        set_repo_option "$@"
-        shift 2
-        ;;
-      -t|--title)
-        require_option_value "$1" "$#"
-        [[ "$title_set" == false ]] || die "$1 specified more than once"
-        title="$2"
-        title_set=true
-        shift 2
-        ;;
-      -b|--body|-F|--body-file)
-        require_option_value "$1" "$#"
-        set_body_option "$1" "$2"
-        shift 2
-        ;;
-      -*) die "unknown option for issue edit: $1" ;;
-      *)
-        [[ "$number_set" == false ]] || die "unexpected argument for issue edit: $1"
-        number="$1"
-        number_set=true
-        shift
-        ;;
-    esac
-  done
-
-  [[ "$number_set" == true && -n "$number" ]] || {
-    die "usage: forge issue edit <number> [--title <title>] [--body <text> | --body-file <file>]"
-  }
-  [[ "$title_set" == true || "$BODY_SET" == true ]] || {
-    die "issue edit requires --title, --body, or --body-file"
-  }
-  [[ "$title_set" == false || -n "$title" ]] || die "--title cannot be empty"
-  require_repo
-
-  local payload
-  payload=$(jq -n \
-    --arg title "$title" \
-    --arg body "$BODY" \
-    --argjson title_set "$title_set" \
-    --argjson body_set "$BODY_SET" \
-    '{} | if $title_set then . + {title: $title} else . end
-        | if $body_set  then . + {body: $body}  else . end')
-  local url
-  url=$(api PATCH "/repos/$REPO/issues/$number" -d "$payload" | jq -r '.html_url')
-  echo "Issue updated: $url"
-}
+issue_edit() { edit_resource "issue edit" "issues" "Issue" "$@"; }
 
 issue_comment() { post_comment "issue comment" "$@"; }
 
