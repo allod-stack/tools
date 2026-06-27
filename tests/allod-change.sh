@@ -490,16 +490,6 @@ assert_contains "$forge_calls" "pr create -t Submit valid -H agent/submit-valid 
   "submit calls forge pr create with expected args"
 assert_contains "$(cat "$forge_body")" "## Validation" "submit passes body file to forge"
 
-repo="$HOME/work/submit-missing-validation"
-init_repo "$repo" master
-git -C "$repo" checkout -q -b agent/submit-missing-validation
-forge_log="$TMP/forge-missing-validation.log"
-forge_body="$TMP/forge-missing-validation.body"
-export MOCK_FORGE_LOG="$forge_log" MOCK_FORGE_BODY_LOG="$forge_body" MOCK_FORGE_MODE=""
-forge_bin=$(make_mock_forge missing-validation)
-capture_with_path "$forge_bin:$PATH" submit_in_repo "$repo" -t "Missing validation" -b "No validation"
-assert_status 3 "submit rejects body without validation section"
-
 repo="$HOME/work/submit-depends"
 init_repo "$repo" master
 git -C "$repo" checkout -q -b agent/submit-depends
@@ -522,9 +512,6 @@ assert_contains "$CAPTURE_OUTPUT" "Base: develop" "submit dry-run prints base"
 assert_contains "$CAPTURE_OUTPUT" "Title: Dry run" "submit dry-run prints title"
 assert_contains "$CAPTURE_OUTPUT" "Depends on: #9" "submit dry-run prints assembled body"
 
-capture_with_path "$no_forge_path" submit_in_repo "$repo" -t "Dry invalid" -b "No validation" --dry-run
-assert_status 3 "submit dry-run still validates body"
-
 repo="$HOME/work/submit-no-forge"
 init_repo "$repo" master
 git -C "$repo" checkout -q -b agent/submit-no-forge
@@ -543,24 +530,6 @@ capture_with_path "$forge_bin:$PATH" submit_in_repo "$repo" -t "Existing" -b "$b
 assert_status 6 "submit rejects branch with existing PR"
 assert_contains "$CAPTURE_OUTPUT" "forge pr edit" "submit directs user to forge pr edit"
 assert_not_contains "$(cat "$forge_log")" "pr create" "submit does not create duplicate PR"
-
-repo="$HOME/work/submit-docs-only"
-init_repo "$repo" master
-git -C "$repo" checkout -q -b agent/submit-docs-only
-forge_log="$TMP/forge-docs-only.log"
-forge_body="$TMP/forge-docs-only.body"
-export MOCK_FORGE_LOG="$forge_log" MOCK_FORGE_BODY_LOG="$forge_body" MOCK_FORGE_MODE=""
-forge_bin=$(make_mock_forge docs-only)
-capture_with_path "$forge_bin:$PATH" submit_in_repo "$repo" -t "Docs only" -b "Update README" --docs-only
-assert_status 0 "submit --docs-only skips validation requirement"
-assert_contains "$(cat "$forge_body")" "Update README" "submit --docs-only passes body to forge"
-
-repo="$HOME/work/submit-docs-only-dry"
-init_repo "$repo" master
-git -C "$repo" checkout -q -b agent/submit-docs-only-dry
-capture_with_path "$no_forge_path" submit_in_repo "$repo" -t "Docs dry" -b "Update README" --docs-only --dry-run
-assert_status 0 "submit --docs-only dry-run skips validation"
-assert_contains "$CAPTURE_OUTPUT" "Title: Docs dry" "submit --docs-only dry-run prints title"
 
 repo="$HOME/work/submit-detached"
 init_repo "$repo" master

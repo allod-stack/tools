@@ -35,7 +35,7 @@ Usage:
   allod change begin [-d <description>] [<repo-path>]
   allod change record -m <message> [--files <file>...]
   allod change record -M <file|-> [--files <file>...]
-  allod change submit -t <title> (-b <body> | -F <file|->) [--base <branch>] [--depends-on <text>] [--docs-only] [--dry-run]
+  allod change submit -t <title> (-b <body> | -F <file|->) [--base <branch>] [--depends-on <text>] [--dry-run]
   allod change cleanup <worktree-path>
 EOF
 }
@@ -345,14 +345,9 @@ change_record() {
   printf 'Commit: %s\n' "$commit_sha"
 }
 
-body_has_validation_heading() {
-  local body="$1"
-  printf '%s\n' "$body" | grep -Eq '^##[[:space:]]+Validation[[:space:]]*$'
-}
-
 change_submit() {
   local repo branch title="" title_set=false body="" body_set=false body_source=""
-  local base="" depends_on="" docs_only=false dry_run=false body_tmp="" existing_pr output status
+  local base="" depends_on="" dry_run=false body_tmp="" existing_pr output status
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -391,10 +386,6 @@ change_submit() {
         depends_on="$2"
         shift 2
         ;;
-      --docs-only)
-        docs_only=true
-        shift
-        ;;
       --dry-run)
         dry_run=true
         shift
@@ -421,10 +412,6 @@ change_submit() {
 
   if [[ "$dry_run" == false ]] && ! command -v forge >/dev/null 2>&1; then
     die 1 "'forge' not found on PATH"
-  fi
-
-  if [[ "$docs_only" == false ]] && ! body_has_validation_heading "$body"; then
-    die 3 "PR body must contain a '## Validation' section"
   fi
 
   if [[ -n "$depends_on" ]]; then
