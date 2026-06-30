@@ -215,6 +215,14 @@ case "${MOCK_SSH_FAIL:-}" in
       exit 0
     fi
     ;;
+  bad_tmpdir_*)
+    # On the generate call, return a crafted tmpdir path instead of running the script
+    if [[ "$count" -eq 1 ]]; then
+      # Extract the crafted value after "bad_tmpdir_"
+      printf '%s' "${MOCK_SSH_FAIL#bad_tmpdir_}"
+      exit 0
+    fi
+    ;;
 esac
 
 # Execute the remote command locally with stdin/stdout preserved
@@ -1216,6 +1224,69 @@ capture_with_path "$combined_path" bash "$ALLOD" patch receive "testhost:$source
 assert_status 0 "receive --push exits 0"
 push_calls=$(cat "$push_log")
 assert_contains "$push_calls" "push" "receive --push triggers git push"
+
+# ================================================================
+# Additional validation tests (review findings)
+# ================================================================
+
+# --- Manifest validation: control-character filename ---
+bad_artifact="$TMP/artifacts/apply-ctrl-char"
+mkdir -p "$bad_artifact"
+base_sha=$(git -C "$dest_repo" rev-parse HEAD)
+cat > "$bad_artifact/manifest.json" <<BADJSON
+{"repo_remote":"x","base_commit":"${base_sha}","head_commit":"${base_sha}","patch_count":1,"patches":[{"filename":"0001-foo\u0007bar.patch","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}
+BADJSON
+capture bash "$ALLOD" patch apply "$bad_artifact" --repo "$dest_repo"
+assert_status 12 "apply control-character filename exits 12"
+assert_contains "$CAPTURE_OUTPUT" "invalid" "apply control-character filename message"
+rm -rf "$bad_artifact"
+
+# --- Remote tmpdir validation: empty response ---
+source_repo="$TMP/repos/fetch-tmpdir-empty"
+init_repo "$source_repo" master
+add_commit "$source_repo" "tmpdir empty test"
+
+reset_mock_ssh
+export MOCK_SSH_FAIL="bad_tmpdir_"
+capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo"
+assert_status 1 "fetch empty tmpdir exits 1"
+assert_contains "$CAPTURE_OUTPUT" "no output" "fetch empty tmpdir message"
+export MOCK_SSH_FAIL=""
+
+# --- Remote tmpdir validation: relative path ---
+reset_mock_ssh
+export MOCK_SSH_FAIL="bad_tmpdir_tmp/allod-patch.abcdefghij"
+capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo"
+assert_status 1 "fetch relative tmpdir exits 1"
+assert_contains "$CAPTURE_OUTPUT" "invalid remote temp dir" "fetch relative tmpdir message"
+export MOCK_SSH_FAIL=""
+
+# --- Remote tmpdir validation: wrong prefix ---
+reset_mock_ssh
+export MOCK_SSH_FAIL="bad_tmpdir_/tmp/evil-dir.abcdefghij"
+capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo"
+assert_status 1 "fetch wrong-prefix tmpdir exits 1"
+assert_contains "$CAPTURE_OUTPUT" "invalid remote temp dir" "fetch wrong-prefix tmpdir message"
+export MOCK_SSH_FAIL=""
+
+# --- Remote tmpdir validation: path traversal ---
+reset_mock_ssh
+export MOCK_SSH_FAIL="bad_tmpdir_/tmp/allod-patch.abcdefghij/../../../etc"
+capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo"
+assert_status 1 "fetch traversal tmpdir exits 1"
+export MOCK_SSH_FAIL=""
+
+# --- --output with unwritable parent ---
+unwritable_parent="$TMP/unwritable-parent"
+mkdir -p "$unwritable_parent"
+chmod 000 "$unwritable_parent"
+
+reset_mock_ssh
+capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo" --output "$unwritable_parent/patches"
+assert_status 1 "fetch --output unwritable parent exits 1"
+assert_equal "$(get_ssh_call_count)" "0" "fetch --output unwritable parent makes no SSH calls"
+chmod 755 "$unwritable_parent"
+rm -rf "$unwritable_parent"
 
 # ================================================================
 # Summary
