@@ -19,13 +19,11 @@ trap cleanup_temp_files EXIT
 
 usage() {
   cat <<'EOF'
-Usage: allod change <command> [options]
+Usage: allod <namespace> <command> [options]
 
-Commands:
-  begin    Prepare a change workspace
-  record   Stage, commit, and push changes
-  submit   Create a pull request for the current branch
-  cleanup  Remove a completed change worktree
+Namespaces:
+  change   Manage code changes (begin, record, submit, cleanup)
+  patch    Transfer patches between environments (fetch, apply, receive)
 EOF
 }
 
@@ -503,12 +501,559 @@ change_main() {
   esac
 }
 
+patch_usage() {
+  cat <<'EOF'
+Usage: allod patch <command> [options]
+
+Commands:
+  fetch    Fetch patches from a remote source repo via SSH
+  apply    Apply fetched patches to a local destination repo
+  receive  Fetch and apply patches in one step
+EOF
+}
+
+patch_validate_tmpdir_path() {
+  local path="$1"
+  [[ -n "$path" && "$path" =~ ^/tmp/allod-patch\.[a-zA-Z0-9]{10}$ ]]
+}
+
+patch_fetch() {
+  local target="" base="origin/master" output="" output_set=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --base)
+        require_option_value "$1" "$#"
+        base="$2"
+        shift 2
+        ;;
+      --output)
+        require_option_value "$1" "$#"
+        output="$2"
+        output_set=true
+        shift 2
+        ;;
+      -h|--help)
+        patch_usage
+        exit 0
+        ;;
+      -*)
+        die 1 "unknown option for patch fetch: $1"
+        ;;
+      *)
+        [[ -z "$target" ]] || die 1 "patch fetch accepts at most one target"
+        target="$1"
+        shift
+        ;;
+    esac
+  done
+
+  [[ -n "$target" ]] || die 1 "patch fetch requires <ssh-host>:<source-repo>"
+
+  [[ "$target" == *:* ]] || die 1 "invalid target; expected <ssh-host>:<source-repo>"
+  local host="${target%%:*}"
+  local source_repo="${target#*:}"
+  [[ -n "$host" ]] || die 1 "empty SSH host in target"
+  [[ -n "$source_repo" ]] || die 1 "empty source repo path in target"
+  [[ "$source_repo" == /* ]] || die 1 "source repo must be an absolute path: $source_repo"
+  [[ "$source_repo" != *$'\n'* ]] || die 1 "source repo path must not contain newlines"
+  [[ "$base" != *$'\n'* ]] || die 1 "--base value must not contain newlines"
+
+  local final_output output_parent staging_dir needs_rename=false
+  if [[ "$output_set" == true ]]; then
+    output_parent=$(cd "$(dirname "$output")" 2>/dev/null && pwd) || \
+      die 1 "output parent directory does not exist: $(dirname "$output")"
+    [[ -d "$output_parent" && -w "$output_parent" ]] || \
+      die 1 "output parent is not a writable directory: $output_parent"
+    final_output="$output_parent/$(basename "$output")"
+    [[ ! -e "$final_output" && ! -L "$final_output" ]] || \
+      die 1 "output path already exists: $final_output"
+    needs_rename=true
+  else
+    output_parent="/tmp"
+  fi
+
+  local b64_repo b64_base
+  b64_repo=$(printf '%s' "$source_repo" | base64 -w 0)
+  b64_base=$(printf '%s' "$base" | base64 -w 0)
+
+  local generate_script
+  IFS= read -r -d '' generate_script <<'GENERATE_EOF' || true
+set -eu
+read -r b64_repo
+read -r b64_base
+repo=$(printf '%s' "$b64_repo" | base64 -d)
+base=$(printf '%s' "$b64_base" | base64 -d)
+case "$repo" in *"
+"*) printf 'allod: source repo path contains newline\n' >&2; exit 1 ;; esac
+case "$base" in *"
+"*) printf 'allod: base ref contains newline\n' >&2; exit 1 ;; esac
+if ! git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
+  printf 'allod: not a git repository: %s\n' "$repo" >&2; exit 1
+fi
+dirty=$(git -C "$repo" status --porcelain)
+if [ -n "$dirty" ]; then
+  printf 'allod: source worktree is dirty; commit or stash changes before export\n' >&2
+  printf '%s\n' "$dirty" >&2
+  exit 10
+fi
+base_commit=$(git -C "$repo" rev-parse --verify "$base^{commit}" 2>/dev/null) || {
+  printf 'allod: cannot resolve base ref: %s\n' "$base" >&2; exit 11
+}
+if ! git -C "$repo" merge-base --is-ancestor "$base_commit" HEAD; then
+  printf 'allod: base %s is not an ancestor of HEAD\n' "$base" >&2; exit 11
+fi
+ahead=$(git -C "$repo" rev-list "$base_commit..HEAD")
+if [ -z "$ahead" ]; then
+  printf 'allod: HEAD is not ahead of base; nothing to export\n' >&2; exit 11
+fi
+merges=$(git -C "$repo" rev-list --merges "$base_commit..HEAD")
+if [ -n "$merges" ]; then
+  printf 'allod: non-linear history is unsupported; merge commits found in export range\n' >&2; exit 11
+fi
+head_commit=$(git -C "$repo" rev-parse HEAD)
+repo_remote=$(git -C "$repo" remote get-url origin 2>/dev/null || printf '')
+tmpdir=$(mktemp -d /tmp/allod-patch.XXXXXXXXXX)
+_trap_cleanup() { rm -rf -- "$tmpdir"; }
+trap _trap_cleanup EXIT
+git -C "$repo" format-patch "$base_commit..HEAD" -o "$tmpdir" >&2
+patch_count=0
+: > "$tmpdir/.patches.jsonl"
+for f in "$tmpdir"/*.patch; do
+  [ -f "$f" ] || continue
+  fname=$(basename -- "$f")
+  sha=$(sha256sum -b -- "$f" | awk '{print $1}')
+  jq -n --arg fn "$fname" --arg sha "$sha" '{filename: $fn, sha256: $sha}' >> "$tmpdir/.patches.jsonl"
+  patch_count=$((patch_count + 1))
+done
+if [ "$patch_count" -eq 0 ]; then
+  printf 'allod: git format-patch produced zero patches\n' >&2; exit 11
+fi
+jq -n \
+  --arg repo_remote "$repo_remote" \
+  --arg base_commit "$base_commit" \
+  --arg head_commit "$head_commit" \
+  --argjson patch_count "$patch_count" \
+  --slurpfile patches "$tmpdir/.patches.jsonl" \
+  '{repo_remote: $repo_remote, base_commit: $base_commit, head_commit: $head_commit, patch_count: $patch_count, patches: $patches}' \
+  > "$tmpdir/manifest.json"
+rm -f "$tmpdir/.patches.jsonl"
+trap - EXIT
+printf '%s\n' "$tmpdir"
+GENERATE_EOF
+
+  local generate_output generate_status
+  set +e
+  generate_output=$(printf '%s\n%s\n' "$b64_repo" "$b64_base" | ssh -- "$host" "$generate_script")
+  generate_status=$?
+  set -e
+
+  if [[ "$generate_status" -ne 0 ]]; then
+    [[ "$generate_status" -eq 10 || "$generate_status" -eq 11 ]] && exit "$generate_status"
+    exit 1
+  fi
+
+  local remote_tmpdir="$generate_output"
+  [[ -n "$remote_tmpdir" ]] || die 1 "remote generate produced no output"
+  [[ "$remote_tmpdir" != *$'\n'* ]] || die 1 "remote generate produced multi-line output"
+  patch_validate_tmpdir_path "$remote_tmpdir" || \
+    die 1 "invalid remote temp dir path: $remote_tmpdir"
+
+  if [[ "$needs_rename" == true ]]; then
+    staging_dir=$(mktemp -d "$output_parent/allod-patch-staging.XXXXXXXXXX")
+  else
+    staging_dir=$(mktemp -d /tmp/allod-patch.XXXXXXXXXX)
+    final_output="$staging_dir"
+  fi
+
+  local transfer_script
+  IFS= read -r -d '' transfer_script <<'TRANSFER_EOF' || true
+set -eu
+read -r b64_tmpdir
+tmpdir=$(printf '%s' "$b64_tmpdir" | base64 -d)
+case "$tmpdir" in *"
+"*) printf 'allod: temp dir path contains newline\n' >&2; exit 1 ;; esac
+if ! printf '%s' "$tmpdir" | grep -qxE '/tmp/allod-patch\.[a-zA-Z0-9]{10}'; then
+  printf 'allod: invalid remote temp dir path\n' >&2; exit 1
+fi
+tar -cz -C "$tmpdir" .
+TRANSFER_EOF
+
+  local b64_tmpdir transfer_status
+  b64_tmpdir=$(printf '%s' "$remote_tmpdir" | base64 -w 0)
+
+  set +e
+  printf '%s\n' "$b64_tmpdir" | ssh -- "$host" "$transfer_script" | tar -xz -C "$staging_dir"
+  transfer_status=$?
+  set -e
+
+  if [[ "$transfer_status" -ne 0 ]]; then
+    rm -rf "$staging_dir"
+    printf 'allod: remote temp dir (requires manual cleanup): %s\n' "$remote_tmpdir" >&2
+    die 1 "artifact transfer or extraction failed"
+  fi
+
+  if [[ -L "$staging_dir/manifest.json" || ! -f "$staging_dir/manifest.json" ]]; then
+    rm -rf "$staging_dir"
+    printf 'allod: remote temp dir (requires manual cleanup): %s\n' "$remote_tmpdir" >&2
+    die 1 "manifest.json is missing, a symlink, or not a regular file"
+  fi
+
+  if [[ "$needs_rename" == true ]]; then
+    mv "$staging_dir" "$final_output" || {
+      rm -rf "$staging_dir"
+      printf 'allod: remote temp dir (requires manual cleanup): %s\n' "$remote_tmpdir" >&2
+      die 1 "failed to move staging dir to output path"
+    }
+  fi
+
+  local cleanup_script
+  IFS= read -r -d '' cleanup_script <<'CLEANUP_EOF' || true
+set -eu
+read -r b64_tmpdir
+tmpdir=$(printf '%s' "$b64_tmpdir" | base64 -d)
+case "$tmpdir" in *"
+"*) printf 'allod: temp dir path contains newline\n' >&2; exit 1 ;; esac
+if ! printf '%s' "$tmpdir" | grep -qxE '/tmp/allod-patch\.[a-zA-Z0-9]{10}'; then
+  printf 'allod: invalid remote temp dir path\n' >&2; exit 1
+fi
+rm -rf -- "$tmpdir"
+CLEANUP_EOF
+
+  local cleanup_status
+  set +e
+  printf '%s\n' "$b64_tmpdir" | ssh -- "$host" "$cleanup_script"
+  cleanup_status=$?
+  set -e
+
+  if [[ "$cleanup_status" -ne 0 ]]; then
+    printf 'allod: error: remote cleanup failed\n' >&2
+    printf 'allod: local artifact: %s\n' "$final_output" >&2
+    printf 'allod: remote temp dir (requires manual cleanup): %s\n' "$remote_tmpdir" >&2
+    exit 1
+  fi
+
+  local patch_count base_short head_short
+  patch_count=$(jq -r '.patch_count' "$final_output/manifest.json")
+  base_short=$(jq -r '.base_commit[:8]' "$final_output/manifest.json")
+  head_short=$(jq -r '.head_commit[:8]' "$final_output/manifest.json")
+  printf 'allod: fetched %s patch(es) (%s..%s)\n' "$patch_count" "$base_short" "$head_short"
+  printf 'allod: artifact dir: %s\n' "$final_output"
+}
+
+patch_apply() {
+  local artifact_dir="" repo_path="" push=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --repo)
+        require_option_value "$1" "$#"
+        repo_path="$2"
+        shift 2
+        ;;
+      --push)
+        push=true
+        shift
+        ;;
+      -h|--help)
+        patch_usage
+        exit 0
+        ;;
+      -*)
+        die 1 "unknown option for patch apply: $1"
+        ;;
+      *)
+        [[ -z "$artifact_dir" ]] || die 1 "patch apply accepts at most one artifact directory"
+        artifact_dir="$1"
+        shift
+        ;;
+    esac
+  done
+
+  [[ -n "$artifact_dir" ]] || die 1 "patch apply requires <artifact-dir>"
+
+  local artifact_dir_abs
+  artifact_dir_abs=$(cd "$artifact_dir" 2>/dev/null && pwd) || \
+    die 12 "artifact directory does not exist: $artifact_dir"
+
+  [[ ! -L "$artifact_dir_abs/manifest.json" ]] || die 12 "manifest.json is a symlink"
+  [[ -f "$artifact_dir_abs/manifest.json" ]] || die 12 "manifest.json is missing or not a regular file"
+
+  local manifest
+  manifest=$(jq '.' "$artifact_dir_abs/manifest.json" 2>/dev/null) || \
+    die 12 "malformed JSON in manifest.json"
+
+  local struct_check
+  struct_check=$(printf '%s' "$manifest" | jq -r '
+    def is_full_hex: test("^[0-9a-f]{40}$") or test("^[0-9a-f]{64}$");
+    def is_hex_digest: test("^[0-9a-f]{64}$");
+    def is_safe_patch_name:
+      (length > 0) and
+      endswith(".patch") and
+      (contains("/") | not) and
+      (contains("..") | not) and
+      (explode | any(. < 32) | not);
+
+    if type != "object" then "not a JSON object"
+    elif (has("repo_remote") and has("base_commit") and has("head_commit") and has("patch_count") and has("patches")) | not then "missing required field"
+    elif (.repo_remote | type) != "string" then "repo_remote: expected string"
+    elif (.base_commit | type) != "string" then "base_commit: expected string"
+    elif (.head_commit | type) != "string" then "head_commit: expected string"
+    elif (.patch_count | type) != "number" then "patch_count: expected number"
+    elif (.patches | type) != "array" then "patches: expected array"
+    elif (.base_commit | is_full_hex | not) then "base_commit: not a full lowercase hex commit ID"
+    elif (.head_commit | is_full_hex | not) then "head_commit: not a full lowercase hex commit ID"
+    elif .patch_count != (.patches | length) then "patch_count does not match patches array length"
+    elif (.patches | any(type != "object")) then "patches entry is not an object"
+    elif (.patches | any(has("filename", "sha256") | not)) then "patches entry missing filename or sha256"
+    elif (.patches | any(.filename | type != "string")) then "patches filename is not a string"
+    elif (.patches | any(.sha256 | type != "string")) then "patches sha256 is not a string"
+    elif (.patches | any(.filename | is_safe_patch_name | not)) then "patches filename is invalid"
+    elif (.patches | any(.sha256 | is_hex_digest | not)) then "patches sha256 is not a valid hex digest"
+    elif ((.patches | map(.filename) | unique | length) != (.patches | length)) then "duplicate filenames"
+    else "ok"
+    end
+  ') || die 12 "manifest validation failed"
+
+  [[ "$struct_check" == "ok" ]] || die 12 "manifest integrity failure: $struct_check"
+
+  local repo_remote base_commit head_commit patch_count
+  repo_remote=$(printf '%s' "$manifest" | jq -r '.repo_remote')
+  base_commit=$(printf '%s' "$manifest" | jq -r '.base_commit')
+  head_commit=$(printf '%s' "$manifest" | jq -r '.head_commit')
+  patch_count=$(printf '%s' "$manifest" | jq -r '.patch_count')
+
+  local patch_info filename sha256 actual_sha
+  local -a patch_files=()
+  patch_info=$(printf '%s' "$manifest" | jq -r '.patches[] | "\(.filename)\t\(.sha256)"')
+  while IFS=$'\t' read -r filename sha256; do
+    local patch_path="$artifact_dir_abs/$filename"
+    [[ -e "$patch_path" ]] || die 12 "listed patch file missing: $filename"
+    [[ ! -L "$patch_path" ]] || die 12 "listed patch file is a symlink: $filename"
+    [[ -f "$patch_path" ]] || die 12 "listed patch file is not a regular file: $filename"
+    actual_sha=$(sha256sum -b -- "$patch_path" | awk '{print $1}')
+    [[ "$actual_sha" == "$sha256" ]] || \
+      die 12 "checksum mismatch for $filename: expected $sha256, got $actual_sha"
+    patch_files+=("$patch_path")
+  done <<< "$patch_info"
+
+  local actual_patch_count=0
+  for f in "$artifact_dir_abs"/*.patch; do
+    [[ -e "$f" ]] || continue
+    actual_patch_count=$((actual_patch_count + 1))
+  done
+  [[ "$actual_patch_count" -eq "$patch_count" ]] || \
+    die 12 "unlisted .patch files in artifact directory"
+
+  local repo
+  repo=$(resolve_git_repo "${repo_path:-$PWD}")
+
+  if [[ -n "$(git -C "$repo" status --porcelain)" ]]; then
+    printf 'allod: destination worktree is dirty; commit or stash changes before apply\n' >&2
+    exit 16
+  fi
+
+  local dest_remote
+  dest_remote=$(git -C "$repo" remote get-url origin 2>/dev/null || printf '')
+  if [[ "$dest_remote" != "$repo_remote" ]]; then
+    printf 'allod: repo identity mismatch\n' >&2
+    printf 'allod: manifest remote: %s\n' "$repo_remote" >&2
+    printf 'allod: destination remote: %s\n' "$dest_remote" >&2
+    exit 13
+  fi
+
+  if ! git -C "$repo" rev-parse --verify "$base_commit^{commit}" >/dev/null 2>&1; then
+    printf 'allod: base commit %s not found in destination; run git fetch first\n' "$base_commit" >&2
+    exit 14
+  fi
+  if ! git -C "$repo" merge-base --is-ancestor "$base_commit" HEAD 2>/dev/null; then
+    printf 'allod: base commit %s is not an ancestor of destination HEAD; check out the branch containing the base commit\n' "$base_commit" >&2
+    exit 14
+  fi
+
+  local pre_apply_head
+  pre_apply_head=$(git -C "$repo" rev-parse HEAD)
+
+  local am_status
+  set +e
+  git -C "$repo" am --3way "${patch_files[@]}"
+  am_status=$?
+  set -e
+
+  if [[ "$am_status" -ne 0 ]]; then
+    local git_dir
+    git_dir=$(git -C "$repo" rev-parse --path-format=absolute --git-dir)
+
+    if [[ -d "$git_dir/rebase-apply" ]]; then
+      git -C "$repo" am --abort 2>/dev/null || true
+    fi
+
+    local current_head cleanup_ok=true
+    current_head=$(git -C "$repo" rev-parse HEAD)
+    if [[ "$current_head" != "$pre_apply_head" ]]; then
+      printf 'allod: WARNING: HEAD changed after git am abort; expected %s, got %s\n' "$pre_apply_head" "$current_head" >&2
+      printf 'allod: repo requires manual repair: %s\n' "$repo" >&2
+      cleanup_ok=false
+    fi
+
+    local status_check
+    status_check=$(git -C "$repo" status --porcelain)
+    if [[ -n "$status_check" ]]; then
+      printf 'allod: WARNING: worktree not clean after git am abort\n' >&2
+      printf 'allod: repo requires manual repair: %s\n' "$repo" >&2
+      cleanup_ok=false
+    fi
+
+    if [[ -d "$git_dir/rebase-apply" || -d "$git_dir/rebase-merge" ]]; then
+      printf 'allod: WARNING: rebase state directory still present after abort\n' >&2
+      printf 'allod: repo requires manual repair: %s\n' "$repo" >&2
+      cleanup_ok=false
+    fi
+
+    exit 15
+  fi
+
+  local applied_range="$pre_apply_head..HEAD"
+  local diff_check_status
+  set +e
+  git -C "$repo" diff --check "$applied_range" >/dev/null 2>&1
+  diff_check_status=$?
+  set -e
+
+  if [[ "$diff_check_status" -ne 0 ]]; then
+    printf 'allod: post-apply whitespace check failed\n' >&2
+    printf 'allod: repo: %s\n' "$repo" >&2
+    printf 'allod: pre-apply HEAD: %s\n' "$pre_apply_head" >&2
+    printf 'allod: current HEAD: %s\n' "$(git -C "$repo" rev-parse HEAD)" >&2
+    printf 'allod: to fix: edit and amend, or to undo: git reset --hard %s\n' "$pre_apply_head" >&2
+    exit 1
+  fi
+
+  printf 'allod: applied %s patch(es)\n' "$patch_count"
+  git -C "$repo" log --oneline "$applied_range"
+  git -C "$repo" show --stat --oneline HEAD
+
+  if [[ "$push" == true ]]; then
+    local push_status
+    set +e
+    git -C "$repo" push
+    push_status=$?
+    set -e
+
+    if [[ "$push_status" -ne 0 ]]; then
+      printf 'allod: git push failed\n' >&2
+      printf 'allod: repo: %s\n' "$repo" >&2
+      printf 'allod: pre-apply HEAD: %s\n' "$pre_apply_head" >&2
+      printf 'allod: current HEAD: %s\n' "$(git -C "$repo" rev-parse HEAD)" >&2
+      printf 'allod: to push manually: git -C "%s" push\n' "$repo" >&2
+      printf 'allod: to undo: git -C "%s" reset --hard %s\n' "$repo" "$pre_apply_head" >&2
+      exit 1
+    fi
+  else
+    printf 'allod: run git push to publish applied patches\n'
+  fi
+}
+
+patch_receive() {
+  local target="" dest_repo="" base="origin/master" push=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --base)
+        require_option_value "$1" "$#"
+        base="$2"
+        shift 2
+        ;;
+      --push)
+        push=true
+        shift
+        ;;
+      -h|--help)
+        patch_usage
+        exit 0
+        ;;
+      -*)
+        die 1 "unknown option for patch receive: $1"
+        ;;
+      *)
+        if [[ -z "$target" ]]; then
+          target="$1"
+        elif [[ -z "$dest_repo" ]]; then
+          dest_repo="$1"
+        else
+          die 1 "patch receive accepts at most two positional arguments"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  [[ -n "$target" ]] || die 1 "patch receive requires <ssh-host>:<source-repo>"
+  [[ -n "$dest_repo" ]] || die 1 "patch receive requires <destination-repo>"
+
+  local parent_tmpdir artifact_dir
+  parent_tmpdir=$(mktemp -d /tmp/allod-patch-receive.XXXXXXXXXX)
+  artifact_dir="$parent_tmpdir/artifact"
+
+  local fetch_args=("$target" --base "$base" --output "$artifact_dir")
+  local fetch_status=0
+  set +e
+  (patch_fetch "${fetch_args[@]}")
+  fetch_status=$?
+  set -e
+
+  if [[ "$fetch_status" -ne 0 ]]; then
+    if [[ -d "$artifact_dir" ]]; then
+      printf 'allod: artifact dir preserved: %s\n' "$artifact_dir" >&2
+    else
+      rm -rf "$parent_tmpdir"
+    fi
+    exit "$fetch_status"
+  fi
+
+  local apply_args=("$artifact_dir" --repo "$dest_repo")
+  [[ "$push" != true ]] || apply_args+=(--push)
+
+  local apply_status=0
+  set +e
+  (patch_apply "${apply_args[@]}")
+  apply_status=$?
+  set -e
+
+  printf 'allod: artifact dir: %s\n' "$artifact_dir"
+
+  if [[ "$apply_status" -ne 0 ]]; then
+    exit "$apply_status"
+  fi
+}
+
+patch_main() {
+  local command="${1:-}"
+  [[ $# -gt 0 ]] || {
+    patch_usage >&2
+    exit 1
+  }
+  shift
+
+  case "$command" in
+    fetch) patch_fetch "$@" ;;
+    apply) patch_apply "$@" ;;
+    receive) patch_receive "$@" ;;
+    -h|--help) patch_usage ;;
+    *) die 1 "unknown patch command: $command" ;;
+  esac
+}
+
 main() {
   local namespace="${1:-}"
   case "$namespace" in
     change)
       shift
       change_main "$@"
+      ;;
+    patch)
+      shift
+      patch_main "$@"
       ;;
     -h|--help|"")
       usage
