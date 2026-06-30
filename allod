@@ -817,10 +817,9 @@ patch_apply() {
 
   [[ "$struct_check" == "ok" ]] || die 12 "manifest integrity failure: $struct_check"
 
-  local repo_remote base_commit head_commit patch_count
+  local repo_remote base_commit patch_count
   repo_remote=$(printf '%s' "$manifest" | jq -r '.repo_remote')
   base_commit=$(printf '%s' "$manifest" | jq -r '.base_commit')
-  head_commit=$(printf '%s' "$manifest" | jq -r '.head_commit')
   patch_count=$(printf '%s' "$manifest" | jq -r '.patch_count')
 
   local patch_info filename sha256 actual_sha
@@ -888,12 +887,11 @@ patch_apply() {
       git -C "$repo" am --abort 2>/dev/null || true
     fi
 
-    local current_head cleanup_ok=true
+    local current_head
     current_head=$(git -C "$repo" rev-parse HEAD)
     if [[ "$current_head" != "$pre_apply_head" ]]; then
       printf 'allod: WARNING: HEAD changed after git am abort; expected %s, got %s\n' "$pre_apply_head" "$current_head" >&2
       printf 'allod: repo requires manual repair: %s\n' "$repo" >&2
-      cleanup_ok=false
     fi
 
     local status_check
@@ -901,13 +899,11 @@ patch_apply() {
     if [[ -n "$status_check" ]]; then
       printf 'allod: WARNING: worktree not clean after git am abort\n' >&2
       printf 'allod: repo requires manual repair: %s\n' "$repo" >&2
-      cleanup_ok=false
     fi
 
     if [[ -d "$git_dir/rebase-apply" || -d "$git_dir/rebase-merge" ]]; then
       printf 'allod: WARNING: rebase state directory still present after abort\n' >&2
       printf 'allod: repo requires manual repair: %s\n' "$repo" >&2
-      cleanup_ok=false
     fi
 
     exit 15
