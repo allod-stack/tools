@@ -719,6 +719,26 @@ make_artifact "$source_repo" "$artifact"
 capture bash -c "cd /tmp && bash '$ALLOD' patch apply '$artifact' --repo '$dest_repo'"
 assert_status 0 "apply from different cwd exits 0"
 
+# --- Destination repo resolution failure ---
+source_repo="$TMP/repos/apply-missing-dest-source"
+init_repo "$source_repo" master
+add_commit "$source_repo" "missing destination test"
+
+artifact="$TMP/artifacts/apply-missing-dest"
+make_artifact "$source_repo" "$artifact"
+
+missing_dest="$TMP/repos/apply-missing-dest-repo"
+capture bash "$ALLOD" patch apply "$artifact" --repo "$missing_dest"
+assert_status 1 "apply missing destination repo exits 1"
+assert_contains "$CAPTURE_OUTPUT" "destination repository path is not a directory" \
+  "apply missing destination names destination"
+assert_contains "$CAPTURE_OUTPUT" "while resolving: <destination-repo>" \
+  "apply missing destination shows argument context"
+assert_contains "$CAPTURE_OUTPUT" "to fix:" "apply missing destination shows fix hint"
+assert_not_contains "$CAPTURE_OUTPUT" "repo identity mismatch" \
+  "apply missing destination is not reported as identity mismatch"
+rm -rf "$artifact"
+
 # --- Checksum mismatch ---
 source_repo="$TMP/repos/apply-checksum-source"
 init_repo "$source_repo" master
@@ -1153,6 +1173,30 @@ recv_artifact=$(printf '%s' "$CAPTURE_OUTPUT" | grep 'artifact dir:' | tail -1 |
 
 recv_content=$(cat "$dest_repo_recv/tracked.txt")
 assert_equal "$recv_content" "received content" "receive applies patches to destination"
+
+# --- Destination repo preflight failure ---
+source_repo="$TMP/repos/receive-missing-dest-source"
+init_repo "$source_repo" master
+add_commit "$source_repo" "receive missing destination test"
+
+cwd_repo="$TMP/repos/receive-missing-dest-cwd"
+init_repo "$cwd_repo" master
+
+missing_dest="$TMP/repos/receive-missing-dest-repo"
+reset_mock_ssh
+capture_with_path "$MOCK_PATH" bash -c \
+  "cd '$cwd_repo' && bash '$ALLOD' patch receive 'testhost:$source_repo' '$missing_dest'"
+assert_status 1 "receive missing destination repo exits 1"
+assert_contains "$CAPTURE_OUTPUT" "destination repository path is not a directory" \
+  "receive missing destination names destination"
+assert_contains "$CAPTURE_OUTPUT" "while resolving: <destination-repo>" \
+  "receive missing destination shows argument context"
+assert_contains "$CAPTURE_OUTPUT" "to fix:" "receive missing destination shows fix hint"
+assert_not_contains "$CAPTURE_OUTPUT" "repo identity mismatch" \
+  "receive missing destination is not reported as identity mismatch"
+assert_not_contains "$CAPTURE_OUTPUT" "artifact dir:" \
+  "receive missing destination does not fetch an artifact"
+assert_equal "$(get_ssh_call_count)" "0" "receive missing destination makes no SSH calls"
 
 # --- Fetch failure propagation ---
 source_repo="$TMP/repos/receive-fetch-fail"

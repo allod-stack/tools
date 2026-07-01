@@ -79,6 +79,34 @@ resolve_git_repo() {
   printf '%s\n' "$top"
 }
 
+resolve_patch_destination_repo() {
+  local input="${1:-$PWD}"
+  local top
+
+  if [[ ! -d "$input" ]]; then
+    printf 'allod: destination repository path is not a directory: %s\n' "$input" >&2
+    printf 'allod: while resolving: <destination-repo>\n' >&2
+    printf 'allod: to fix: pass an existing clone path for the repository that should receive the patches\n' >&2
+    exit 1
+  fi
+
+  if ! top=$(git -C "$input" rev-parse --show-toplevel 2>/dev/null); then
+    printf 'allod: destination path is not inside a git repository: %s\n' "$input" >&2
+    printf 'allod: while resolving: <destination-repo>\n' >&2
+    printf 'allod: to fix: clone or initialize the destination repository, then rerun with that path\n' >&2
+    exit 1
+  fi
+
+  if ! workspace_is_repo_root "$top"; then
+    printf 'allod: could not resolve destination repository root for: %s\n' "$input" >&2
+    printf 'allod: resolved git top-level: %s\n' "$top" >&2
+    printf 'allod: to fix: pass a path inside a normal git worktree that should receive the patches\n' >&2
+    exit 1
+  fi
+
+  printf '%s\n' "$top"
+}
+
 main_repo_dir_for_dir() {
   local dir="$1"
   local common_dir
@@ -845,7 +873,7 @@ patch_apply() {
     die 12 "unlisted .patch files in artifact directory"
 
   local repo
-  repo=$(resolve_git_repo "${repo_path:-$PWD}")
+  repo=$(resolve_patch_destination_repo "${repo_path:-$PWD}") || exit $?
 
   if [[ -n "$(git -C "$repo" status --porcelain)" ]]; then
     printf 'allod: destination worktree is dirty; commit or stash changes before apply\n' >&2
@@ -987,6 +1015,9 @@ patch_receive() {
   [[ -n "$target" ]] || die 1 "patch receive requires <ssh-host>:<source-repo>"
   [[ -n "$dest_repo" ]] || die 1 "patch receive requires <destination-repo>"
 
+  local dest_repo_resolved
+  dest_repo_resolved=$(resolve_patch_destination_repo "$dest_repo") || exit $?
+
   local parent_tmpdir artifact_dir
   parent_tmpdir=$(mktemp -d /tmp/allod-patch-receive.XXXXXXXXXX)
   artifact_dir="$parent_tmpdir/artifact"
@@ -1007,7 +1038,7 @@ patch_receive() {
     exit "$fetch_status"
   fi
 
-  local apply_args=("$artifact_dir" --repo "$dest_repo")
+  local apply_args=("$artifact_dir" --repo "$dest_repo_resolved")
   [[ "$push" != true ]] || apply_args+=(--push)
 
   local apply_status=0
