@@ -3,7 +3,7 @@
 #
 # Usage: forge [-R|--repo owner/repo] <resource> <command> [args]
 #
-# Resources:  pr, issue, token, auth
+# Resources:  pr, issue, label, milestone, project, token, auth
 #
 # auth commands:
 #   forge auth status                           Check configured credentials
@@ -28,6 +28,21 @@
 #   forge issue edit <number> [flags]           Edit an issue
 #   forge issue comment <number> --body <text>  Post a comment on an issue
 #   forge issue close <number-or-url> [flags]    Close an issue
+#   forge issue labels <number> [flags]         List or change issue labels
+#   forge issue milestone <number> [flags]      Show or change issue milestone
+#
+# label commands:
+#   forge label list                            List repository labels
+#   forge label create --name <name> --color <hex> [flags]
+#   forge label edit <id-or-name> [flags]
+#   forge label delete <id-or-name>
+#
+# milestone commands:
+#   forge milestone list [--state <state>]      List repository milestones
+#   forge milestone view <id-or-title>          Show milestone details
+#   forge milestone create --title <title> [flags]
+#   forge milestone edit <id-or-title> [flags]
+#   forge milestone delete <id-or-title>
 #
 # Config (env vars):
 #   FORGE_URL          Base URL of Forgejo instance (default: https://forge.anarch.diy)
@@ -230,6 +245,93 @@ api() {
     --config <(printf 'header = "Authorization: token %s"\n' "$TOKEN") \
     -H "Content-Type: application/json" \
     "$@"
+}
+
+is_integer() {
+  [[ "$1" =~ ^[0-9]+$ ]]
+}
+
+json_mixed_label_array_from_args() {
+  local values_json="[]"
+  local value
+  for value in "$@"; do
+    if is_integer "$value"; then
+      values_json=$(jq -n --argjson values "$values_json" --argjson value "$value" '$values + [$value]')
+    else
+      values_json=$(jq -n --argjson values "$values_json" --arg value "$value" '$values + [$value]')
+    fi
+  done
+  printf '%s' "$values_json"
+}
+
+normalize_color() {
+  local color="$1"
+  color="${color#\#}"
+  [[ "$color" =~ ^[0-9A-Fa-f]{6}$ ]] || die "color must be a 6-digit hex value"
+  printf '#%s' "${color,,}"
+}
+
+normalize_due_on() {
+  local due="$1"
+  if [[ "$due" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+    printf '%sT00:00:00Z' "$due"
+  else
+    printf '%s' "$due"
+  fi
+}
+
+resolve_label_id() {
+  local identifier="$1"
+  if is_integer "$identifier"; then
+    printf '%s' "$identifier"
+    return
+  fi
+
+  local labels count id
+  labels=$(api GET "/repos/$REPO/labels?limit=100")
+  count=$(echo "$labels" | jq --arg name "$identifier" '[.[] | select(.name == $name)] | length')
+  [[ "$count" -gt 0 ]] || die "label not found: $identifier"
+  [[ "$count" -eq 1 ]] || die "label name is ambiguous: $identifier"
+  id=$(echo "$labels" | jq -r --arg name "$identifier" 'first(.[] | select(.name == $name)) | .id')
+  printf '%s' "$id"
+}
+
+resolve_label_ids_json() {
+  local ids_json="[]"
+  local label id
+  for label in "$@"; do
+    id=$(resolve_label_id "$label")
+    ids_json=$(jq -n --argjson ids "$ids_json" --argjson id "$id" '$ids + [$id]')
+  done
+  printf '%s' "$ids_json"
+}
+
+resolve_milestone_id() {
+  local identifier="$1"
+  if is_integer "$identifier"; then
+    printf '%s' "$identifier"
+    return
+  fi
+
+  local milestones count id
+  milestones=$(api GET "/repos/$REPO/milestones?state=all&name=$(urlencode "$identifier")&limit=100")
+  count=$(echo "$milestones" | jq --arg title "$identifier" '[.[] | select(.title == $title)] | length')
+  [[ "$count" -gt 0 ]] || die "milestone not found: $identifier"
+  [[ "$count" -eq 1 ]] || die "milestone title is ambiguous: $identifier"
+  id=$(echo "$milestones" | jq -r --arg title "$identifier" 'first(.[] | select(.title == $title)) | .id')
+  printf '%s' "$id"
+}
+
+format_labels() {
+  jq -r 'if length == 0 then "-" else map(.name) | join(",") end'
+}
+
+format_issue_label_names() {
+  jq -r '(.labels // []) | if length == 0 then "-" else map(.name) | join(",") end'
+}
+
+format_issue_milestone_title() {
+  jq -r '.milestone.title // "-"'
 }
 
 # --- PR commands ---
@@ -712,7 +814,8 @@ issue_list() {
     echo "No open issues in $REPO"
     return
   fi
-  echo "$result" | jq -r '.[] | "\(.number)\t\(.title)\t\(.user.login)"' \
+  echo "$result" | jq -r '.[] |
+    "\(.number)\t\(.title)\t\(.user.login)\t\((.labels // []) | if length == 0 then "-" else map(.name) | join(",") end)\t\(.milestone.title // "-")"' \
     | column -t -s $'\t'
 }
 
@@ -727,14 +830,18 @@ issue_view() {
   issue=$(api GET "/repos/$REPO/issues/$number")
   comments=$(api GET "/repos/$REPO/issues/$number/comments")
 
-  local title state author
+  local title state author labels milestone
   title=$(echo "$issue" | jq -r '.title')
   state=$(echo "$issue" | jq -r '.state')
   author=$(echo "$issue" | jq -r '.user.login')
+  labels=$(echo "$issue" | format_issue_label_names)
+  milestone=$(echo "$issue" | format_issue_milestone_title)
 
   echo "Issue #$number: $title"
-  echo "  State:  $state"
-  echo "  Author: $author"
+  echo "  State:     $state"
+  echo "  Author:    $author"
+  echo "  Labels:    $labels"
+  echo "  Milestone: $milestone"
   echo ""
 
   local body
@@ -755,6 +862,8 @@ issue_view() {
 issue_create() {
   contains_help_flag "$@" && { command_usage "issue create"; return; }
   local title="" title_set=false
+  local milestone="" milestone_set=false
+  local labels=()
   reset_body_option
 
   while [[ $# -gt 0 ]]; do
@@ -775,6 +884,20 @@ issue_create() {
         set_body_option "$1" "$2"
         shift 2
         ;;
+      -l|--label)
+        require_option_value "$1" "$#"
+        [[ -n "$2" ]] || die "--label cannot be empty"
+        labels+=("$2")
+        shift 2
+        ;;
+      -m|--milestone)
+        require_option_value "$1" "$#"
+        [[ "$milestone_set" == false ]] || die "$1 specified more than once"
+        milestone="$2"
+        [[ -n "$milestone" ]] || die "--milestone cannot be empty"
+        milestone_set=true
+        shift 2
+        ;;
       -*) die "unknown option for issue create: $1" ;;
       *) die "unexpected argument for issue create: $1" ;;
     esac
@@ -784,19 +907,244 @@ issue_create() {
   [[ -n "$title" ]] || die "--title cannot be empty"
   require_repo
 
+  local labels_set=false labels_json="[]" milestone_id=0
+  if [[ "${#labels[@]}" -gt 0 ]]; then
+    labels_set=true
+    labels_json=$(resolve_label_ids_json "${labels[@]}")
+  fi
+  if [[ "$milestone_set" == true ]]; then
+    milestone_id=$(resolve_milestone_id "$milestone")
+  fi
+
   local url
   url=$(api POST "/repos/$REPO/issues" \
     -d "$(jq -n \
       --arg title "$title" \
       --arg body "$BODY" \
-      '{title: $title, body: $body}')" \
+      --argjson labels "$labels_json" \
+      --argjson labels_set "$labels_set" \
+      --argjson milestone "$milestone_id" \
+      --argjson milestone_set "$milestone_set" \
+      '{title: $title, body: $body}
+        | if $labels_set then . + {labels: $labels} else . end
+        | if $milestone_set then . + {milestone: $milestone} else . end')" \
     | jq -r '.html_url')
   echo "Issue created: $url"
 }
 
-issue_edit() { edit_resource "issue edit" "issues" "Issue" "$@"; }
+issue_edit() {
+  local context="issue edit"
+  contains_help_flag "$@" && { command_usage "$context"; return; }
+  local number="" number_set=false
+  local title="" title_set=false
+  local milestone="" milestone_set=false clear_milestone=false
+  reset_body_option
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -R|--repo)
+        set_repo_option "$@"
+        shift 2
+        ;;
+      -t|--title)
+        require_option_value "$1" "$#"
+        [[ "$title_set" == false ]] || die "$1 specified more than once"
+        title="$2"
+        title_set=true
+        shift 2
+        ;;
+      -b|--body|-F|--body-file)
+        require_option_value "$1" "$#"
+        set_body_option "$1" "$2"
+        shift 2
+        ;;
+      -m|--milestone)
+        require_option_value "$1" "$#"
+        [[ "$milestone_set" == false ]] || die "$1 specified more than once"
+        milestone="$2"
+        [[ -n "$milestone" ]] || die "--milestone cannot be empty"
+        milestone_set=true
+        shift 2
+        ;;
+      --clear-milestone)
+        clear_milestone=true
+        shift
+        ;;
+      -*) die "unknown option for issue edit: $1" ;;
+      *)
+        [[ "$number_set" == false ]] || die "unexpected argument for issue edit: $1"
+        number="$1"
+        number_set=true
+        shift
+        ;;
+    esac
+  done
+
+  [[ "$number_set" == true && -n "$number" ]] || {
+    die "usage: forge issue edit <number> [--title <title>] [--body <text> | --body-file <file>] [--milestone <milestone> | --clear-milestone]"
+  }
+  [[ "$title_set" == true || "$BODY_SET" == true || "$milestone_set" == true || "$clear_milestone" == true ]] || {
+    die "issue edit requires --title, --body, --body-file, --milestone, or --clear-milestone"
+  }
+  [[ "$title_set" == false || -n "$title" ]] || die "--title cannot be empty"
+  [[ "$milestone_set" == false || "$clear_milestone" == false ]] || {
+    die "--milestone cannot be combined with --clear-milestone"
+  }
+  require_repo
+
+  local milestone_id=0
+  if [[ "$milestone_set" == true ]]; then
+    milestone_id=$(resolve_milestone_id "$milestone")
+  fi
+
+  local payload
+  payload=$(jq -n \
+    --arg title "$title" \
+    --arg body "$BODY" \
+    --argjson title_set "$title_set" \
+    --argjson body_set "$BODY_SET" \
+    --argjson milestone_set "$milestone_set" \
+    --argjson clear_milestone "$clear_milestone" \
+    --argjson milestone "$milestone_id" \
+    '{} | if $title_set then . + {title: $title} else . end
+        | if $body_set then . + {body: $body} else . end
+        | if $milestone_set then . + {milestone: $milestone} else . end
+        | if $clear_milestone then . + {milestone: 0} else . end')
+  local url
+  url=$(api PATCH "/repos/$REPO/issues/$number" -d "$payload" | jq -r '.html_url')
+  echo "Issue updated: $url"
+}
 
 issue_comment() { post_comment "issue comment" "$@"; }
+
+issue_labels() {
+  contains_help_flag "$@" && { command_usage "issue labels"; return; }
+  local number="" number_set=false clear=false
+  local add_labels=() remove_labels=() set_labels=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -R|--repo)
+        set_repo_option "$@"
+        shift 2
+        ;;
+      --add)
+        require_option_value "$1" "$#"
+        [[ -n "$2" ]] || die "--add cannot be empty"
+        add_labels+=("$2")
+        shift 2
+        ;;
+      --remove)
+        require_option_value "$1" "$#"
+        [[ -n "$2" ]] || die "--remove cannot be empty"
+        remove_labels+=("$2")
+        shift 2
+        ;;
+      --set)
+        require_option_value "$1" "$#"
+        [[ -n "$2" ]] || die "--set cannot be empty"
+        set_labels+=("$2")
+        shift 2
+        ;;
+      --clear)
+        clear=true
+        shift
+        ;;
+      -*) die "unknown option for issue labels: $1" ;;
+      *)
+        [[ "$number_set" == false ]] || die "unexpected argument for issue labels: $1"
+        number="$1"
+        number_set=true
+        shift
+        ;;
+    esac
+  done
+
+  [[ "$number_set" == true && -n "$number" ]] || {
+    die "usage: forge issue labels <number> [--add <label>] [--remove <label>] [--set <label>] [--clear]"
+  }
+  if [[ "$clear" == true && ( "${#add_labels[@]}" -gt 0 || "${#remove_labels[@]}" -gt 0 || "${#set_labels[@]}" -gt 0 ) ]]; then
+    die "--clear cannot be combined with label changes"
+  fi
+  if [[ "${#set_labels[@]}" -gt 0 && ( "${#add_labels[@]}" -gt 0 || "${#remove_labels[@]}" -gt 0 ) ]]; then
+    die "--set cannot be combined with --add or --remove"
+  fi
+  require_repo
+
+  local labels
+  if [[ "$clear" == true ]]; then
+    api DELETE "/repos/$REPO/issues/$number/labels" >/dev/null
+    labels="[]"
+  elif [[ "${#set_labels[@]}" -gt 0 ]]; then
+    labels=$(api PUT "/repos/$REPO/issues/$number/labels" \
+      -d "$(jq -n --argjson labels "$(json_mixed_label_array_from_args "${set_labels[@]}")" '{labels: $labels}')")
+  else
+    if [[ "${#add_labels[@]}" -gt 0 ]]; then
+      labels=$(api POST "/repos/$REPO/issues/$number/labels" \
+        -d "$(jq -n --argjson labels "$(json_mixed_label_array_from_args "${add_labels[@]}")" '{labels: $labels}')")
+    fi
+    local label
+    for label in "${remove_labels[@]}"; do
+      api DELETE "/repos/$REPO/issues/$number/labels/$(urlencode "$label")" >/dev/null
+    done
+    if [[ "${#remove_labels[@]}" -gt 0 || "${#add_labels[@]}" -eq 0 ]]; then
+      labels=$(api GET "/repos/$REPO/issues/$number/labels")
+    fi
+  fi
+
+  echo "Issue #$number labels: $(echo "$labels" | format_labels)"
+}
+
+issue_milestone() {
+  contains_help_flag "$@" && { command_usage "issue milestone"; return; }
+  local number="" number_set=false milestone="" milestone_set=false clear=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -R|--repo)
+        set_repo_option "$@"
+        shift 2
+        ;;
+      --clear)
+        clear=true
+        shift
+        ;;
+      -*) die "unknown option for issue milestone: $1" ;;
+      *)
+        if [[ "$number_set" == false ]]; then
+          number="$1"
+          number_set=true
+        elif [[ "$milestone_set" == false ]]; then
+          milestone="$1"
+          milestone_set=true
+        else
+          die "unexpected argument for issue milestone: $1"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  [[ "$number_set" == true && -n "$number" ]] || {
+    die "usage: forge issue milestone <number> [<milestone> | --clear]"
+  }
+  [[ "$milestone_set" == false || "$clear" == false ]] || die "<milestone> cannot be combined with --clear"
+  require_repo
+
+  local issue milestone_id url title
+  if [[ "$clear" == true ]]; then
+    url=$(api PATCH "/repos/$REPO/issues/$number" -d '{"milestone":0}' | jq -r '.html_url')
+    echo "Issue milestone cleared: $url"
+  elif [[ "$milestone_set" == true ]]; then
+    [[ -n "$milestone" ]] || die "milestone cannot be empty"
+    milestone_id=$(resolve_milestone_id "$milestone")
+    url=$(api PATCH "/repos/$REPO/issues/$number" \
+      -d "$(jq -n --argjson milestone "$milestone_id" '{milestone: $milestone}')" \
+      | jq -r '.html_url')
+    echo "Issue milestone updated: $url"
+  else
+    issue=$(api GET "/repos/$REPO/issues/$number")
+    title=$(echo "$issue" | format_issue_milestone_title)
+    echo "Issue #$number milestone: $title"
+  fi
+}
 
 resolve_issue_target() {
   local target="$1"
@@ -942,6 +1290,416 @@ issue_close() {
   url=$(api PATCH "/repos/$REPO/issues/$ISSUE_NUMBER" \
     -d '{"state":"closed"}' | jq -r '.html_url')
   echo "Issue closed: $url"
+}
+
+# --- Label commands ---
+
+label_list() {
+  contains_help_flag "$@" && { command_usage "label list"; return; }
+  parse_repo_only_args "label list" "$@"
+  require_repo
+  local result count
+  result=$(api GET "/repos/$REPO/labels?limit=100")
+  count=$(echo "$result" | jq 'length')
+  if [[ "$count" -eq 0 ]]; then
+    echo "No labels in $REPO"
+    return
+  fi
+  echo "$result" | jq -r '.[] |
+    "\(.id)\t\(.name)\t\(.color)\t\(.exclusive // false)\t\(.is_archived // false)\t\(.description // "")"' \
+    | column -t -s $'\t'
+}
+
+label_create() {
+  contains_help_flag "$@" && { command_usage "label create"; return; }
+  local name="" color="" description=""
+  local name_set=false color_set=false description_set=false exclusive=false archived=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -R|--repo)
+        set_repo_option "$@"
+        shift 2
+        ;;
+      -n|--name)
+        require_option_value "$1" "$#"
+        [[ "$name_set" == false ]] || die "$1 specified more than once"
+        name="$2"
+        name_set=true
+        shift 2
+        ;;
+      -c|--color)
+        require_option_value "$1" "$#"
+        [[ "$color_set" == false ]] || die "$1 specified more than once"
+        color=$(normalize_color "$2")
+        color_set=true
+        shift 2
+        ;;
+      -d|--description)
+        require_option_value "$1" "$#"
+        [[ "$description_set" == false ]] || die "$1 specified more than once"
+        description="$2"
+        description_set=true
+        shift 2
+        ;;
+      --exclusive)
+        exclusive=true
+        shift
+        ;;
+      --archived)
+        archived=true
+        shift
+        ;;
+      -*) die "unknown option for label create: $1" ;;
+      *) die "unexpected argument for label create: $1" ;;
+    esac
+  done
+
+  [[ "$name_set" == true ]] || die "label create requires --name"
+  [[ "$color_set" == true ]] || die "label create requires --color"
+  [[ -n "$name" ]] || die "--name cannot be empty"
+  require_repo
+
+  local label
+  label=$(api POST "/repos/$REPO/labels" \
+    -d "$(jq -n \
+      --arg name "$name" \
+      --arg color "$color" \
+      --arg description "$description" \
+      --argjson description_set "$description_set" \
+      --argjson exclusive "$exclusive" \
+      --argjson archived "$archived" \
+      '{name: $name, color: $color}
+        | if $description_set then . + {description: $description} else . end
+        | if $exclusive then . + {exclusive: true} else . end
+        | if $archived then . + {is_archived: true} else . end')")
+  echo "$label" | jq -r '"Label created: \(.id) \(.name)"'
+}
+
+label_edit() {
+  contains_help_flag "$@" && { command_usage "label edit"; return; }
+  local target="" target_set=false
+  local name="" color="" description=""
+  local name_set=false color_set=false description_set=false
+  local exclusive=false exclusive_set=false archived=false archived_set=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -R|--repo)
+        set_repo_option "$@"
+        shift 2
+        ;;
+      -n|--name)
+        require_option_value "$1" "$#"
+        [[ "$name_set" == false ]] || die "$1 specified more than once"
+        name="$2"
+        name_set=true
+        shift 2
+        ;;
+      -c|--color)
+        require_option_value "$1" "$#"
+        [[ "$color_set" == false ]] || die "$1 specified more than once"
+        color=$(normalize_color "$2")
+        color_set=true
+        shift 2
+        ;;
+      -d|--description)
+        require_option_value "$1" "$#"
+        [[ "$description_set" == false ]] || die "$1 specified more than once"
+        description="$2"
+        description_set=true
+        shift 2
+        ;;
+      --exclusive)
+        [[ "$exclusive_set" == false ]] || die "exclusive specified more than once"
+        exclusive=true
+        exclusive_set=true
+        shift
+        ;;
+      --no-exclusive)
+        [[ "$exclusive_set" == false ]] || die "exclusive specified more than once"
+        exclusive=false
+        exclusive_set=true
+        shift
+        ;;
+      --archived)
+        [[ "$archived_set" == false ]] || die "archived specified more than once"
+        archived=true
+        archived_set=true
+        shift
+        ;;
+      --no-archived)
+        [[ "$archived_set" == false ]] || die "archived specified more than once"
+        archived=false
+        archived_set=true
+        shift
+        ;;
+      -*) die "unknown option for label edit: $1" ;;
+      *)
+        [[ "$target_set" == false ]] || die "unexpected argument for label edit: $1"
+        target="$1"
+        target_set=true
+        shift
+        ;;
+    esac
+  done
+
+  [[ "$target_set" == true && -n "$target" ]] || {
+    die "usage: forge label edit <id-or-name> [--name <name>] [--color <hex>] [--description <text>] [--exclusive | --no-exclusive] [--archived | --no-archived]"
+  }
+  [[ "$name_set" == true || "$color_set" == true || "$description_set" == true || "$exclusive_set" == true || "$archived_set" == true ]] || {
+    die "label edit requires a change"
+  }
+  [[ "$name_set" == false || -n "$name" ]] || die "--name cannot be empty"
+  require_repo
+
+  local id label
+  id=$(resolve_label_id "$target")
+  label=$(api PATCH "/repos/$REPO/labels/$id" \
+    -d "$(jq -n \
+      --arg name "$name" \
+      --arg color "$color" \
+      --arg description "$description" \
+      --argjson name_set "$name_set" \
+      --argjson color_set "$color_set" \
+      --argjson description_set "$description_set" \
+      --argjson exclusive "$exclusive" \
+      --argjson exclusive_set "$exclusive_set" \
+      --argjson archived "$archived" \
+      --argjson archived_set "$archived_set" \
+      '{} | if $name_set then . + {name: $name} else . end
+          | if $color_set then . + {color: $color} else . end
+          | if $description_set then . + {description: $description} else . end
+          | if $exclusive_set then . + {exclusive: $exclusive} else . end
+          | if $archived_set then . + {is_archived: $archived} else . end')")
+  echo "$label" | jq -r '"Label updated: \(.id) \(.name)"'
+}
+
+label_delete() {
+  contains_help_flag "$@" && { command_usage "label delete"; return; }
+  parse_repo_positionals "label delete" "$@"
+  [[ "${#POSITIONAL_ARGS[@]}" -eq 1 ]] || die "usage: forge label delete <id-or-name>"
+  require_repo
+  local target="${POSITIONAL_ARGS[0]}"
+  local id
+  id=$(resolve_label_id "$target")
+  api DELETE "/repos/$REPO/labels/$id" >/dev/null
+  echo "Label deleted: $target"
+}
+
+# --- Milestone commands ---
+
+parse_milestone_state() {
+  local state="$1"
+  case "$state" in
+    open|closed|all) printf '%s' "$state" ;;
+    *) die "--state must be one of: open, closed, all" ;;
+  esac
+}
+
+milestone_list() {
+  contains_help_flag "$@" && { command_usage "milestone list"; return; }
+  local state="open"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -R|--repo)
+        set_repo_option "$@"
+        shift 2
+        ;;
+      -s|--state)
+        require_option_value "$1" "$#"
+        state=$(parse_milestone_state "$2")
+        shift 2
+        ;;
+      -*) die "unknown option for milestone list: $1" ;;
+      *) die "unexpected argument for milestone list: $1" ;;
+    esac
+  done
+
+  require_repo
+  local result count
+  result=$(api GET "/repos/$REPO/milestones?state=$state&limit=100")
+  count=$(echo "$result" | jq 'length')
+  if [[ "$count" -eq 0 ]]; then
+    if [[ "$state" == all ]]; then
+      echo "No milestones in $REPO"
+    else
+      echo "No $state milestones in $REPO"
+    fi
+    return
+  fi
+  echo "$result" | jq -r '.[] |
+    "\(.id)\t\(.title)\t\(.state)\t\(.open_issues // 0)\t\(.closed_issues // 0)\t\((.due_on // "")[0:10])"' \
+    | column -t -s $'\t'
+}
+
+milestone_view() {
+  contains_help_flag "$@" && { command_usage "milestone view"; return; }
+  parse_repo_positionals "milestone view" "$@"
+  [[ "${#POSITIONAL_ARGS[@]}" -eq 1 ]] || die "usage: forge milestone view <id-or-title>"
+  require_repo
+  local id milestone
+  id=$(resolve_milestone_id "${POSITIONAL_ARGS[0]}")
+  milestone=$(api GET "/repos/$REPO/milestones/$id")
+  echo "$milestone" | jq -r '"Milestone #\(.id): \(.title)
+  State:  \(.state)
+  Open:   \(.open_issues // 0)
+  Closed: \(.closed_issues // 0)
+  Due:    \((.due_on // "-")[0:10])
+
+\(.description // "")"'
+}
+
+milestone_create() {
+  contains_help_flag "$@" && { command_usage "milestone create"; return; }
+  local title="" description="" due_on="" state=""
+  local title_set=false description_set=false due_set=false state_set=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -R|--repo)
+        set_repo_option "$@"
+        shift 2
+        ;;
+      -t|--title)
+        require_option_value "$1" "$#"
+        [[ "$title_set" == false ]] || die "$1 specified more than once"
+        title="$2"
+        title_set=true
+        shift 2
+        ;;
+      -d|--description)
+        require_option_value "$1" "$#"
+        [[ "$description_set" == false ]] || die "$1 specified more than once"
+        description="$2"
+        description_set=true
+        shift 2
+        ;;
+      --due)
+        require_option_value "$1" "$#"
+        due_on=$(normalize_due_on "$2")
+        due_set=true
+        shift 2
+        ;;
+      -s|--state)
+        require_option_value "$1" "$#"
+        state=$(parse_milestone_state "$2")
+        [[ "$state" != all ]] || die "--state for milestone create must be open or closed"
+        state_set=true
+        shift 2
+        ;;
+      -*) die "unknown option for milestone create: $1" ;;
+      *) die "unexpected argument for milestone create: $1" ;;
+    esac
+  done
+
+  [[ "$title_set" == true ]] || die "milestone create requires --title"
+  [[ -n "$title" ]] || die "--title cannot be empty"
+  require_repo
+
+  local milestone
+  milestone=$(api POST "/repos/$REPO/milestones" \
+    -d "$(jq -n \
+      --arg title "$title" \
+      --arg description "$description" \
+      --arg due_on "$due_on" \
+      --arg state "$state" \
+      --argjson description_set "$description_set" \
+      --argjson due_set "$due_set" \
+      --argjson state_set "$state_set" \
+      '{title: $title}
+        | if $description_set then . + {description: $description} else . end
+        | if $due_set then . + {due_on: $due_on} else . end
+        | if $state_set then . + {state: $state} else . end')")
+  echo "$milestone" | jq -r '"Milestone created: \(.id) \(.title)"'
+}
+
+milestone_edit() {
+  contains_help_flag "$@" && { command_usage "milestone edit"; return; }
+  local target="" target_set=false
+  local title="" description="" due_on="" state=""
+  local title_set=false description_set=false due_set=false state_set=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -R|--repo)
+        set_repo_option "$@"
+        shift 2
+        ;;
+      -t|--title)
+        require_option_value "$1" "$#"
+        [[ "$title_set" == false ]] || die "$1 specified more than once"
+        title="$2"
+        title_set=true
+        shift 2
+        ;;
+      -d|--description)
+        require_option_value "$1" "$#"
+        [[ "$description_set" == false ]] || die "$1 specified more than once"
+        description="$2"
+        description_set=true
+        shift 2
+        ;;
+      --due)
+        require_option_value "$1" "$#"
+        due_on=$(normalize_due_on "$2")
+        due_set=true
+        shift 2
+        ;;
+      -s|--state)
+        require_option_value "$1" "$#"
+        state=$(parse_milestone_state "$2")
+        [[ "$state" != all ]] || die "--state for milestone edit must be open or closed"
+        state_set=true
+        shift 2
+        ;;
+      -*) die "unknown option for milestone edit: $1" ;;
+      *)
+        [[ "$target_set" == false ]] || die "unexpected argument for milestone edit: $1"
+        target="$1"
+        target_set=true
+        shift
+        ;;
+    esac
+  done
+
+  [[ "$target_set" == true && -n "$target" ]] || {
+    die "usage: forge milestone edit <id-or-title> [--title <title>] [--description <text>] [--due <date>] [--state open|closed]"
+  }
+  [[ "$title_set" == true || "$description_set" == true || "$due_set" == true || "$state_set" == true ]] || die "milestone edit requires a change"
+  [[ "$title_set" == false || -n "$title" ]] || die "--title cannot be empty"
+  require_repo
+
+  local id milestone
+  id=$(resolve_milestone_id "$target")
+  milestone=$(api PATCH "/repos/$REPO/milestones/$id" \
+    -d "$(jq -n \
+      --arg title "$title" \
+      --arg description "$description" \
+      --arg due_on "$due_on" \
+      --arg state "$state" \
+      --argjson title_set "$title_set" \
+      --argjson description_set "$description_set" \
+      --argjson due_set "$due_set" \
+      --argjson state_set "$state_set" \
+      '{} | if $title_set then . + {title: $title} else . end
+          | if $description_set then . + {description: $description} else . end
+          | if $due_set then . + {due_on: $due_on} else . end
+          | if $state_set then . + {state: $state} else . end')")
+  echo "$milestone" | jq -r '"Milestone updated: \(.id) \(.title)"'
+}
+
+milestone_delete() {
+  contains_help_flag "$@" && { command_usage "milestone delete"; return; }
+  parse_repo_positionals "milestone delete" "$@"
+  [[ "${#POSITIONAL_ARGS[@]}" -eq 1 ]] || die "usage: forge milestone delete <id-or-title>"
+  require_repo
+  local target="${POSITIONAL_ARGS[0]}"
+  local id
+  id=$(resolve_milestone_id "$target")
+  api DELETE "/repos/$REPO/milestones/$id" >/dev/null
+  echo "Milestone deleted: $target"
+}
+
+project_unavailable() {
+  contains_help_flag "$@" && { command_usage "project"; return; }
+  die "project commands are unavailable: this Forgejo API does not expose repository project endpoints"
 }
 
 # --- Token commands ---
@@ -1143,7 +1901,7 @@ Flags:
 USAGE
       ;;
     "issue create") cat <<'USAGE'
-Usage: forge issue create -t <title> [-b <text> | -F <file>] [-R <owner/repo>]
+Usage: forge issue create -t <title> [-b <text> | -F <file>] [-l <label>] [-m <milestone>] [-R <owner/repo>]
 
 Create an issue.
 
@@ -1151,6 +1909,8 @@ Flags:
   -t, --title <text>        Issue title (required)
   -b, --body <text>         Set body text
   -F, --body-file <file>    Read body from file (use "-" for stdin)
+  -l, --label <label>       Add a label by name or ID (repeatable)
+  -m, --milestone <value>   Set milestone by title or ID
   -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
 USAGE
       ;;
@@ -1166,14 +1926,39 @@ Flags:
 USAGE
       ;;
     "issue edit") cat <<'USAGE'
-Usage: forge issue edit <number> [-t <title>] [-b <text> | -F <file>] [-R <owner/repo>]
+Usage: forge issue edit <number> [-t <title>] [-b <text> | -F <file>] [-m <milestone> | --clear-milestone] [-R <owner/repo>]
 
-Update issue title and/or description.
+Update issue title, description, and/or milestone.
 
 Flags:
   -t, --title <text>        New title
   -b, --body <text>         New body text
   -F, --body-file <file>    Read body from file (use "-" for stdin)
+  -m, --milestone <value>   Set milestone by title or ID
+      --clear-milestone     Remove the issue milestone
+  -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
+USAGE
+      ;;
+    "issue labels") cat <<'USAGE'
+Usage: forge issue labels <number> [--add <label>] [--remove <label>] [--set <label>] [--clear] [-R <owner/repo>]
+
+List or change an issue's labels. Label values may be names or IDs.
+
+Flags:
+      --add <label>         Add a label (repeatable)
+      --remove <label>      Remove a label (repeatable)
+      --set <label>         Replace labels with this set (repeatable)
+      --clear               Remove all labels
+  -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
+USAGE
+      ;;
+    "issue milestone") cat <<'USAGE'
+Usage: forge issue milestone <number> [<milestone> | --clear] [-R <owner/repo>]
+
+Show, set, or clear an issue milestone. Milestone values may be titles or IDs.
+
+Flags:
+      --clear               Remove the issue milestone
   -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
 USAGE
       ;;
@@ -1187,6 +1972,116 @@ Flags:
   -r, --reason <reason>     Closing reason: completed, not planned, duplicate
       --duplicate-of <issue>  Mark as a duplicate of another issue
   -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
+USAGE
+      ;;
+    "label list") cat <<'USAGE'
+Usage: forge label list [-R <owner/repo>]
+
+List repository labels.
+
+Flags:
+  -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
+USAGE
+      ;;
+    "label create") cat <<'USAGE'
+Usage: forge label create -n <name> -c <hex> [-d <text>] [--exclusive] [--archived] [-R <owner/repo>]
+
+Create a repository label.
+
+Flags:
+  -n, --name <name>         Label name (required)
+  -c, --color <hex>         Six-digit hex color, with or without #
+  -d, --description <text>  Label description
+      --exclusive           Mark as exclusive
+      --archived            Mark as archived
+  -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
+USAGE
+      ;;
+    "label edit") cat <<'USAGE'
+Usage: forge label edit <id-or-name> [-n <name>] [-c <hex>] [-d <text>] [--exclusive | --no-exclusive] [--archived | --no-archived] [-R <owner/repo>]
+
+Update a repository label.
+
+Flags:
+  -n, --name <name>         New label name
+  -c, --color <hex>         Six-digit hex color, with or without #
+  -d, --description <text>  New label description
+      --exclusive           Mark as exclusive
+      --no-exclusive        Mark as non-exclusive
+      --archived            Mark as archived
+      --no-archived         Mark as active
+  -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
+USAGE
+      ;;
+    "label delete") cat <<'USAGE'
+Usage: forge label delete <id-or-name> [-R <owner/repo>]
+
+Delete a repository label.
+
+Flags:
+  -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
+USAGE
+      ;;
+    "milestone list") cat <<'USAGE'
+Usage: forge milestone list [-s open|closed|all] [-R <owner/repo>]
+
+List repository milestones.
+
+Flags:
+  -s, --state <state>       Milestone state (default: open)
+  -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
+USAGE
+      ;;
+    "milestone view") cat <<'USAGE'
+Usage: forge milestone view <id-or-title> [-R <owner/repo>]
+
+Show milestone details.
+
+Flags:
+  -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
+USAGE
+      ;;
+    "milestone create") cat <<'USAGE'
+Usage: forge milestone create -t <title> [-d <text>] [--due <date>] [-s open|closed] [-R <owner/repo>]
+
+Create a repository milestone.
+
+Flags:
+  -t, --title <title>       Milestone title (required)
+  -d, --description <text>  Milestone description
+      --due <date>          Due date as YYYY-MM-DD or API date-time
+  -s, --state <state>       Milestone state: open or closed
+  -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
+USAGE
+      ;;
+    "milestone edit") cat <<'USAGE'
+Usage: forge milestone edit <id-or-title> [-t <title>] [-d <text>] [--due <date>] [-s open|closed] [-R <owner/repo>]
+
+Update a repository milestone.
+
+Flags:
+  -t, --title <title>       New milestone title
+  -d, --description <text>  New milestone description
+      --due <date>          Due date as YYYY-MM-DD or API date-time
+  -s, --state <state>       Milestone state: open or closed
+  -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
+USAGE
+      ;;
+    "milestone delete") cat <<'USAGE'
+Usage: forge milestone delete <id-or-title> [-R <owner/repo>]
+
+Delete a repository milestone.
+
+Flags:
+  -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
+USAGE
+      ;;
+    "project") cat <<'USAGE'
+Usage: forge project <command>
+
+Project commands are unavailable because this Forgejo API does not expose
+repository project endpoints. Use the web UI for projects, or organize issues
+through labels and milestones from this CLI.
 USAGE
       ;;
     "token verify") cat <<'USAGE'
@@ -1214,10 +2109,13 @@ usage() {
 Usage: forge [-R|--repo owner/repo] <resource> <command> [args]
 
 Resources:
-  pr      Pull requests
-  issue   Issues
-  auth    Credential status
-  token   Candidate token verification
+  pr          Pull requests
+  issue       Issues
+  label       Repository labels
+  milestone   Repository milestones
+  project     Repository projects (not exposed by this Forgejo API)
+  auth        Credential status
+  token       Candidate token verification
 
 PR commands:
   forge pr list
@@ -1252,14 +2150,44 @@ Issue commands:
       List open issues
   forge issue view <number>
       Show issue details and comments
-  forge issue create -t <title> [-b <text> | -F <file>]
+  forge issue create -t <title> [-b <text> | -F <file>] [-l <label>] [-m <milestone>]
       Create an issue
-  forge issue edit <number> [-t <title>] [-b <text> | -F <file>]
-      Update issue title and/or description
+  forge issue edit <number> [-t <title>] [-b <text> | -F <file>] [-m <milestone> | --clear-milestone]
+      Update issue title, description, and/or milestone
+  forge issue labels <number> [--add <label>] [--remove <label>] [--set <label>] [--clear]
+      List or change issue labels
+  forge issue milestone <number> [<milestone> | --clear]
+      Show, set, or clear issue milestone
   forge issue comment <number> [-b <text> | -F <file>]
       Post a comment on an issue
   forge issue close {<number> | <url>} [-c <text>] [-r <reason>] [--duplicate-of <issue>]
       Close an issue; reasons: completed, not planned, duplicate
+
+Label commands:
+  forge label list
+      List repository labels
+  forge label create -n <name> -c <hex> [-d <text>] [--exclusive] [--archived]
+      Create a repository label
+  forge label edit <id-or-name> [-n <name>] [-c <hex>] [-d <text>] [--exclusive | --no-exclusive] [--archived | --no-archived]
+      Update a repository label
+  forge label delete <id-or-name>
+      Delete a repository label
+
+Milestone commands:
+  forge milestone list [-s open|closed|all]
+      List repository milestones
+  forge milestone view <id-or-title>
+      Show milestone details
+  forge milestone create -t <title> [-d <text>] [--due <date>] [-s open|closed]
+      Create a repository milestone
+  forge milestone edit <id-or-title> [-t <title>] [-d <text>] [--due <date>] [-s open|closed]
+      Update a repository milestone
+  forge milestone delete <id-or-title>
+      Delete a repository milestone
+
+Project commands:
+  forge project <command>
+      Unavailable: this Forgejo API does not expose repository project endpoints
 
 Flags:
   -R, --repo <owner/repo>   Target repo; may appear before resource or after command
@@ -1268,6 +2196,8 @@ Flags:
   -F, --body-file <file>    Read body text from file (use "-" for stdin)
   -H, --head <branch>       PR head branch (default: current branch)
   -B, --base <branch>       PR base branch (default: repository default)
+  -l, --label <label>       Add issue label by name or ID
+  -m, --milestone <value>   Set issue milestone by title or ID
   -c, --comment <text>      Leave a closing comment
   -r, --reason <reason>     Closing reason: completed, not planned, duplicate
       --duplicate-of <issue>  Mark the closing comment as a duplicate
@@ -1303,10 +2233,39 @@ case "$RESOURCE" in
       view)   issue_view "$@" ;;
       create) issue_create "$@" ;;
       edit)    issue_edit "$@" ;;
+      labels) issue_labels "$@" ;;
+      milestone) issue_milestone "$@" ;;
       comment) issue_comment "$@" ;;
       close)  issue_close "$@" ;;
       -h|--help) usage ;;
       *)      usage; exit 1 ;;
+    esac
+    ;;
+  label)
+    case "$COMMAND" in
+      list)   label_list "$@" ;;
+      create) label_create "$@" ;;
+      edit)   label_edit "$@" ;;
+      delete) label_delete "$@" ;;
+      -h|--help) usage ;;
+      *)      usage; exit 1 ;;
+    esac
+    ;;
+  milestone)
+    case "$COMMAND" in
+      list)   milestone_list "$@" ;;
+      view)   milestone_view "$@" ;;
+      create) milestone_create "$@" ;;
+      edit)   milestone_edit "$@" ;;
+      delete) milestone_delete "$@" ;;
+      -h|--help) usage ;;
+      *)      usage; exit 1 ;;
+    esac
+    ;;
+  project)
+    case "$COMMAND" in
+      -h|--help) command_usage "project" ;;
+      *) project_unavailable "$COMMAND" "$@" ;;
     esac
     ;;
   token)

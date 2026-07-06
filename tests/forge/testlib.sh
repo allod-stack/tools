@@ -105,7 +105,7 @@ case "$url" in
     printf '%s\n' '[{"number":12,"title":"Improve tool","user":{"login":"alice"},"head":{"label":"acme:topic"},"base":{"label":"master"}}]'
     ;;
   */api/v1/repos/acme/widget/issues\?type=issues\&state=open\&limit=50)
-    printf '%s\n' '[{"number":20,"title":"Fix backup","user":{"login":"bob"}}]'
+    printf '%s\n' '[{"number":20,"title":"Fix backup","user":{"login":"bob"},"labels":[{"id":1,"name":"bug","color":"ff0000"}],"milestone":{"id":3,"title":"July batch"}}]'
     ;;
   */api/v1/repos/acme/widget/pulls/12/reviews)
     printf '%s\n' '[{"id":7,"comments_count":1}]'
@@ -155,14 +155,64 @@ case "$url" in
       printf '%s\n' '{"html_url":"https://forge.example/acme/widget/issues/20#comment-2"}'
     fi
     ;;
+  */api/v1/repos/acme/widget/issues/20/labels/bug|*/api/v1/repos/acme/widget/issues/20/labels/1)
+    # Label removal returns 204 No Content; empty body is intentional.
+    ;;
+  */api/v1/repos/acme/widget/issues/20/labels)
+    case "$method" in
+      GET) printf '%s\n' '[{"id":1,"name":"bug","color":"ff0000"}]' ;;
+      POST) printf '%s\n' '[{"id":1,"name":"bug","color":"ff0000"},{"id":2,"name":"triage","color":"00ff00"}]' ;;
+      PUT) printf '%s\n' '[{"id":2,"name":"triage","color":"00ff00"}]' ;;
+      DELETE) ;;
+      *) echo "unexpected mocked issue labels method: $method" >&2; exit 1 ;;
+    esac
+    ;;
   */api/v1/repos/acme/widget/issues)
     printf '%s\n' '{"html_url":"https://forge.example/acme/widget/issues/20"}'
     ;;
   */api/v1/repos/acme/widget/issues/20)
     if [[ "$method" == GET ]]; then
-      printf '%s\n' '{"title":"Fix backup","state":"open","body":"Issue body","user":{"login":"bob"}}'
+      printf '%s\n' '{"title":"Fix backup","state":"open","body":"Issue body","user":{"login":"bob"},"labels":[{"id":1,"name":"bug","color":"ff0000"}],"milestone":{"id":3,"title":"July batch"}}'
     else
       printf '%s\n' '{"html_url":"https://forge.example/acme/widget/issues/20"}'
+    fi
+    ;;
+  */api/v1/repos/acme/widget/labels\?limit=100)
+    printf '%s\n' '[{"id":1,"name":"bug","color":"ff0000","description":"Problem","exclusive":false,"is_archived":false},{"id":2,"name":"triage","color":"00ff00","description":"","exclusive":false,"is_archived":false}]'
+    ;;
+  */api/v1/repos/acme/widget/labels)
+    printf '%s\n' '{"id":4,"name":"area/nix","color":"123456","description":"Nix area","exclusive":false,"is_archived":false}'
+    ;;
+  */api/v1/repos/acme/widget/labels/1)
+    if [[ "$method" == GET ]]; then
+      printf '%s\n' '{"id":1,"name":"bug","color":"ff0000","description":"Problem","exclusive":false,"is_archived":false}'
+    elif [[ "$method" == PATCH ]]; then
+      printf '%s\n' '{"id":1,"name":"defect","color":"0000ff","description":"Problem","exclusive":true,"is_archived":false}'
+    else
+      # Label deletion returns 204 No Content; empty body is intentional.
+      :
+    fi
+    ;;
+  */api/v1/repos/acme/widget/milestones\?state=open\&limit=100)
+    printf '%s\n' '[{"id":3,"title":"July batch","state":"open","open_issues":2,"closed_issues":1,"due_on":"2026-07-31T00:00:00Z"}]'
+    ;;
+  */api/v1/repos/acme/widget/milestones\?state=all\&limit=100)
+    printf '%s\n' '[{"id":3,"title":"July batch","state":"open","open_issues":2,"closed_issues":1,"due_on":"2026-07-31T00:00:00Z"}]'
+    ;;
+  */api/v1/repos/acme/widget/milestones\?state=all\&name=July%20batch\&limit=100)
+    printf '%s\n' '[{"id":3,"title":"July batch","state":"open","open_issues":2,"closed_issues":1,"due_on":"2026-07-31T00:00:00Z"}]'
+    ;;
+  */api/v1/repos/acme/widget/milestones)
+    printf '%s\n' '{"id":5,"title":"August batch","state":"open","open_issues":0,"closed_issues":0,"due_on":"2026-08-31T00:00:00Z"}'
+    ;;
+  */api/v1/repos/acme/widget/milestones/3)
+    if [[ "$method" == GET ]]; then
+      printf '%s\n' '{"id":3,"title":"July batch","state":"open","description":"July work","open_issues":2,"closed_issues":1,"due_on":"2026-07-31T00:00:00Z"}'
+    elif [[ "$method" == PATCH ]]; then
+      printf '%s\n' '{"id":3,"title":"July batch","state":"closed","description":"July work","open_issues":0,"closed_issues":3,"due_on":"2026-07-31T00:00:00Z"}'
+    else
+      # Milestone deletion returns 204 No Content; empty body is intentional.
+      :
     fi
     ;;
   */api/v1/repos/acme/widget/branches/topic)

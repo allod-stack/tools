@@ -30,6 +30,8 @@ reset_requests
 output=$(run_capture issue list)
 assert_contains "$output" "Fix backup" "lists an open issue"
 assert_contains "$output" "bob" "shows the issue author"
+assert_contains "$output" "bug" "shows issue labels"
+assert_contains "$output" "July batch" "shows issue milestones"
 assert_request 1 GET "/api/v1/repos/acme/widget/issues?type=issues&state=open&limit=50" \
   "infers the repository for issue listing"
 
@@ -44,5 +46,42 @@ output=$(run_capture -R acme/widget issue view 20)
 assert_contains "$output" "Issue #20: Fix backup" "shows the issue header"
 assert_contains "$output" "Issue body" "shows the issue body"
 assert_contains "$output" "Issue note" "shows issue comments"
+assert_contains "$output" "Labels:    bug" "shows issue view labels"
+assert_contains "$output" "Milestone: July batch" "shows issue view milestone"
+
+reset_requests
+output=$(run_capture -R acme/widget label list)
+assert_contains "$output" "bug" "lists repository labels"
+assert_contains "$output" "Problem" "shows label descriptions"
+assert_request 1 GET "/api/v1/repos/acme/widget/labels?limit=100" \
+  "requests repository labels"
+
+reset_requests
+output=$(run_capture -R acme/widget milestone list)
+assert_contains "$output" "July batch" "lists repository milestones"
+assert_contains "$output" "2026-07-31" "shows milestone due date"
+assert_request 1 GET "/api/v1/repos/acme/widget/milestones?state=open&limit=100" \
+  "requests open milestones"
+
+reset_requests
+output=$(run_capture -R acme/widget milestone view "July batch")
+assert_contains "$output" "Milestone #3: July batch" "shows milestone details by title"
+assert_contains "$output" "July work" "shows milestone description"
+assert_request 1 GET "/api/v1/repos/acme/widget/milestones?state=all&name=July%20batch&limit=100" \
+  "resolves milestone title"
+assert_request 2 GET "/api/v1/repos/acme/widget/milestones/3" \
+  "requests milestone details"
+
+reset_requests
+output=$(run_capture -R acme/widget issue labels 20)
+assert_contains "$output" "Issue #20 labels: bug" "lists issue labels"
+assert_request 1 GET "/api/v1/repos/acme/widget/issues/20/labels" \
+  "requests issue labels"
+
+reset_requests
+output=$(run_capture -R acme/widget issue milestone 20)
+assert_contains "$output" "Issue #20 milestone: July batch" "shows issue milestone"
+assert_request 1 GET "/api/v1/repos/acme/widget/issues/20" \
+  "requests issue for milestone view"
 
 finish_tests "Forge read"

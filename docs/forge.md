@@ -84,8 +84,13 @@ printed to stdout or accepted as a command-line argument.
 ```bash
 forge issue list
 forge issue view <number>
-forge issue create --title <title> [--body <text> | --body-file <file>]
-forge issue edit <number> [--title <title>] [--body <text> | --body-file <file>]
+forge issue create --title <title> [--body <text> | --body-file <file>] \
+  [--label <label>] [--milestone <milestone>]
+forge issue edit <number> [--title <title>] [--body <text> | --body-file <file>] \
+  [--milestone <milestone> | --clear-milestone]
+forge issue labels <number> [--add <label>] [--remove <label>] \
+  [--set <label>] [--clear]
+forge issue milestone <number> [<milestone> | --clear]
 forge issue close {<number> | <url>} [--comment <text>] \
   [--reason completed|"not planned"|duplicate] [--duplicate-of <issue>]
 ```
@@ -101,3 +106,49 @@ printf '%s\n' "Updated description" | forge issue edit 20 --body-file -
 `-r`/`--reason`, and `--duplicate-of`. Forgejo does not expose close-reason
 metadata through its API, so `not planned` and duplicate reasons are recorded
 in the closing comment.
+
+`issue create` accepts repeated `--label` values by label name or ID and
+`--milestone` by title or ID. `issue labels` lists labels when called without
+changes; use `--add`, `--remove`, `--set`, or `--clear` for mutation.
+`issue milestone` shows the current milestone when called with only an issue
+number, and sets or clears it when given a milestone or `--clear`.
+
+## Label commands
+
+```bash
+forge label list
+forge label create --name <name> --color <hex> [--description <text>] \
+  [--exclusive] [--archived]
+forge label edit <id-or-name> [--name <name>] [--color <hex>] \
+  [--description <text>] [--exclusive | --no-exclusive] \
+  [--archived | --no-archived]
+forge label delete <id-or-name>
+```
+
+Colors are six-digit hex values with or without a leading `#`.
+
+## Milestone commands
+
+```bash
+forge milestone list [--state open|closed|all]
+forge milestone view <id-or-title>
+forge milestone create --title <title> [--description <text>] \
+  [--due YYYY-MM-DD] [--state open|closed]
+forge milestone edit <id-or-title> [--title <title>] \
+  [--description <text>] [--due YYYY-MM-DD] [--state open|closed]
+forge milestone delete <id-or-title>
+```
+
+Milestone lookups accept IDs or exact titles. `--due YYYY-MM-DD` is sent to the
+API as midnight UTC for that date.
+
+## Project commands
+
+```bash
+forge project <command>
+```
+
+Project commands intentionally report unavailable. The Forgejo API served by
+`forge.anarch.diy` exposes labels and milestones, but not repository project
+endpoints. Use the web UI for project boards, or organize issues through labels
+and milestones from the CLI.

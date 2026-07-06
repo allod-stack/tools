@@ -61,6 +61,17 @@ assert_json 1 '. == {title: "New issue", body: ""}' \
   "sends an empty body when omitted"
 
 reset_requests
+run_ok issue create -t "Organized issue" -l bug -m "July batch"
+assert_equal "$(request_count)" "3" "resolves organization fields before issue creation"
+assert_request 1 GET "/api/v1/repos/acme/widget/labels?limit=100" \
+  "resolves issue create labels"
+assert_request 2 GET "/api/v1/repos/acme/widget/milestones?state=all&name=July%20batch&limit=100" \
+  "resolves issue create milestone"
+assert_request 3 POST "/api/v1/repos/acme/widget/issues" "creates an organized issue"
+assert_json 3 '. == {title: "Organized issue", body: "", labels: [1], milestone: 3}' \
+  "sends labels and milestone on issue creation"
+
+reset_requests
 run_capture issue create -R acme/gadget -t "Command repo issue" >/dev/null
 assert_request 1 POST "/api/v1/repos/acme/gadget/issues" \
   "creates an issue with command-level repo"
@@ -72,6 +83,20 @@ printf 'stdin body\n\n' | run_ok issue edit 20 --title "Updated" --body-file -
 assert_request 1 PATCH "/api/v1/repos/acme/widget/issues/20" "updates an issue"
 assert_json 1 '. == {title: "Updated", body: "stdin body\n\n"}' \
   "preserves issue body content read from stdin"
+
+reset_requests
+run_ok issue edit 20 --milestone "July batch"
+assert_request 1 GET "/api/v1/repos/acme/widget/milestones?state=all&name=July%20batch&limit=100" \
+  "resolves issue edit milestone"
+assert_request 2 PATCH "/api/v1/repos/acme/widget/issues/20" \
+  "updates an issue milestone"
+assert_json 2 '. == {milestone: 3}' "sends milestone ID on issue edit"
+
+reset_requests
+run_ok issue edit 20 --clear-milestone
+assert_request 1 PATCH "/api/v1/repos/acme/widget/issues/20" \
+  "clears an issue milestone"
+assert_json 1 '. == {milestone: 0}' "sends zero milestone when clearing"
 
 reset_requests
 run_ok issue comment 20 -b "issue comment body"
@@ -86,5 +111,94 @@ assert_request 1 POST "/api/v1/repos/acme/widget/issues/20/comments" \
   "posts an issue comment from file"
 assert_json 1 '.body == "line one\n`code`\n\n"' \
   "preserves multiline issue comment content from file"
+
+reset_requests
+run_ok issue labels 20 --add triage
+assert_request 1 POST "/api/v1/repos/acme/widget/issues/20/labels" \
+  "adds an issue label"
+assert_json 1 '. == {labels: ["triage"]}' "sends label names for issue label add"
+
+reset_requests
+run_ok issue labels 20 --add 1
+assert_request 1 POST "/api/v1/repos/acme/widget/issues/20/labels" \
+  "adds an issue label by ID"
+assert_json 1 '. == {labels: [1]}' "sends numeric IDs for issue label add"
+
+reset_requests
+run_ok issue labels 20 --set triage
+assert_request 1 PUT "/api/v1/repos/acme/widget/issues/20/labels" \
+  "replaces issue labels"
+assert_json 1 '. == {labels: ["triage"]}' "sends label names for issue label replace"
+
+reset_requests
+run_ok issue labels 20 --remove bug
+assert_request 1 DELETE "/api/v1/repos/acme/widget/issues/20/labels/bug" \
+  "removes an issue label"
+assert_request 2 GET "/api/v1/repos/acme/widget/issues/20/labels" \
+  "fetches labels after removal"
+
+reset_requests
+run_ok issue labels 20 --clear
+assert_request 1 DELETE "/api/v1/repos/acme/widget/issues/20/labels" \
+  "clears issue labels"
+
+reset_requests
+run_ok issue milestone 20 "July batch"
+assert_request 1 GET "/api/v1/repos/acme/widget/milestones?state=all&name=July%20batch&limit=100" \
+  "resolves issue milestone title"
+assert_request 2 PATCH "/api/v1/repos/acme/widget/issues/20" \
+  "sets issue milestone"
+assert_json 2 '. == {milestone: 3}' "sends milestone ID for issue milestone"
+
+reset_requests
+run_ok issue milestone 20 --clear
+assert_request 1 PATCH "/api/v1/repos/acme/widget/issues/20" \
+  "clears issue milestone through helper command"
+assert_json 1 '. == {milestone: 0}' "sends zero milestone through helper command"
+
+reset_requests
+run_ok label create -n "area/nix" -c 123456 -d "Nix area"
+assert_request 1 POST "/api/v1/repos/acme/widget/labels" \
+  "creates a label"
+assert_json 1 '. == {name: "area/nix", color: "#123456", description: "Nix area"}' \
+  "sends label creation fields"
+
+reset_requests
+run_ok label edit bug -n defect -c 0000ff --exclusive
+assert_request 1 GET "/api/v1/repos/acme/widget/labels?limit=100" \
+  "resolves label name before edit"
+assert_request 2 PATCH "/api/v1/repos/acme/widget/labels/1" \
+  "updates a label"
+assert_json 2 '. == {name: "defect", color: "#0000ff", exclusive: true}' \
+  "sends label edit fields"
+
+reset_requests
+run_ok label delete bug
+assert_request 1 GET "/api/v1/repos/acme/widget/labels?limit=100" \
+  "resolves label name before delete"
+assert_request 2 DELETE "/api/v1/repos/acme/widget/labels/1" \
+  "deletes a label"
+
+reset_requests
+run_ok milestone create -t "August batch" -d "August work" --due 2026-08-31
+assert_request 1 POST "/api/v1/repos/acme/widget/milestones" \
+  "creates a milestone"
+assert_json 1 '. == {title: "August batch", description: "August work", due_on: "2026-08-31T00:00:00Z"}' \
+  "sends milestone creation fields"
+
+reset_requests
+run_ok milestone edit "July batch" -s closed
+assert_request 1 GET "/api/v1/repos/acme/widget/milestones?state=all&name=July%20batch&limit=100" \
+  "resolves milestone title before edit"
+assert_request 2 PATCH "/api/v1/repos/acme/widget/milestones/3" \
+  "updates a milestone"
+assert_json 2 '. == {state: "closed"}' "sends milestone state edit"
+
+reset_requests
+run_ok milestone delete "July batch"
+assert_request 1 GET "/api/v1/repos/acme/widget/milestones?state=all&name=July%20batch&limit=100" \
+  "resolves milestone title before delete"
+assert_request 2 DELETE "/api/v1/repos/acme/widget/milestones/3" \
+  "deletes a milestone"
 
 finish_tests "Forge mutation"

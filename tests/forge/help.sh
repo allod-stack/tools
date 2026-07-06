@@ -13,6 +13,8 @@ assert_contains "$output" "--title" "pr create -h shows --title flag"
 output=$(run_capture issue create --help)
 assert_contains "$output" "--title" "issue create --help shows --title flag"
 assert_contains "$output" "--body-file" "issue create --help shows --body-file flag"
+assert_contains "$output" "--label" "issue create --help shows --label flag"
+assert_contains "$output" "--milestone" "issue create --help shows --milestone flag"
 
 output=$(run_capture pr close --help)
 assert_contains "$output" "--comment" "pr close --help shows --comment flag"
@@ -50,9 +52,38 @@ assert_contains "$output" "<branch>" "pr find-by-head --help shows branch positi
 output=$(run_capture issue edit -h)
 assert_contains "$output" "--title" "issue edit -h shows --title flag"
 assert_contains "$output" "--body-file" "issue edit -h shows --body-file flag"
+assert_contains "$output" "--clear-milestone" "issue edit -h shows clear milestone flag"
+
+output=$(run_capture issue labels -h)
+assert_contains "$output" "--add" "issue labels -h shows add flag"
+assert_contains "$output" "--clear" "issue labels -h shows clear flag"
+
+output=$(run_capture issue milestone -h)
+assert_contains "$output" "--clear" "issue milestone -h shows clear flag"
 
 output=$(run_capture issue list --help)
 assert_contains "$output" "--repo" "issue list --help shows --repo flag"
+
+output=$(run_capture label list --help)
+assert_contains "$output" "repository labels" "label list --help describes labels"
+
+output=$(run_capture label create --help)
+assert_contains "$output" "--color" "label create --help shows color flag"
+
+output=$(run_capture label edit --help)
+assert_contains "$output" "--no-exclusive" "label edit --help shows no-exclusive flag"
+
+output=$(run_capture milestone list --help)
+assert_contains "$output" "--state" "milestone list --help shows state flag"
+
+output=$(run_capture milestone create --help)
+assert_contains "$output" "--due" "milestone create --help shows due flag"
+
+output=$(run_capture milestone edit --help)
+assert_contains "$output" "--state" "milestone edit --help shows state flag"
+
+output=$(run_capture project --help)
+assert_contains "$output" "unavailable" "project --help explains unavailable API"
 
 output=$(run_capture pr review-comments -h)
 assert_contains "$output" "<number>" "pr review-comments -h shows number positional"
@@ -70,6 +101,12 @@ assert_contains "$output" "PR commands" "pr --help shows PR commands section"
 
 output=$(run_capture issue -h)
 assert_contains "$output" "Issue commands" "issue -h shows Issue commands section"
+
+output=$(run_capture label -h)
+assert_contains "$output" "Label commands" "label -h shows Label commands section"
+
+output=$(run_capture milestone -h)
+assert_contains "$output" "Milestone commands" "milestone -h shows Milestone commands section"
 
 # --- No API calls made ---
 

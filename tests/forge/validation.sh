@@ -16,12 +16,34 @@ run_fail "--base cannot be empty" "rejects an empty base branch" \
   pr create --title title --base ""
 run_fail "requires --title" "requires a title when creating an issue" \
   issue create --body body
-run_fail "requires --title, --body, or --body-file" \
+run_fail "issue edit requires" \
   "requires a change when editing an issue" issue edit 20
+run_fail "cannot be combined" "rejects conflicting issue milestone edit flags" \
+  issue edit 20 --milestone "July batch" --clear-milestone
 run_fail "requires --body or --body-file" "requires a pull request comment body" \
   pr comment 12
 run_fail "requires --body or --body-file" "requires an issue comment body" \
   issue comment 20
+run_fail "--clear cannot be combined" "rejects clear plus issue label changes" \
+  issue labels 20 --clear --add bug
+run_fail "--set cannot be combined" "rejects set plus additive label changes" \
+  issue labels 20 --set bug --remove triage
+run_fail "cannot be combined" "rejects clear plus issue milestone value" \
+  issue milestone 20 "July batch" --clear
+run_fail "label create requires --color" "requires color when creating a label" \
+  label create --name bug
+run_fail "color must be a 6-digit hex value" "rejects invalid label color" \
+  label create --name bug --color zzzzzz
+run_fail "label edit requires a change" "requires a label edit change" \
+  label edit bug
+run_fail "--state must be one of" "rejects invalid milestone list state" \
+  milestone list --state invalid
+run_fail "milestone create requires --title" "requires title when creating a milestone" \
+  milestone create --due 2026-08-31
+run_fail "milestone edit requires a change" "requires a milestone edit change" \
+  milestone edit "July batch"
+run_fail "project commands are unavailable" "reports unavailable project API" \
+  project list
 run_fail "unexpected argument" "rejects legacy positional PR creation" \
   pr create "legacy title" topic
 run_fail "unknown option" "rejects an unknown PR edit option" \
