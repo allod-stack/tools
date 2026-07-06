@@ -25,6 +25,41 @@ shift 2
 printf '%s\t%s\n' "$repo" "$*" >> "$MOCK_LOG"
 command="$*"
 
+lock_concurrency() {
+  while ! mkdir "$MOCK_CONCURRENCY_DIR/lock" 2>/dev/null; do
+    sleep 0.01
+  done
+}
+
+unlock_concurrency() {
+  rmdir "$MOCK_CONCURRENCY_DIR/lock"
+}
+
+track_pull_start() {
+  [[ -n "${MOCK_CONCURRENCY_DIR:-}" ]] || return 0
+  lock_concurrency
+  local active max
+  active=$(cat "$MOCK_CONCURRENCY_DIR/active")
+  max=$(cat "$MOCK_CONCURRENCY_DIR/max")
+  active=$((active + 1))
+  printf '%s\n' "$active" > "$MOCK_CONCURRENCY_DIR/active"
+  if (( active > max )); then
+    printf '%s\n' "$active" > "$MOCK_CONCURRENCY_DIR/max"
+  fi
+  unlock_concurrency
+  sleep 0.05
+}
+
+track_pull_done() {
+  [[ -n "${MOCK_CONCURRENCY_DIR:-}" ]] || return 0
+  lock_concurrency
+  local active
+  active=$(cat "$MOCK_CONCURRENCY_DIR/active")
+  active=$((active - 1))
+  printf '%s\n' "$active" > "$MOCK_CONCURRENCY_DIR/active"
+  unlock_concurrency
+}
+
 case "$command" in
   "rev-parse --show-toplevel")
     [[ -f "$repo_dir/.git/HEAD" ]] || exit 1
@@ -65,17 +100,21 @@ case "$command" in
   "checkout master")
     ;;
   "pull")
+    track_pull_start
+    status=0
     if [[ "$repo" == pull-fail ]]; then
       echo "network unavailable"
-      exit 1
+      status=1
     elif [[ "$repo" == local ]]; then
       echo "There is no tracking information for the current branch."
-      exit 1
+      status=1
     elif [[ "$repo" == switched || "$repo" == repo ]]; then
       echo "Updating 1111111..2222222"
     else
       echo "Already up to date."
     fi
+    track_pull_done
+    exit "$status"
     ;;
   *)
     echo "unexpected git invocation for $repo: $*" >&2
@@ -190,6 +229,51 @@ if [[ "$help_output" == *"--switch"* ]]; then
   pass "--help mentions --switch flag"
 else
   fail "--help mentions --switch flag" "actual output:" "$help_output"
+fi
+
+if [[ "$help_output" == *"PULL_ALL_JOBS"* ]]; then
+  pass "--help mentions PULL_ALL_JOBS"
+else
+  fail "--help mentions PULL_ALL_JOBS" "actual output:" "$help_output"
+fi
+
+if help_output=$(PULL_ALL_JOBS=0 "$ROOT/workspace/pull-all" --help); then
+  if [[ "$help_output" == *"PULL_ALL_JOBS"* ]]; then
+    pass "--help works even with an invalid PULL_ALL_JOBS"
+  else
+    fail "--help works even with an invalid PULL_ALL_JOBS" "actual output:" "$help_output"
+  fi
+else
+  fail "--help works even with an invalid PULL_ALL_JOBS" "command failed"
+fi
+
+if PULL_ALL_JOBS=0 "$ROOT/workspace/pull-all" > "$TMP/invalid.out" 2> "$TMP/invalid.err"; then
+  fail "rejects invalid PULL_ALL_JOBS" "command unexpectedly succeeded"
+else
+  invalid_error=$(cat "$TMP/invalid.err")
+  if [[ "$invalid_error" == *"PULL_ALL_JOBS must be a positive integer"* ]]; then
+    pass "rejects invalid PULL_ALL_JOBS"
+  else
+    fail "rejects invalid PULL_ALL_JOBS" "actual stderr:" "$invalid_error"
+  fi
+fi
+
+# --- PULL_ALL_JOBS limits concurrent pulls ---
+
+: > "$MOCK_LOG"
+export MOCK_CONCURRENCY_DIR="$TMP/concurrency"
+mkdir -p "$MOCK_CONCURRENCY_DIR"
+printf '0\n' > "$MOCK_CONCURRENCY_DIR/active"
+printf '0\n' > "$MOCK_CONCURRENCY_DIR/max"
+
+output=$(PULL_ALL_JOBS=1 "$ROOT/workspace/pull-all")
+max_active=$(cat "$MOCK_CONCURRENCY_DIR/max")
+unset MOCK_CONCURRENCY_DIR
+
+if [[ "$max_active" == "1" ]]; then
+  pass "PULL_ALL_JOBS limits concurrent pulls"
+else
+  fail "PULL_ALL_JOBS limits concurrent pulls" "expected max active pulls: 1" "actual max active pulls: $max_active" "actual output:" "$output"
 fi
 
 printf '\nTests run: %d\n' "$test_number"

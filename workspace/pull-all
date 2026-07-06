@@ -6,16 +6,18 @@
 #   - Pulls the current branch and reports what happened
 #   - With --switch, checks out the default branch first (if safe)
 #
-# All repos are processed in parallel.
+# Repos are processed in parallel, capped by PULL_ALL_JOBS.
 #
 # Options:
 #   --switch  Switch repos on non-default branches to the default
 #                       branch before pulling (skips if unpushed commits exist)
+#   PULL_ALL_JOBS=N     Limit concurrent pulls (default: 4)
 #   -h, --help          Show this help message
 
 set -euo pipefail
 
 SWITCH_DEFAULT=false
+PULL_ALL_JOBS="${PULL_ALL_JOBS:-4}"
 
 for arg in "$@"; do
   case "$arg" in
@@ -30,6 +32,11 @@ for arg in "$@"; do
       ;;
   esac
 done
+
+if ! [[ "$PULL_ALL_JOBS" =~ ^[1-9][0-9]*$ ]]; then
+  printf 'pull-all: PULL_ALL_JOBS must be a positive integer, got: %s\n' "$PULL_ALL_JOBS" >&2
+  exit 1
+fi
 
 if ! declare -F workspace_collect_repos >/dev/null; then
   # shellcheck source=/dev/null
@@ -91,12 +98,18 @@ process_repo() {
   fi
 }
 
+running=0
 for i in "${!REPOS[@]}"; do
   repo="${REPOS[$i]}"
   dir="${WORK_DIR}/${repo}"
   [[ -d "$dir" ]] || continue
 
   process_repo "$repo" "$dir" "$tmpdir/$i" &
+  running=$((running + 1))
+  if (( running >= PULL_ALL_JOBS )); then
+    wait -n 2>/dev/null || true
+    running=$((running - 1))
+  fi
 done
 
 wait

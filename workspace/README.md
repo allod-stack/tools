@@ -12,6 +12,7 @@ their default branch before pulling.
 ```
 pull-all
 pull-all --switch
+PULL_ALL_JOBS=2 pull-all
 ```
 
 For each repo:
@@ -21,7 +22,9 @@ For each repo:
 - **With `--switch`, non-default branch with unpushed commits** -> skipped with notice
 - **With `--switch`, non-default branch clean and fully pushed** -> checks out the default branch, then pulls
 
-Repos are processed in parallel and printed in workspace order.
+Repos are processed in parallel and printed in workspace order. Concurrency is
+capped at 4 pulls by default; set `PULL_ALL_JOBS` to a positive integer to tune
+the limit.
 
 Example `pull-all --switch` output:
 
