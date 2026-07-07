@@ -28,6 +28,8 @@ run_fail "--clear cannot be combined" "rejects clear plus issue label changes" \
   issue labels 20 --clear --add-label bug
 run_fail "--set cannot be combined" "rejects set plus additive label changes" \
   issue labels 20 --set bug --remove-label triage
+run_fail "cannot contain an empty value" "rejects trailing comma-separated label values" \
+  issue edit 20 --add-label bug,
 run_fail "cannot be combined" "rejects clear plus issue milestone value" \
   issue milestone 20 "July batch" --clear
 run_fail "label create requires a name" "requires a name when creating a label" \
@@ -36,6 +38,8 @@ run_fail "color must be a 6-digit hex value" "rejects invalid label color" \
   label create bug --color zzzzzz
 run_fail "label edit requires a change" "requires a label edit change" \
   label edit bug
+run_fail "label delete requires --yes" "requires confirmation when deleting a label" \
+  label delete bug
 run_fail "--state must be one of" "rejects invalid milestone list state" \
   milestone list --state invalid
 run_fail "milestone create requires --title" "requires title when creating a milestone" \

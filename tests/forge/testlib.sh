@@ -107,7 +107,7 @@ case "$url" in
   */api/v1/repos/acme/widget/issues\?type=issues\&state=open\&limit=30)
     printf '%s\n' '[{"number":20,"title":"Fix backup","user":{"login":"bob"},"labels":[{"id":1,"name":"bug","color":"ff0000"}],"milestone":{"id":3,"title":"July batch"}}]'
     ;;
-  */api/v1/repos/acme/widget/issues\?type=issues\&state=closed\&limit=5)
+  */api/v1/repos/acme/widget/issues\?type=issues\&state=closed\&limit=5\&labels=bug\&milestones=July%20batch\&q=backup)
     printf '%s\n' '[{"number":19,"title":"Closed backup","user":{"login":"bob"},"labels":[{"id":1,"name":"bug","color":"ff0000"}],"milestone":{"id":3,"title":"July batch"}}]'
     ;;
   */api/v1/repos/acme/widget/pulls/12/reviews)

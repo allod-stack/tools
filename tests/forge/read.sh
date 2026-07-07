@@ -38,8 +38,8 @@ assert_request 1 GET "/api/v1/repos/acme/widget/issues?type=issues&state=open&li
 reset_requests
 output=$(run_capture issue list --state closed --label bug --milestone "July batch" --limit 5 --search backup)
 assert_contains "$output" "Closed backup" "filters issues with gh-style list flags"
-assert_request 1 GET "/api/v1/repos/acme/widget/issues?type=issues&state=closed&limit=5" \
-  "passes issue list state and limit"
+assert_request 1 GET "/api/v1/repos/acme/widget/issues?type=issues&state=closed&limit=5&labels=bug&milestones=July%20batch&q=backup" \
+  "passes issue list filters to the API"
 
 reset_requests
 output=$(run_capture issue list --repo acme/gadget)

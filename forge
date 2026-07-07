@@ -270,11 +270,17 @@ append_csv_values() {
   local value="$3"
   local item
   local -a items
+  [[ "$value" != *, ]] || die "$option cannot contain an empty value"
   IFS=, read -r -a items <<< "$value"
   for item in "${items[@]}"; do
     [[ -n "$item" ]] || die "$option cannot contain an empty value"
     dest+=("$item")
   done
+}
+
+join_csv_values() {
+  local IFS=,
+  printf '%s' "$*"
 }
 
 parse_positive_int() {
@@ -877,20 +883,20 @@ issue_list() {
     esac
   done
   require_repo
-  local result filtered
-  result=$(api GET "/repos/$REPO/issues?type=issues&state=$state&limit=$limit")
-  filtered=$(echo "$result" | jq \
-    --argjson labels "$(jq -n '$ARGS.positional' --args "${labels[@]}")" \
-    --arg milestone "$milestone" \
-    --arg search "$search" \
-    --argjson limit "$limit" \
-    '[.[] |
-      select(($search == "") or ((.title // "") | ascii_downcase | contains($search | ascii_downcase)) or ((.body // "") | ascii_downcase | contains($search | ascii_downcase))) |
-      select(($milestone == "") or ((.milestone.title // "") == $milestone) or ((.milestone.id | tostring) == $milestone)) |
-      select(($labels | length) == 0 or (($labels - ((.labels // []) | map(.name))) | length == 0))
-    ][0:$limit]')
+  local path="/repos/$REPO/issues?type=issues&state=$state&limit=$limit"
+  if [[ "${#labels[@]}" -gt 0 ]]; then
+    path+="&labels=$(urlencode "$(join_csv_values "${labels[@]}")")"
+  fi
+  if [[ -n "$milestone" ]]; then
+    path+="&milestones=$(urlencode "$milestone")"
+  fi
+  if [[ -n "$search" ]]; then
+    path+="&q=$(urlencode "$search")"
+  fi
+  local result
+  result=$(api GET "$path")
   local count
-  count=$(echo "$filtered" | jq 'length')
+  count=$(echo "$result" | jq 'length')
   if [ "$count" -eq 0 ]; then
     if [[ "$state" == open ]]; then
       echo "No open issues in $REPO"
@@ -899,7 +905,7 @@ issue_list() {
     fi
     return
   fi
-  echo "$filtered" | jq -r '.[] |
+  echo "$result" | jq -r '.[] |
     "\(.number)\t\(.title)\t\(.user.login)\t\((.labels // []) | if length == 0 then "-" else map(.name) | join(",") end)\t\(.milestone.title // "-")"' \
     | column -t -s $'\t'
 }
@@ -1649,7 +1655,7 @@ label_edit() {
 
 label_delete() {
   contains_help_flag "$@" && { command_usage "label delete"; return; }
-  local target="" target_set=false
+  local target="" target_set=false yes=false
   while [[ $# -gt 0 ]]; do
     case "$1" in
       -R|--repo)
@@ -1657,6 +1663,7 @@ label_delete() {
         shift 2
         ;;
       --yes)
+        yes=true
         shift
         ;;
       -*) die "unknown option for label delete: $1" ;;
@@ -1669,6 +1676,7 @@ label_delete() {
     esac
   done
   [[ "$target_set" == true && -n "$target" ]] || die "usage: forge label delete <name> [--yes]"
+  [[ "$yes" == true ]] || die "label delete requires --yes"
   require_repo
   local id
   id=$(resolve_label_id "$target")
