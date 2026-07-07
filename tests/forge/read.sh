@@ -32,13 +32,19 @@ assert_contains "$output" "Fix backup" "lists an open issue"
 assert_contains "$output" "bob" "shows the issue author"
 assert_contains "$output" "bug" "shows issue labels"
 assert_contains "$output" "July batch" "shows issue milestones"
-assert_request 1 GET "/api/v1/repos/acme/widget/issues?type=issues&state=open&limit=50" \
+assert_request 1 GET "/api/v1/repos/acme/widget/issues?type=issues&state=open&limit=30" \
   "infers the repository for issue listing"
+
+reset_requests
+output=$(run_capture issue list --state closed --label bug --milestone "July batch" --limit 5 --search backup)
+assert_contains "$output" "Closed backup" "filters issues with gh-style list flags"
+assert_request 1 GET "/api/v1/repos/acme/widget/issues?type=issues&state=closed&limit=5" \
+  "passes issue list state and limit"
 
 reset_requests
 output=$(run_capture issue list --repo acme/gadget)
 assert_contains "$output" "Gadget issue" "lists issues with command-level repo"
-assert_request 1 GET "/api/v1/repos/acme/gadget/issues?type=issues&state=open&limit=50" \
+assert_request 1 GET "/api/v1/repos/acme/gadget/issues?type=issues&state=open&limit=30" \
   "uses command-level repo for issue listing"
 
 reset_requests
@@ -53,8 +59,14 @@ reset_requests
 output=$(run_capture -R acme/widget label list)
 assert_contains "$output" "bug" "lists repository labels"
 assert_contains "$output" "Problem" "shows label descriptions"
-assert_request 1 GET "/api/v1/repos/acme/widget/labels?limit=100" \
+assert_request 1 GET "/api/v1/repos/acme/widget/labels?limit=30" \
   "requests repository labels"
+
+reset_requests
+output=$(run_capture -R acme/widget label list --search tri --sort name --order desc --limit 30)
+assert_contains "$output" "triage" "filters labels with gh-style list flags"
+assert_request 1 GET "/api/v1/repos/acme/widget/labels?limit=30" \
+  "passes label list limit"
 
 reset_requests
 output=$(run_capture -R acme/widget milestone list)

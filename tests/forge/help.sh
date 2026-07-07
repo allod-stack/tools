@@ -52,10 +52,11 @@ assert_contains "$output" "<branch>" "pr find-by-head --help shows branch positi
 output=$(run_capture issue edit -h)
 assert_contains "$output" "--title" "issue edit -h shows --title flag"
 assert_contains "$output" "--body-file" "issue edit -h shows --body-file flag"
-assert_contains "$output" "--clear-milestone" "issue edit -h shows clear milestone flag"
+assert_contains "$output" "--remove-milestone" "issue edit -h shows remove milestone flag"
+assert_contains "$output" "--add-label" "issue edit -h shows add label flag"
 
 output=$(run_capture issue labels -h)
-assert_contains "$output" "--add" "issue labels -h shows add flag"
+assert_contains "$output" "--add-label" "issue labels -h shows add label flag"
 assert_contains "$output" "--clear" "issue labels -h shows clear flag"
 
 output=$(run_capture issue milestone -h)
@@ -63,15 +64,23 @@ assert_contains "$output" "--clear" "issue milestone -h shows clear flag"
 
 output=$(run_capture issue list --help)
 assert_contains "$output" "--repo" "issue list --help shows --repo flag"
+assert_contains "$output" "--limit" "issue list --help shows limit flag"
+assert_contains "$output" "--label" "issue list --help shows label filter flag"
 
 output=$(run_capture label list --help)
 assert_contains "$output" "repository labels" "label list --help describes labels"
+assert_contains "$output" "--search" "label list --help shows search flag"
+assert_contains "$output" "--sort" "label list --help shows sort flag"
 
 output=$(run_capture label create --help)
 assert_contains "$output" "--color" "label create --help shows color flag"
+assert_contains "$output" "--force" "label create --help shows force flag"
 
 output=$(run_capture label edit --help)
 assert_contains "$output" "--no-exclusive" "label edit --help shows no-exclusive flag"
+
+output=$(run_capture label delete --help)
+assert_contains "$output" "--yes" "label delete --help shows yes flag"
 
 output=$(run_capture milestone list --help)
 assert_contains "$output" "--state" "milestone list --help shows state flag"

@@ -82,13 +82,15 @@ printed to stdout or accepted as a command-line argument.
 ## Issue commands
 
 ```bash
-forge issue list
+forge issue list [--state open|closed|all] [--label <label>] \
+  [--milestone <milestone>] [--limit <number>] [--search <query>]
 forge issue view <number>
 forge issue create --title <title> [--body <text> | --body-file <file>] \
   [--label <label>] [--milestone <milestone>]
 forge issue edit <number> [--title <title>] [--body <text> | --body-file <file>] \
-  [--milestone <milestone> | --clear-milestone]
-forge issue labels <number> [--add <label>] [--remove <label>] \
+  [--milestone <milestone> | --remove-milestone] \
+  [--add-label <label>] [--remove-label <label>]
+forge issue labels <number> [--add-label <label>] [--remove-label <label>] \
   [--set <label>] [--clear]
 forge issue milestone <number> [<milestone> | --clear]
 forge issue close {<number> | <url>} [--comment <text>] \
@@ -108,24 +110,30 @@ metadata through its API, so `not planned` and duplicate reasons are recorded
 in the closing comment.
 
 `issue create` accepts repeated `--label` values by label name or ID and
-`--milestone` by title or ID. `issue labels` lists labels when called without
-changes; use `--add`, `--remove`, `--set`, or `--clear` for mutation.
-`issue milestone` shows the current milestone when called with only an issue
-number, and sets or clears it when given a milestone or `--clear`.
+`--milestone` by title or ID. `issue edit` follows `gh` label and milestone
+mutation names (`--add-label`, `--remove-label`, `--milestone`, and
+`--remove-milestone`). `issue labels` and `issue milestone` are Forge-specific
+helpers for focused label/milestone operations; they list current values when
+called without changes.
 
 ## Label commands
 
 ```bash
-forge label list
-forge label create --name <name> --color <hex> [--description <text>] \
-  [--exclusive] [--archived]
+forge label list [--limit <number>] [--search <query>] \
+  [--sort created|name] [--order asc|desc]
+forge label create <name> [--color <hex>] [--description <text>] \
+  [--force] [--exclusive] [--archived]
 forge label edit <id-or-name> [--name <name>] [--color <hex>] \
   [--description <text>] [--exclusive | --no-exclusive] \
   [--archived | --no-archived]
-forge label delete <id-or-name>
+forge label delete <name> [--yes]
 ```
 
-Colors are six-digit hex values with or without a leading `#`.
+`label create`, `label edit`, `label list`, and `label delete` follow the
+corresponding `gh label` command shapes where Forgejo supports the same data.
+Colors are six-digit hex values with or without a leading `#`; `label create`
+uses a random color when none is supplied, matching `gh`. The
+`--exclusive`/`--archived` label fields are Forgejo-specific extensions.
 
 ## Milestone commands
 

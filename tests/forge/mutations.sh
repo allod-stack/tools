@@ -93,10 +93,20 @@ assert_request 2 PATCH "/api/v1/repos/acme/widget/issues/20" \
 assert_json 2 '. == {milestone: 3}' "sends milestone ID on issue edit"
 
 reset_requests
-run_ok issue edit 20 --clear-milestone
+run_ok issue edit 20 --remove-milestone
 assert_request 1 PATCH "/api/v1/repos/acme/widget/issues/20" \
   "clears an issue milestone"
 assert_json 1 '. == {milestone: 0}' "sends zero milestone when clearing"
+
+reset_requests
+run_ok issue edit 20 --add-label triage --remove-label bug
+assert_request 1 POST "/api/v1/repos/acme/widget/issues/20/labels" \
+  "adds issue labels through gh-style issue edit"
+assert_json 1 '. == {labels: ["triage"]}' "sends added labels through issue edit"
+assert_request 2 DELETE "/api/v1/repos/acme/widget/issues/20/labels/bug" \
+  "removes issue labels through gh-style issue edit"
+assert_request 3 GET "/api/v1/repos/acme/widget/issues/20" \
+  "fetches issue URL after label-only edit"
 
 reset_requests
 run_ok issue comment 20 -b "issue comment body"
@@ -113,7 +123,7 @@ assert_json 1 '.body == "line one\n`code`\n\n"' \
   "preserves multiline issue comment content from file"
 
 reset_requests
-run_ok issue labels 20 --add triage
+run_ok issue labels 20 --add-label triage
 assert_request 1 POST "/api/v1/repos/acme/widget/issues/20/labels" \
   "adds an issue label"
 assert_json 1 '. == {labels: ["triage"]}' "sends label names for issue label add"
@@ -131,7 +141,7 @@ assert_request 1 PUT "/api/v1/repos/acme/widget/issues/20/labels" \
 assert_json 1 '. == {labels: ["triage"]}' "sends label names for issue label replace"
 
 reset_requests
-run_ok issue labels 20 --remove bug
+run_ok issue labels 20 --remove-label bug
 assert_request 1 DELETE "/api/v1/repos/acme/widget/issues/20/labels/bug" \
   "removes an issue label"
 assert_request 2 GET "/api/v1/repos/acme/widget/issues/20/labels" \
@@ -157,11 +167,20 @@ assert_request 1 PATCH "/api/v1/repos/acme/widget/issues/20" \
 assert_json 1 '. == {milestone: 0}' "sends zero milestone through helper command"
 
 reset_requests
-run_ok label create -n "area/nix" -c 123456 -d "Nix area"
+run_ok label create "area/nix" -c 123456 -d "Nix area"
 assert_request 1 POST "/api/v1/repos/acme/widget/labels" \
   "creates a label"
 assert_json 1 '. == {name: "area/nix", color: "#123456", description: "Nix area"}' \
   "sends label creation fields"
+
+reset_requests
+run_ok label create bug -c 0000ff -d "Updated" --force
+assert_request 1 GET "/api/v1/repos/acme/widget/labels?limit=100" \
+  "looks up an existing label for forced creation"
+assert_request 2 PATCH "/api/v1/repos/acme/widget/labels/1" \
+  "updates an existing label when forced"
+assert_json 2 '. == {name: "bug", color: "#0000ff", description: "Updated"}' \
+  "sends forced label update fields"
 
 reset_requests
 run_ok label edit bug -n defect -c 0000ff --exclusive
@@ -173,7 +192,7 @@ assert_json 2 '. == {name: "defect", color: "#0000ff", exclusive: true}' \
   "sends label edit fields"
 
 reset_requests
-run_ok label delete bug
+run_ok label delete bug --yes
 assert_request 1 GET "/api/v1/repos/acme/widget/labels?limit=100" \
   "resolves label name before delete"
 assert_request 2 DELETE "/api/v1/repos/acme/widget/labels/1" \

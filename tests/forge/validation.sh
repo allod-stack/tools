@@ -19,21 +19,21 @@ run_fail "requires --title" "requires a title when creating an issue" \
 run_fail "issue edit requires" \
   "requires a change when editing an issue" issue edit 20
 run_fail "cannot be combined" "rejects conflicting issue milestone edit flags" \
-  issue edit 20 --milestone "July batch" --clear-milestone
+  issue edit 20 --milestone "July batch" --remove-milestone
 run_fail "requires --body or --body-file" "requires a pull request comment body" \
   pr comment 12
 run_fail "requires --body or --body-file" "requires an issue comment body" \
   issue comment 20
 run_fail "--clear cannot be combined" "rejects clear plus issue label changes" \
-  issue labels 20 --clear --add bug
+  issue labels 20 --clear --add-label bug
 run_fail "--set cannot be combined" "rejects set plus additive label changes" \
-  issue labels 20 --set bug --remove triage
+  issue labels 20 --set bug --remove-label triage
 run_fail "cannot be combined" "rejects clear plus issue milestone value" \
   issue milestone 20 "July batch" --clear
-run_fail "label create requires --color" "requires color when creating a label" \
-  label create --name bug
+run_fail "label create requires a name" "requires a name when creating a label" \
+  label create --color 123456
 run_fail "color must be a 6-digit hex value" "rejects invalid label color" \
-  label create --name bug --color zzzzzz
+  label create bug --color zzzzzz
 run_fail "label edit requires a change" "requires a label edit change" \
   label edit bug
 run_fail "--state must be one of" "rejects invalid milestone list state" \

@@ -104,8 +104,11 @@ case "$url" in
   */api/v1/repos/acme/widget/pulls\?state=open\&limit=50)
     printf '%s\n' '[{"number":12,"title":"Improve tool","user":{"login":"alice"},"head":{"label":"acme:topic"},"base":{"label":"master"}}]'
     ;;
-  */api/v1/repos/acme/widget/issues\?type=issues\&state=open\&limit=50)
+  */api/v1/repos/acme/widget/issues\?type=issues\&state=open\&limit=30)
     printf '%s\n' '[{"number":20,"title":"Fix backup","user":{"login":"bob"},"labels":[{"id":1,"name":"bug","color":"ff0000"}],"milestone":{"id":3,"title":"July batch"}}]'
+    ;;
+  */api/v1/repos/acme/widget/issues\?type=issues\&state=closed\&limit=5)
+    printf '%s\n' '[{"number":19,"title":"Closed backup","user":{"login":"bob"},"labels":[{"id":1,"name":"bug","color":"ff0000"}],"milestone":{"id":3,"title":"July batch"}}]'
     ;;
   */api/v1/repos/acme/widget/pulls/12/reviews)
     printf '%s\n' '[{"id":7,"comments_count":1}]'
@@ -172,10 +175,13 @@ case "$url" in
     ;;
   */api/v1/repos/acme/widget/issues/20)
     if [[ "$method" == GET ]]; then
-      printf '%s\n' '{"title":"Fix backup","state":"open","body":"Issue body","user":{"login":"bob"},"labels":[{"id":1,"name":"bug","color":"ff0000"}],"milestone":{"id":3,"title":"July batch"}}'
+      printf '%s\n' '{"html_url":"https://forge.example/acme/widget/issues/20","title":"Fix backup","state":"open","body":"Issue body","user":{"login":"bob"},"labels":[{"id":1,"name":"bug","color":"ff0000"}],"milestone":{"id":3,"title":"July batch"}}'
     else
       printf '%s\n' '{"html_url":"https://forge.example/acme/widget/issues/20"}'
     fi
+    ;;
+  */api/v1/repos/acme/widget/labels\?limit=30)
+    printf '%s\n' '[{"id":1,"name":"bug","color":"ff0000","description":"Problem","exclusive":false,"is_archived":false},{"id":2,"name":"triage","color":"00ff00","description":"","exclusive":false,"is_archived":false}]'
     ;;
   */api/v1/repos/acme/widget/labels\?limit=100)
     printf '%s\n' '[{"id":1,"name":"bug","color":"ff0000","description":"Problem","exclusive":false,"is_archived":false},{"id":2,"name":"triage","color":"00ff00","description":"","exclusive":false,"is_archived":false}]'
@@ -224,7 +230,7 @@ case "$url" in
   */api/v1/repos/acme/gadget/pulls/5)
     printf '%s\n' '{"html_url":"https://forge.example/acme/gadget/pulls/5"}'
     ;;
-  */api/v1/repos/acme/gadget/issues\?type=issues\&state=open\&limit=50)
+  */api/v1/repos/acme/gadget/issues\?type=issues\&state=open\&limit=30)
     printf '%s\n' '[{"number":21,"title":"Gadget issue","user":{"login":"zoe"}}]'
     ;;
   */api/v1/repos/acme/gadget/issues)

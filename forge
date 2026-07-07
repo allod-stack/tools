@@ -22,7 +22,7 @@
 #   forge pr close {<number>|<url>|<branch>} [flags]  Close a pull request
 #
 # issue commands:
-#   forge issue list                            List open issues
+#   forge issue list [flags]                    List issues
 #   forge issue view <number>                   Show issue details and comments
 #   forge issue create --title <title> [flags]  Create an issue
 #   forge issue edit <number> [flags]           Edit an issue
@@ -32,10 +32,10 @@
 #   forge issue milestone <number> [flags]      Show or change issue milestone
 #
 # label commands:
-#   forge label list                            List repository labels
-#   forge label create --name <name> --color <hex> [flags]
+#   forge label list [flags]                    List repository labels
+#   forge label create <name> [flags]
 #   forge label edit <id-or-name> [flags]
-#   forge label delete <id-or-name>
+#   forge label delete <name> [flags]
 #
 # milestone commands:
 #   forge milestone list [--state <state>]      List repository milestones
@@ -264,11 +264,34 @@ json_mixed_label_array_from_args() {
   printf '%s' "$values_json"
 }
 
+append_csv_values() {
+  local -n dest="$1"
+  local option="$2"
+  local value="$3"
+  local item
+  local -a items
+  IFS=, read -r -a items <<< "$value"
+  for item in "${items[@]}"; do
+    [[ -n "$item" ]] || die "$option cannot contain an empty value"
+    dest+=("$item")
+  done
+}
+
+parse_positive_int() {
+  local option="$1" value="$2"
+  is_integer "$value" && [[ "$value" -gt 0 ]] || die "$option must be a positive integer"
+  printf '%s' "$value"
+}
+
 normalize_color() {
   local color="$1"
   color="${color#\#}"
   [[ "$color" =~ ^[0-9A-Fa-f]{6}$ ]] || die "color must be a 6-digit hex value"
   printf '#%s' "${color,,}"
+}
+
+random_label_color() {
+  printf '#%s' "$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
 }
 
 normalize_due_on() {
@@ -280,6 +303,15 @@ normalize_due_on() {
   fi
 }
 
+find_label_id_by_name() {
+  local identifier="$1"
+  local labels count
+  labels=$(api GET "/repos/$REPO/labels?limit=100")
+  count=$(echo "$labels" | jq --arg name "$identifier" '[.[] | select(.name == $name)] | length')
+  [[ "$count" -le 1 ]] || die "label name is ambiguous: $identifier"
+  echo "$labels" | jq -r --arg name "$identifier" 'first(.[] | select(.name == $name)) | .id // empty'
+}
+
 resolve_label_id() {
   local identifier="$1"
   if is_integer "$identifier"; then
@@ -287,12 +319,9 @@ resolve_label_id() {
     return
   fi
 
-  local labels count id
-  labels=$(api GET "/repos/$REPO/labels?limit=100")
-  count=$(echo "$labels" | jq --arg name "$identifier" '[.[] | select(.name == $name)] | length')
-  [[ "$count" -gt 0 ]] || die "label not found: $identifier"
-  [[ "$count" -eq 1 ]] || die "label name is ambiguous: $identifier"
-  id=$(echo "$labels" | jq -r --arg name "$identifier" 'first(.[] | select(.name == $name)) | .id')
+  local id
+  id=$(find_label_id_by_name "$identifier")
+  [[ -n "$id" ]] || die "label not found: $identifier"
   printf '%s' "$id"
 }
 
@@ -804,17 +833,73 @@ pr_close() {
 
 issue_list() {
   contains_help_flag "$@" && { command_usage "issue list"; return; }
-  parse_repo_only_args "issue list" "$@"
+  local state="open" limit=30 search="" milestone=""
+  local labels=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -R|--repo)
+        set_repo_option "$@"
+        shift 2
+        ;;
+      -s|--state)
+        require_option_value "$1" "$#"
+        case "$2" in
+          open|closed|all) state="$2" ;;
+          *) die "--state must be one of: open, closed, all" ;;
+        esac
+        shift 2
+        ;;
+      -L|--limit)
+        require_option_value "$1" "$#"
+        limit=$(parse_positive_int "$1" "$2")
+        shift 2
+        ;;
+      -l|--label)
+        require_option_value "$1" "$#"
+        [[ -n "$2" ]] || die "--label cannot be empty"
+        append_csv_values labels "$1" "$2"
+        shift 2
+        ;;
+      -m|--milestone)
+        require_option_value "$1" "$#"
+        [[ "$milestone" == "" ]] || die "$1 specified more than once"
+        milestone="$2"
+        [[ -n "$milestone" ]] || die "--milestone cannot be empty"
+        shift 2
+        ;;
+      -S|--search)
+        require_option_value "$1" "$#"
+        search="$2"
+        shift 2
+        ;;
+      -*) die "unknown option for issue list: $1" ;;
+      *) die "unexpected argument for issue list: $1" ;;
+    esac
+  done
   require_repo
-  local result
-  result=$(api GET "/repos/$REPO/issues?type=issues&state=open&limit=50")
+  local result filtered
+  result=$(api GET "/repos/$REPO/issues?type=issues&state=$state&limit=$limit")
+  filtered=$(echo "$result" | jq \
+    --argjson labels "$(jq -n '$ARGS.positional' --args "${labels[@]}")" \
+    --arg milestone "$milestone" \
+    --arg search "$search" \
+    --argjson limit "$limit" \
+    '[.[] |
+      select(($search == "") or ((.title // "") | ascii_downcase | contains($search | ascii_downcase)) or ((.body // "") | ascii_downcase | contains($search | ascii_downcase))) |
+      select(($milestone == "") or ((.milestone.title // "") == $milestone) or ((.milestone.id | tostring) == $milestone)) |
+      select(($labels | length) == 0 or (($labels - ((.labels // []) | map(.name))) | length == 0))
+    ][0:$limit]')
   local count
-  count=$(echo "$result" | jq 'length')
+  count=$(echo "$filtered" | jq 'length')
   if [ "$count" -eq 0 ]; then
-    echo "No open issues in $REPO"
+    if [[ "$state" == open ]]; then
+      echo "No open issues in $REPO"
+    else
+      echo "No $state issues in $REPO"
+    fi
     return
   fi
-  echo "$result" | jq -r '.[] |
+  echo "$filtered" | jq -r '.[] |
     "\(.number)\t\(.title)\t\(.user.login)\t\((.labels // []) | if length == 0 then "-" else map(.name) | join(",") end)\t\(.milestone.title // "-")"' \
     | column -t -s $'\t'
 }
@@ -887,7 +972,7 @@ issue_create() {
       -l|--label)
         require_option_value "$1" "$#"
         [[ -n "$2" ]] || die "--label cannot be empty"
-        labels+=("$2")
+        append_csv_values labels "$1" "$2"
         shift 2
         ;;
       -m|--milestone)
@@ -936,8 +1021,8 @@ issue_edit() {
   local context="issue edit"
   contains_help_flag "$@" && { command_usage "$context"; return; }
   local number="" number_set=false
-  local title="" title_set=false
-  local milestone="" milestone_set=false clear_milestone=false
+  local title="" title_set=false milestone="" milestone_set=false remove_milestone=false
+  local add_labels=() remove_labels=()
   reset_body_option
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -965,9 +1050,21 @@ issue_edit() {
         milestone_set=true
         shift 2
         ;;
-      --clear-milestone)
-        clear_milestone=true
+      --remove-milestone|--clear-milestone)
+        remove_milestone=true
         shift
+        ;;
+      --add-label)
+        require_option_value "$1" "$#"
+        [[ -n "$2" ]] || die "--add-label cannot be empty"
+        append_csv_values add_labels "$1" "$2"
+        shift 2
+        ;;
+      --remove-label)
+        require_option_value "$1" "$#"
+        [[ -n "$2" ]] || die "--remove-label cannot be empty"
+        append_csv_values remove_labels "$1" "$2"
+        shift 2
         ;;
       -*) die "unknown option for issue edit: $1" ;;
       *)
@@ -980,14 +1077,14 @@ issue_edit() {
   done
 
   [[ "$number_set" == true && -n "$number" ]] || {
-    die "usage: forge issue edit <number> [--title <title>] [--body <text> | --body-file <file>] [--milestone <milestone> | --clear-milestone]"
+    die "usage: forge issue edit <number> [--title <title>] [--body <text> | --body-file <file>] [--milestone <milestone> | --remove-milestone] [--add-label <label>] [--remove-label <label>]"
   }
-  [[ "$title_set" == true || "$BODY_SET" == true || "$milestone_set" == true || "$clear_milestone" == true ]] || {
-    die "issue edit requires --title, --body, --body-file, --milestone, or --clear-milestone"
+  [[ "$title_set" == true || "$BODY_SET" == true || "$milestone_set" == true || "$remove_milestone" == true || "${#add_labels[@]}" -gt 0 || "${#remove_labels[@]}" -gt 0 ]] || {
+    die "issue edit requires --title, --body, --body-file, --milestone, --remove-milestone, --add-label, or --remove-label"
   }
   [[ "$title_set" == false || -n "$title" ]] || die "--title cannot be empty"
-  [[ "$milestone_set" == false || "$clear_milestone" == false ]] || {
-    die "--milestone cannot be combined with --clear-milestone"
+  [[ "$milestone_set" == false || "$remove_milestone" == false ]] || {
+    die "--milestone cannot be combined with --remove-milestone"
   }
   require_repo
 
@@ -1003,14 +1100,27 @@ issue_edit() {
     --argjson title_set "$title_set" \
     --argjson body_set "$BODY_SET" \
     --argjson milestone_set "$milestone_set" \
-    --argjson clear_milestone "$clear_milestone" \
+    --argjson remove_milestone "$remove_milestone" \
     --argjson milestone "$milestone_id" \
     '{} | if $title_set then . + {title: $title} else . end
         | if $body_set then . + {body: $body} else . end
         | if $milestone_set then . + {milestone: $milestone} else . end
-        | if $clear_milestone then . + {milestone: 0} else . end')
-  local url
-  url=$(api PATCH "/repos/$REPO/issues/$number" -d "$payload" | jq -r '.html_url')
+        | if $remove_milestone then . + {milestone: 0} else . end')
+  local url=""
+  if [[ "$title_set" == true || "$BODY_SET" == true || "$milestone_set" == true || "$remove_milestone" == true ]]; then
+    url=$(api PATCH "/repos/$REPO/issues/$number" -d "$payload" | jq -r '.html_url')
+  fi
+  if [[ "${#add_labels[@]}" -gt 0 ]]; then
+    api POST "/repos/$REPO/issues/$number/labels" \
+      -d "$(jq -n --argjson labels "$(json_mixed_label_array_from_args "${add_labels[@]}")" '{labels: $labels}')" >/dev/null
+  fi
+  local label
+  for label in "${remove_labels[@]}"; do
+    api DELETE "/repos/$REPO/issues/$number/labels/$(urlencode "$label")" >/dev/null
+  done
+  if [[ -z "$url" ]]; then
+    url=$(api GET "/repos/$REPO/issues/$number" | jq -r '.html_url')
+  fi
   echo "Issue updated: $url"
 }
 
@@ -1026,22 +1136,22 @@ issue_labels() {
         set_repo_option "$@"
         shift 2
         ;;
-      --add)
+      --add|--add-label)
         require_option_value "$1" "$#"
         [[ -n "$2" ]] || die "--add cannot be empty"
-        add_labels+=("$2")
+        append_csv_values add_labels "$1" "$2"
         shift 2
         ;;
-      --remove)
+      --remove|--remove-label)
         require_option_value "$1" "$#"
         [[ -n "$2" ]] || die "--remove cannot be empty"
-        remove_labels+=("$2")
+        append_csv_values remove_labels "$1" "$2"
         shift 2
         ;;
       --set)
         require_option_value "$1" "$#"
         [[ -n "$2" ]] || die "--set cannot be empty"
-        set_labels+=("$2")
+        append_csv_values set_labels "$1" "$2"
         shift 2
         ;;
       --clear)
@@ -1059,7 +1169,7 @@ issue_labels() {
   done
 
   [[ "$number_set" == true && -n "$number" ]] || {
-    die "usage: forge issue labels <number> [--add <label>] [--remove <label>] [--set <label>] [--clear]"
+    die "usage: forge issue labels <number> [--add-label <label>] [--remove-label <label>] [--set <label>] [--clear]"
   }
   if [[ "$clear" == true && ( "${#add_labels[@]}" -gt 0 || "${#remove_labels[@]}" -gt 0 || "${#set_labels[@]}" -gt 0 ) ]]; then
     die "--clear cannot be combined with label changes"
@@ -1296,16 +1406,61 @@ issue_close() {
 
 label_list() {
   contains_help_flag "$@" && { command_usage "label list"; return; }
-  parse_repo_only_args "label list" "$@"
+  local limit=30 search="" sort="created" order="asc"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -R|--repo)
+        set_repo_option "$@"
+        shift 2
+        ;;
+      -L|--limit)
+        require_option_value "$1" "$#"
+        limit=$(parse_positive_int "$1" "$2")
+        shift 2
+        ;;
+      -S|--search)
+        require_option_value "$1" "$#"
+        search="$2"
+        shift 2
+        ;;
+      --sort)
+        require_option_value "$1" "$#"
+        case "$2" in
+          created|name) sort="$2" ;;
+          *) die "--sort must be one of: created, name" ;;
+        esac
+        shift 2
+        ;;
+      --order)
+        require_option_value "$1" "$#"
+        case "$2" in
+          asc|desc) order="$2" ;;
+          *) die "--order must be one of: asc, desc" ;;
+        esac
+        shift 2
+        ;;
+      -*) die "unknown option for label list: $1" ;;
+      *) die "unexpected argument for label list: $1" ;;
+    esac
+  done
   require_repo
-  local result count
-  result=$(api GET "/repos/$REPO/labels?limit=100")
-  count=$(echo "$result" | jq 'length')
+  local result labels count
+  result=$(api GET "/repos/$REPO/labels?limit=$limit")
+  labels=$(echo "$result" | jq \
+    --arg search "$search" \
+    --arg sort "$sort" \
+    --arg order "$order" \
+    '[.[] |
+      select(($search == "") or ((.name // "") | ascii_downcase | contains($search | ascii_downcase)) or ((.description // "") | ascii_downcase | contains($search | ascii_downcase)))
+    ] |
+    sort_by(if $sort == "name" then (.name // "") else (.id // 0) end) |
+    if $order == "desc" then reverse else . end')
+  count=$(echo "$labels" | jq 'length')
   if [[ "$count" -eq 0 ]]; then
     echo "No labels in $REPO"
     return
   fi
-  echo "$result" | jq -r '.[] |
+  echo "$labels" | jq -r '.[] |
     "\(.id)\t\(.name)\t\(.color)\t\(.exclusive // false)\t\(.is_archived // false)\t\(.description // "")"' \
     | column -t -s $'\t'
 }
@@ -1313,7 +1468,7 @@ label_list() {
 label_create() {
   contains_help_flag "$@" && { command_usage "label create"; return; }
   local name="" color="" description=""
-  local name_set=false color_set=false description_set=false exclusive=false archived=false
+  local name_set=false color_set=false description_set=false exclusive=false archived=false force=false
   while [[ $# -gt 0 ]]; do
     case "$1" in
       -R|--repo)
@@ -1334,6 +1489,10 @@ label_create() {
         color_set=true
         shift 2
         ;;
+      -f|--force)
+        force=true
+        shift
+        ;;
       -d|--description)
         require_option_value "$1" "$#"
         [[ "$description_set" == false ]] || die "$1 specified more than once"
@@ -1350,28 +1509,43 @@ label_create() {
         shift
         ;;
       -*) die "unknown option for label create: $1" ;;
-      *) die "unexpected argument for label create: $1" ;;
+      *)
+        [[ "$name_set" == false ]] || die "unexpected argument for label create: $1"
+        name="$1"
+        name_set=true
+        shift
+        ;;
     esac
   done
 
-  [[ "$name_set" == true ]] || die "label create requires --name"
-  [[ "$color_set" == true ]] || die "label create requires --color"
-  [[ -n "$name" ]] || die "--name cannot be empty"
+  [[ "$name_set" == true ]] || die "label create requires a name"
+  [[ -n "$name" ]] || die "label name cannot be empty"
+  if [[ "$color_set" == false ]]; then
+    color=$(random_label_color)
+  fi
   require_repo
 
-  local label
-  label=$(api POST "/repos/$REPO/labels" \
-    -d "$(jq -n \
-      --arg name "$name" \
-      --arg color "$color" \
-      --arg description "$description" \
-      --argjson description_set "$description_set" \
-      --argjson exclusive "$exclusive" \
-      --argjson archived "$archived" \
-      '{name: $name, color: $color}
-        | if $description_set then . + {description: $description} else . end
-        | if $exclusive then . + {exclusive: true} else . end
-        | if $archived then . + {is_archived: true} else . end')")
+  local payload label existing_id
+  payload=$(jq -n \
+    --arg name "$name" \
+    --arg color "$color" \
+    --arg description "$description" \
+    --argjson description_set "$description_set" \
+    --argjson exclusive "$exclusive" \
+    --argjson archived "$archived" \
+    '{name: $name, color: $color}
+      | if $description_set then . + {description: $description} else . end
+      | if $exclusive then . + {exclusive: true} else . end
+      | if $archived then . + {is_archived: true} else . end')
+  if [[ "$force" == true ]]; then
+    existing_id=$(find_label_id_by_name "$name")
+    if [[ -n "$existing_id" ]]; then
+      label=$(api PATCH "/repos/$REPO/labels/$existing_id" -d "$payload")
+      echo "$label" | jq -r '"Label updated: \(.id) \(.name)"'
+      return
+    fi
+  fi
+  label=$(api POST "/repos/$REPO/labels" -d "$payload")
   echo "$label" | jq -r '"Label created: \(.id) \(.name)"'
 }
 
@@ -1475,10 +1649,27 @@ label_edit() {
 
 label_delete() {
   contains_help_flag "$@" && { command_usage "label delete"; return; }
-  parse_repo_positionals "label delete" "$@"
-  [[ "${#POSITIONAL_ARGS[@]}" -eq 1 ]] || die "usage: forge label delete <id-or-name>"
+  local target="" target_set=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -R|--repo)
+        set_repo_option "$@"
+        shift 2
+        ;;
+      --yes)
+        shift
+        ;;
+      -*) die "unknown option for label delete: $1" ;;
+      *)
+        [[ "$target_set" == false ]] || die "unexpected argument for label delete: $1"
+        target="$1"
+        target_set=true
+        shift
+        ;;
+    esac
+  done
+  [[ "$target_set" == true && -n "$target" ]] || die "usage: forge label delete <name> [--yes]"
   require_repo
-  local target="${POSITIONAL_ARGS[0]}"
   local id
   id=$(resolve_label_id "$target")
   api DELETE "/repos/$REPO/labels/$id" >/dev/null
@@ -1883,11 +2074,16 @@ Flags:
 USAGE
       ;;
     "issue list") cat <<'USAGE'
-Usage: forge issue list [-R <owner/repo>]
+Usage: forge issue list [-s open|closed|all] [-l <label>] [-m <milestone>] [-L <limit>] [-S <query>] [-R <owner/repo>]
 
-List open issues.
+List issues.
 
 Flags:
+  -s, --state <state>       Filter by state: open, closed, or all (default: open)
+  -l, --label <label>       Filter by label name (repeatable, comma-separated)
+  -m, --milestone <value>   Filter by milestone title or ID
+  -L, --limit <number>      Maximum number of issues to fetch (default: 30)
+  -S, --search <query>      Search issue titles and bodies locally
   -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
 USAGE
       ;;
@@ -1926,27 +2122,29 @@ Flags:
 USAGE
       ;;
     "issue edit") cat <<'USAGE'
-Usage: forge issue edit <number> [-t <title>] [-b <text> | -F <file>] [-m <milestone> | --clear-milestone] [-R <owner/repo>]
+Usage: forge issue edit <number> [-t <title>] [-b <text> | -F <file>] [-m <milestone> | --remove-milestone] [--add-label <label>] [--remove-label <label>] [-R <owner/repo>]
 
-Update issue title, description, and/or milestone.
+Update issue title, description, labels, and/or milestone.
 
 Flags:
   -t, --title <text>        New title
   -b, --body <text>         New body text
   -F, --body-file <file>    Read body from file (use "-" for stdin)
   -m, --milestone <value>   Set milestone by title or ID
-      --clear-milestone     Remove the issue milestone
+      --remove-milestone    Remove the issue milestone
+      --add-label <label>   Add labels by name or ID (repeatable, comma-separated)
+      --remove-label <label>  Remove labels by name or ID (repeatable, comma-separated)
   -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
 USAGE
       ;;
     "issue labels") cat <<'USAGE'
-Usage: forge issue labels <number> [--add <label>] [--remove <label>] [--set <label>] [--clear] [-R <owner/repo>]
+Usage: forge issue labels <number> [--add-label <label>] [--remove-label <label>] [--set <label>] [--clear] [-R <owner/repo>]
 
 List or change an issue's labels. Label values may be names or IDs.
 
 Flags:
-      --add <label>         Add a label (repeatable)
-      --remove <label>      Remove a label (repeatable)
+      --add-label <label>   Add a label (repeatable, comma-separated)
+      --remove-label <label>  Remove a label (repeatable, comma-separated)
       --set <label>         Replace labels with this set (repeatable)
       --clear               Remove all labels
   -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
@@ -1975,23 +2173,27 @@ Flags:
 USAGE
       ;;
     "label list") cat <<'USAGE'
-Usage: forge label list [-R <owner/repo>]
+Usage: forge label list [-L <limit>] [-S <query>] [--sort created|name] [--order asc|desc] [-R <owner/repo>]
 
 List repository labels.
 
 Flags:
+  -L, --limit <number>      Maximum number of labels to fetch (default: 30)
+  -S, --search <query>      Search label names and descriptions
+      --sort <field>        Sort fetched labels: created or name (default: created)
+      --order <order>       Order labels: asc or desc (default: asc)
   -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
 USAGE
       ;;
     "label create") cat <<'USAGE'
-Usage: forge label create -n <name> -c <hex> [-d <text>] [--exclusive] [--archived] [-R <owner/repo>]
+Usage: forge label create <name> [-c <hex>] [-d <text>] [-f] [--exclusive] [--archived] [-R <owner/repo>]
 
 Create a repository label.
 
 Flags:
-  -n, --name <name>         Label name (required)
-  -c, --color <hex>         Six-digit hex color, with or without #
+  -c, --color <hex>         Six-digit hex color, with or without # (default: random)
   -d, --description <text>  Label description
+  -f, --force               Update color and description if the label exists
       --exclusive           Mark as exclusive
       --archived            Mark as archived
   -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
@@ -2014,11 +2216,12 @@ Flags:
 USAGE
       ;;
     "label delete") cat <<'USAGE'
-Usage: forge label delete <id-or-name> [-R <owner/repo>]
+Usage: forge label delete <name> [--yes] [-R <owner/repo>]
 
 Delete a repository label.
 
 Flags:
+      --yes                 Confirm deletion without prompting
   -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
 USAGE
       ;;
@@ -2146,15 +2349,15 @@ Token commands:
       Verify a candidate token read from stdin
 
 Issue commands:
-  forge issue list
-      List open issues
+  forge issue list [-s open|closed|all] [-l <label>] [-m <milestone>] [-L <limit>] [-S <query>]
+      List issues
   forge issue view <number>
       Show issue details and comments
   forge issue create -t <title> [-b <text> | -F <file>] [-l <label>] [-m <milestone>]
       Create an issue
-  forge issue edit <number> [-t <title>] [-b <text> | -F <file>] [-m <milestone> | --clear-milestone]
-      Update issue title, description, and/or milestone
-  forge issue labels <number> [--add <label>] [--remove <label>] [--set <label>] [--clear]
+  forge issue edit <number> [-t <title>] [-b <text> | -F <file>] [-m <milestone> | --remove-milestone] [--add-label <label>] [--remove-label <label>]
+      Update issue title, description, labels, and/or milestone
+  forge issue labels <number> [--add-label <label>] [--remove-label <label>] [--set <label>] [--clear]
       List or change issue labels
   forge issue milestone <number> [<milestone> | --clear]
       Show, set, or clear issue milestone
@@ -2164,13 +2367,13 @@ Issue commands:
       Close an issue; reasons: completed, not planned, duplicate
 
 Label commands:
-  forge label list
+  forge label list [-L <limit>] [-S <query>] [--sort created|name] [--order asc|desc]
       List repository labels
-  forge label create -n <name> -c <hex> [-d <text>] [--exclusive] [--archived]
+  forge label create <name> [-c <hex>] [-d <text>] [-f] [--exclusive] [--archived]
       Create a repository label
   forge label edit <id-or-name> [-n <name>] [-c <hex>] [-d <text>] [--exclusive | --no-exclusive] [--archived | --no-archived]
       Update a repository label
-  forge label delete <id-or-name>
+  forge label delete <name> [--yes]
       Delete a repository label
 
 Milestone commands:
