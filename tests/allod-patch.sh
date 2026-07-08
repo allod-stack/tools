@@ -705,6 +705,65 @@ assert_contains "$CAPTURE_OUTPUT" "git push" "apply without --push shows push re
 applied_content=$(cat "$dest_repo/tracked.txt")
 assert_equal "$applied_content" "applied content" "apply produces correct file content"
 
+# --- Equivalent Git remote URL forms ---
+source_repo="$TMP/repos/apply-normalized-https-source"
+init_repo "$source_repo" master
+add_commit "$source_repo" "normalized https to scp test"
+
+dest_repo_norm="$TMP/repos/apply-normalized-https-dest"
+clone_repo "$source_repo" "$dest_repo_norm"
+
+git -C "$source_repo" remote set-url origin \
+  "https://github.com/TriangleBitDevs/TriangleBitDevs.github.io.git"
+git -C "$dest_repo_norm" remote set-url origin \
+  "git@github.com:TriangleBitDevs/TriangleBitDevs.github.io.git"
+
+artifact="$TMP/artifacts/apply-normalized-https"
+make_artifact "$source_repo" "$artifact"
+
+capture bash "$ALLOD" patch apply "$artifact" --repo "$dest_repo_norm"
+assert_status 0 "apply accepts equivalent https and scp remotes"
+rm -rf "$artifact"
+
+source_repo="$TMP/repos/apply-normalized-ssh-source"
+init_repo "$source_repo" master
+add_commit "$source_repo" "normalized ssh to https test"
+
+dest_repo_norm="$TMP/repos/apply-normalized-ssh-dest"
+clone_repo "$source_repo" "$dest_repo_norm"
+
+git -C "$source_repo" remote set-url origin \
+  "ssh://git@GitHub.com/TriangleBitDevs/TriangleBitDevs.github.io.git"
+git -C "$dest_repo_norm" remote set-url origin \
+  "https://github.com/TriangleBitDevs/TriangleBitDevs.github.io"
+
+artifact="$TMP/artifacts/apply-normalized-ssh"
+make_artifact "$source_repo" "$artifact"
+
+capture bash "$ALLOD" patch apply "$artifact" --repo "$dest_repo_norm"
+assert_status 0 "apply accepts equivalent ssh URL and https remotes"
+rm -rf "$artifact"
+
+source_repo="$TMP/repos/apply-normalized-mismatch-source"
+init_repo "$source_repo" master
+add_commit "$source_repo" "normalized mismatch test"
+
+dest_repo_norm_mm="$TMP/repos/apply-normalized-mismatch-dest"
+clone_repo "$source_repo" "$dest_repo_norm_mm"
+
+git -C "$source_repo" remote set-url origin \
+  "https://github.com/TriangleBitDevs/TriangleBitDevs.github.io.git"
+git -C "$dest_repo_norm_mm" remote set-url origin \
+  "git@github.com:TriangleBitDevs/different-repo.git"
+
+artifact="$TMP/artifacts/apply-normalized-mismatch"
+make_artifact "$source_repo" "$artifact"
+
+capture bash "$ALLOD" patch apply "$artifact" --repo "$dest_repo_norm_mm"
+assert_status 13 "apply rejects different normalized remotes"
+assert_contains "$CAPTURE_OUTPUT" "mismatch" "apply normalized mismatch message"
+rm -rf "$artifact"
+
 # --- Artifact path resolution (run from different cwd) ---
 source_repo="$TMP/repos/apply-cwd-source"
 init_repo "$source_repo" master

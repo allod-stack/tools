@@ -545,6 +545,50 @@ patch_validate_tmpdir_path() {
   [[ -n "$path" && "$path" =~ ^/tmp/allod-patch\.[a-zA-Z0-9]{10}$ ]]
 }
 
+git_remote_identity() {
+  local remote="$1"
+  local host port path host_lc
+  local scheme_re='^(https?|ssh|git)://([^/@]+@)?([^/:?#]+)(:[0-9]+)?/(.+)$'
+  local scp_re='^[^/@:]+@([^/:]+):(.+)$'
+
+  [[ -n "$remote" && "$remote" != *$'\n'* ]] || return 1
+
+  if [[ "$remote" =~ $scheme_re ]]; then
+    host="${BASH_REMATCH[3]}"
+    port="${BASH_REMATCH[4]}"
+    path="${BASH_REMATCH[5]}"
+  elif [[ "$remote" =~ $scp_re ]]; then
+    host="${BASH_REMATCH[1]}"
+    port=""
+    path="${BASH_REMATCH[2]}"
+    [[ "$path" != /* ]] || return 1
+  else
+    return 1
+  fi
+
+  [[ -n "$host" && -n "$path" ]] || return 1
+  [[ "$path" != *['?#']* ]] || return 1
+  path="${path%/}"
+  path="${path%.git}"
+  [[ -n "$path" && "$path" == */* ]] || return 1
+
+  host_lc=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')
+  printf '%s/%s\n' "$host_lc$port" "$path"
+}
+
+git_remotes_match() {
+  local left="$1" right="$2"
+  local left_identity right_identity
+
+  [[ "$left" == "$right" ]] && return 0
+
+  if left_identity=$(git_remote_identity "$left") && right_identity=$(git_remote_identity "$right"); then
+    [[ "$left_identity" == "$right_identity" ]]
+  else
+    return 1
+  fi
+}
+
 patch_fetch() {
   local target="" base="origin/master" output="" output_set=false
 
@@ -882,7 +926,7 @@ patch_apply() {
 
   local dest_remote
   dest_remote=$(git -C "$repo" remote get-url origin 2>/dev/null || printf '')
-  if [[ "$dest_remote" != "$repo_remote" ]]; then
+  if ! git_remotes_match "$dest_remote" "$repo_remote"; then
     printf 'allod: repo identity mismatch\n' >&2
     printf 'allod: manifest remote: %s\n' "$repo_remote" >&2
     printf 'allod: destination remote: %s\n' "$dest_remote" >&2

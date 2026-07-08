@@ -28,7 +28,7 @@ allod patch apply <artifact-dir> [--repo <destination-repo>] [--push]
 - `--repo <path>` - Destination repo (default: current directory)
 - `--push` - Push after successful apply
 
-Validates the manifest and checksums, verifies the destination repo matches the source's origin URL, and applies patches with `git am --3way`.
+Validates the manifest and checksums, verifies the destination repo matches the source's origin URL, and applies patches with `git am --3way`. Common equivalent remote URL forms such as `https://github.com/org/repo.git`, `git@github.com:org/repo.git`, and `ssh://git@github.com/org/repo.git` are normalized before comparison.
 
 ### receive
 
@@ -67,7 +67,7 @@ Runs `fetch` then `apply`. The artifact directory is preserved after both succes
 10  source worktree dirty
 11  source range not exportable (not ancestor, not ahead, merge commits, empty)
 12  manifest/checksum integrity failure
-13  repo identity mismatch (origin URL)
+13  repo identity mismatch (origin URL after normalization for recognized URL forms)
 14  base commit missing or not ancestor of destination HEAD
 15  git am failed (patches aborted)
 16  destination worktree dirty
