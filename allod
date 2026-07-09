@@ -547,7 +547,7 @@ patch_validate_tmpdir_path() {
 
 git_remote_identity() {
   local remote="$1"
-  local host port path host_lc
+  local host path host_lc
   local scheme_re='^(https?|ssh|git)://([^/@]+@)?([^/:?#]+)(:[0-9]+)?/(.+)$'
   local scp_re='^[^/@:]+@([^/:]+):(.+)$'
 
@@ -555,11 +555,9 @@ git_remote_identity() {
 
   if [[ "$remote" =~ $scheme_re ]]; then
     host="${BASH_REMATCH[3]}"
-    port="${BASH_REMATCH[4]}"
     path="${BASH_REMATCH[5]}"
   elif [[ "$remote" =~ $scp_re ]]; then
     host="${BASH_REMATCH[1]}"
-    port=""
     path="${BASH_REMATCH[2]}"
     [[ "$path" != /* ]] || return 1
   else
@@ -573,7 +571,7 @@ git_remote_identity() {
   [[ -n "$path" && "$path" == */* ]] || return 1
 
   host_lc=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')
-  printf '%s/%s\n' "$host_lc$port" "$path"
+  printf '%s/%s\n' "$host_lc" "$path"
 }
 
 git_remotes_match() {

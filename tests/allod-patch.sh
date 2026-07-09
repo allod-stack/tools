@@ -744,6 +744,25 @@ capture bash "$ALLOD" patch apply "$artifact" --repo "$dest_repo_norm"
 assert_status 0 "apply accepts equivalent ssh URL and https remotes"
 rm -rf "$artifact"
 
+source_repo="$TMP/repos/apply-normalized-port-source"
+init_repo "$source_repo" master
+add_commit "$source_repo" "normalized ssh port to https test"
+
+dest_repo_norm="$TMP/repos/apply-normalized-port-dest"
+clone_repo "$source_repo" "$dest_repo_norm"
+
+git -C "$source_repo" remote set-url origin \
+  "https://forge.anarch.diy/allod/inventory.git"
+git -C "$dest_repo_norm" remote set-url origin \
+  "ssh://git@forge.anarch.diy:2222/allod/inventory.git"
+
+artifact="$TMP/artifacts/apply-normalized-port"
+make_artifact "$source_repo" "$artifact"
+
+capture bash "$ALLOD" patch apply "$artifact" --repo "$dest_repo_norm"
+assert_status 0 "apply accepts equivalent https and ssh port remotes"
+rm -rf "$artifact"
+
 source_repo="$TMP/repos/apply-normalized-mismatch-source"
 init_repo "$source_repo" master
 add_commit "$source_repo" "normalized mismatch test"
@@ -1232,6 +1251,23 @@ recv_artifact=$(printf '%s' "$CAPTURE_OUTPUT" | grep 'artifact dir:' | tail -1 |
 
 recv_content=$(cat "$dest_repo_recv/tracked.txt")
 assert_equal "$recv_content" "received content" "receive applies patches to destination"
+
+# --- Equivalent Git remote URL forms ---
+source_repo="$TMP/repos/receive-normalized-port-source"
+init_repo "$source_repo" master
+add_commit "$source_repo" "receive normalized ssh port to https test"
+
+dest_repo_norm="$TMP/repos/receive-normalized-port-dest"
+clone_repo "$source_repo" "$dest_repo_norm"
+
+git -C "$source_repo" remote set-url origin \
+  "https://forge.anarch.diy/allod/inventory.git"
+git -C "$dest_repo_norm" remote set-url origin \
+  "ssh://git@forge.anarch.diy:2222/allod/inventory.git"
+
+reset_mock_ssh
+capture_with_path "$MOCK_PATH" bash "$ALLOD" patch receive "testhost:$source_repo" "$dest_repo_norm"
+assert_status 0 "receive accepts equivalent https and ssh port remotes"
 
 # --- Destination repo preflight failure ---
 source_repo="$TMP/repos/receive-missing-dest-source"

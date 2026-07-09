@@ -67,7 +67,7 @@ Runs `fetch` then `apply`. The artifact directory is preserved after both succes
 10  source worktree dirty
 11  source range not exportable (not ancestor, not ahead, merge commits, empty)
 12  manifest/checksum integrity failure
-13  repo identity mismatch (origin URL after normalization for recognized URL forms)
+13  repo identity mismatch (origin URL after normalization for recognized URL forms; scheme, user, port, trailing slash, and `.git` suffix are ignored)
 14  base commit missing or not ancestor of destination HEAD
 15  git am failed (patches aborted)
 16  destination worktree dirty
