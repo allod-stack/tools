@@ -673,7 +673,7 @@ if [ -n "$dirty" ]; then
   printf '%s\n' "$dirty" >&2
   exit 10
 fi
-if ! git -C "$repo" rev-parse --verify HEAD^{commit} >/dev/null 2>&1; then
+if ! git -C "$repo" rev-parse --verify 'HEAD^{commit}' >/dev/null 2>&1; then
   printf 'allod: source HEAD does not resolve to a commit\n' >&2; exit 11
 fi
 
@@ -990,7 +990,7 @@ patch_apply() {
   fi
 
   local dest_has_head=false
-  if git -C "$repo" rev-parse --verify HEAD^{commit} >/dev/null 2>&1; then
+  if git -C "$repo" rev-parse --verify 'HEAD^{commit}' >/dev/null 2>&1; then
     dest_has_head=true
   fi
 
