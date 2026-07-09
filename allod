@@ -588,13 +588,15 @@ git_remotes_match() {
 }
 
 patch_fetch() {
-  local target="" base="origin/master" output="" output_set=false
+  local target="" base="" base_set=false output="" output_set=false
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --base)
         require_option_value "$1" "$#"
+        [[ -n "$2" ]] || die 1 "--base cannot be empty"
         base="$2"
+        base_set=true
         shift 2
         ;;
       --output)
@@ -643,21 +645,25 @@ patch_fetch() {
     output_parent="/tmp"
   fi
 
-  local b64_repo b64_base
+  local b64_repo b64_base b64_base_set
   b64_repo=$(printf '%s' "$source_repo" | base64 -w 0)
   b64_base=$(printf '%s' "$base" | base64 -w 0)
+  b64_base_set=$(printf '%s' "$base_set" | base64 -w 0)
 
   local generate_script
   IFS= read -r -d '' generate_script <<'GENERATE_EOF' || true
 set -eu
 read -r b64_repo
 read -r b64_base
+read -r b64_base_set
 repo=$(printf '%s' "$b64_repo" | base64 -d)
 base=$(printf '%s' "$b64_base" | base64 -d)
+base_set=$(printf '%s' "$b64_base_set" | base64 -d)
 case "$repo" in *"
 "*) printf 'allod: source repo path contains newline\n' >&2; exit 1 ;; esac
 case "$base" in *"
 "*) printf 'allod: base ref contains newline\n' >&2; exit 1 ;; esac
+case "$base_set" in true|false) ;; *) printf 'allod: invalid base mode\n' >&2; exit 1 ;; esac
 if ! git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
   printf 'allod: not a git repository: %s\n' "$repo" >&2; exit 1
 fi
@@ -667,17 +673,60 @@ if [ -n "$dirty" ]; then
   printf '%s\n' "$dirty" >&2
   exit 10
 fi
-base_commit=$(git -C "$repo" rev-parse --verify "$base^{commit}" 2>/dev/null) || {
-  printf 'allod: cannot resolve base ref: %s\n' "$base" >&2; exit 11
+if ! git -C "$repo" rev-parse --verify HEAD^{commit} >/dev/null 2>&1; then
+  printf 'allod: source HEAD does not resolve to a commit\n' >&2; exit 11
+fi
+
+resolve_default_base() {
+  branch=$(git -C "$repo" branch --show-current 2>/dev/null || true)
+  upstream=$(git -C "$repo" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)
+  if [ -n "$upstream" ] && git -C "$repo" rev-parse --verify "$upstream^{commit}" >/dev/null 2>&1; then
+    printf '%s\n' "$upstream"
+    return 0
+  fi
+  if [ -n "$branch" ] && git -C "$repo" rev-parse --verify "refs/remotes/origin/${branch}^{commit}" >/dev/null 2>&1; then
+    printf 'refs/remotes/origin/%s\n' "$branch"
+    return 0
+  fi
+  default_branch=$(git -C "$repo" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||' || true)
+  if [ -n "$default_branch" ] && git -C "$repo" rev-parse --verify "refs/remotes/origin/${default_branch}^{commit}" >/dev/null 2>&1; then
+    printf 'refs/remotes/origin/%s\n' "$default_branch"
+    return 0
+  fi
+  return 1
 }
-if ! git -C "$repo" merge-base --is-ancestor "$base_commit" HEAD; then
-  printf 'allod: base %s is not an ancestor of HEAD\n' "$base" >&2; exit 11
+
+root_export=false
+base_commit=
+if [ "$base_set" = true ]; then
+  base_ref="$base"
+  base_commit=$(git -C "$repo" rev-parse --verify "$base_ref^{commit}" 2>/dev/null) || {
+    printf 'allod: cannot resolve base ref: %s\n' "$base_ref" >&2; exit 11
+  }
+else
+  if base_ref=$(resolve_default_base); then
+    base_commit=$(git -C "$repo" rev-parse --verify "$base_ref^{commit}" 2>/dev/null) || {
+      printf 'allod: cannot resolve base ref: %s\n' "$base_ref" >&2; exit 11
+    }
+  else
+    root_export=true
+    base_ref="<root>"
+    printf 'allod: no source base ref found; exporting full history from root\n' >&2
+  fi
 fi
-ahead=$(git -C "$repo" rev-list "$base_commit..HEAD")
-if [ -z "$ahead" ]; then
-  printf 'allod: HEAD is not ahead of base; nothing to export\n' >&2; exit 11
+
+if [ "$root_export" = true ]; then
+  merges=$(git -C "$repo" rev-list --merges HEAD)
+else
+  if ! git -C "$repo" merge-base --is-ancestor "$base_commit" HEAD; then
+    printf 'allod: base %s is not an ancestor of HEAD\n' "$base_ref" >&2; exit 11
+  fi
+  ahead=$(git -C "$repo" rev-list "$base_commit..HEAD")
+  if [ -z "$ahead" ]; then
+    printf 'allod: HEAD is not ahead of base; nothing to export\n' >&2; exit 11
+  fi
+  merges=$(git -C "$repo" rev-list --merges "$base_commit..HEAD")
 fi
-merges=$(git -C "$repo" rev-list --merges "$base_commit..HEAD")
 if [ -n "$merges" ]; then
   printf 'allod: non-linear history is unsupported; merge commits found in export range\n' >&2; exit 11
 fi
@@ -686,7 +735,11 @@ repo_remote=$(git -C "$repo" remote get-url origin 2>/dev/null || printf '')
 tmpdir=$(mktemp -d /tmp/allod-patch.XXXXXXXXXX)
 _trap_cleanup() { rm -rf -- "$tmpdir"; }
 trap _trap_cleanup EXIT
-git -C "$repo" format-patch "$base_commit..HEAD" -o "$tmpdir" >&2
+if [ "$root_export" = true ]; then
+  git -C "$repo" format-patch --root HEAD -o "$tmpdir" >&2
+else
+  git -C "$repo" format-patch "$base_commit..HEAD" -o "$tmpdir" >&2
+fi
 patch_count=0
 : > "$tmpdir/.patches.jsonl"
 for f in "$tmpdir"/*.patch; do
@@ -703,9 +756,10 @@ jq -n \
   --arg repo_remote "$repo_remote" \
   --arg base_commit "$base_commit" \
   --arg head_commit "$head_commit" \
+  --argjson root_export "$root_export" \
   --argjson patch_count "$patch_count" \
   --slurpfile patches "$tmpdir/.patches.jsonl" \
-  '{repo_remote: $repo_remote, base_commit: $base_commit, head_commit: $head_commit, patch_count: $patch_count, patches: $patches}' \
+  '{repo_remote: $repo_remote, base_commit: (if $root_export then null else $base_commit end), head_commit: $head_commit, root_export: $root_export, patch_count: $patch_count, patches: $patches}' \
   > "$tmpdir/manifest.json"
 rm -f "$tmpdir/.patches.jsonl"
 trap - EXIT
@@ -714,7 +768,7 @@ GENERATE_EOF
 
   local generate_output generate_status
   set +e
-  generate_output=$(printf '%s\n%s\n' "$b64_repo" "$b64_base" | ssh -- "$host" "$generate_script")
+  generate_output=$(printf '%s\n%s\n%s\n' "$b64_repo" "$b64_base" "$b64_base_set" | ssh -- "$host" "$generate_script")
   generate_status=$?
   set -e
 
@@ -805,7 +859,7 @@ CLEANUP_EOF
 
   local patch_count base_short head_short
   patch_count=$(jq -r '.patch_count' "$final_output/manifest.json")
-  base_short=$(jq -r '.base_commit[:8]' "$final_output/manifest.json")
+  base_short=$(jq -r 'if (.root_export // false) then "root" else .base_commit[:8] end' "$final_output/manifest.json")
   head_short=$(jq -r '.head_commit[:8]' "$final_output/manifest.json")
   printf 'allod: fetched %s patch(es) (%s..%s)\n' "$patch_count" "$base_short" "$head_short"
   printf 'allod: artifact dir: %s\n' "$final_output"
@@ -857,6 +911,7 @@ patch_apply() {
   struct_check=$(printf '%s' "$manifest" | jq -r '
     def is_full_hex: test("^[0-9a-f]{40}$") or test("^[0-9a-f]{64}$");
     def is_hex_digest: test("^[0-9a-f]{64}$");
+    def root_export: (.root_export // false);
     def is_safe_patch_name:
       (length > 0) and
       endswith(".patch") and
@@ -867,11 +922,13 @@ patch_apply() {
     if type != "object" then "not a JSON object"
     elif (has("repo_remote") and has("base_commit") and has("head_commit") and has("patch_count") and has("patches")) | not then "missing required field"
     elif (.repo_remote | type) != "string" then "repo_remote: expected string"
-    elif (.base_commit | type) != "string" then "base_commit: expected string"
+    elif (root_export | type) != "boolean" then "root_export: expected boolean"
+    elif root_export and (.base_commit != null) then "base_commit: expected null for root export"
+    elif (root_export | not) and ((.base_commit | type) != "string") then "base_commit: expected string"
     elif (.head_commit | type) != "string" then "head_commit: expected string"
     elif (.patch_count | type) != "number" then "patch_count: expected number"
     elif (.patches | type) != "array" then "patches: expected array"
-    elif (.base_commit | is_full_hex | not) then "base_commit: not a full lowercase hex commit ID"
+    elif (root_export | not) and (.base_commit | is_full_hex | not) then "base_commit: not a full lowercase hex commit ID"
     elif (.head_commit | is_full_hex | not) then "head_commit: not a full lowercase hex commit ID"
     elif .patch_count != (.patches | length) then "patch_count does not match patches array length"
     elif (.patches | any(type != "object")) then "patches entry is not an object"
@@ -887,9 +944,10 @@ patch_apply() {
 
   [[ "$struct_check" == "ok" ]] || die 12 "manifest integrity failure: $struct_check"
 
-  local repo_remote base_commit patch_count
+  local repo_remote base_commit root_export patch_count
   repo_remote=$(printf '%s' "$manifest" | jq -r '.repo_remote')
-  base_commit=$(printf '%s' "$manifest" | jq -r '.base_commit')
+  base_commit=$(printf '%s' "$manifest" | jq -r 'if .base_commit == null then "" else .base_commit end')
+  root_export=$(printf '%s' "$manifest" | jq -r '.root_export // false')
   patch_count=$(printf '%s' "$manifest" | jq -r '.patch_count')
 
   local patch_info filename sha256 actual_sha
@@ -931,17 +989,33 @@ patch_apply() {
     exit 13
   fi
 
-  if ! git -C "$repo" rev-parse --verify "$base_commit^{commit}" >/dev/null 2>&1; then
-    printf 'allod: base commit %s not found in destination; run git fetch first\n' "$base_commit" >&2
-    exit 14
+  local dest_has_head=false
+  if git -C "$repo" rev-parse --verify HEAD^{commit} >/dev/null 2>&1; then
+    dest_has_head=true
   fi
-  if ! git -C "$repo" merge-base --is-ancestor "$base_commit" HEAD 2>/dev/null; then
-    printf 'allod: base commit %s is not an ancestor of destination HEAD; check out the branch containing the base commit\n' "$base_commit" >&2
-    exit 14
+
+  if [[ "$root_export" == true ]]; then
+    if [[ "$dest_has_head" == true ]]; then
+      printf 'allod: root export can only be applied to an empty destination history\n' >&2
+      exit 14
+    fi
+  else
+    if ! git -C "$repo" rev-parse --verify "$base_commit^{commit}" >/dev/null 2>&1; then
+      printf 'allod: base commit %s not found in destination; run git fetch first\n' "$base_commit" >&2
+      exit 14
+    fi
+    if ! git -C "$repo" merge-base --is-ancestor "$base_commit" HEAD 2>/dev/null; then
+      printf 'allod: base commit %s is not an ancestor of destination HEAD; check out the branch containing the base commit\n' "$base_commit" >&2
+      exit 14
+    fi
   fi
 
   local pre_apply_head
-  pre_apply_head=$(git -C "$repo" rev-parse HEAD)
+  if [[ "$dest_has_head" == true ]]; then
+    pre_apply_head=$(git -C "$repo" rev-parse HEAD)
+  else
+    pre_apply_head="<unborn>"
+  fi
 
   local am_status
   set +e
@@ -958,7 +1032,7 @@ patch_apply() {
     fi
 
     local current_head
-    current_head=$(git -C "$repo" rev-parse HEAD)
+    current_head=$(git -C "$repo" rev-parse HEAD 2>/dev/null || printf '<unborn>')
     if [[ "$current_head" != "$pre_apply_head" ]]; then
       printf 'allod: WARNING: HEAD changed after git am abort; expected %s, got %s\n' "$pre_apply_head" "$current_head" >&2
       printf 'allod: repo requires manual repair: %s\n' "$repo" >&2
@@ -979,10 +1053,16 @@ patch_apply() {
     exit 15
   fi
 
-  local applied_range="$pre_apply_head..HEAD"
+  local applied_range=""
   local diff_check_status
   set +e
-  git -C "$repo" diff --check "$applied_range" >/dev/null 2>&1
+  if [[ "$pre_apply_head" == "<unborn>" ]]; then
+    empty_tree=$(git -C "$repo" hash-object -t tree /dev/null)
+    git -C "$repo" diff --check "$empty_tree" HEAD >/dev/null 2>&1
+  else
+    applied_range="$pre_apply_head..HEAD"
+    git -C "$repo" diff --check "$applied_range" >/dev/null 2>&1
+  fi
   diff_check_status=$?
   set -e
 
@@ -991,12 +1071,20 @@ patch_apply() {
     printf 'allod: repo: %s\n' "$repo" >&2
     printf 'allod: pre-apply HEAD: %s\n' "$pre_apply_head" >&2
     printf 'allod: current HEAD: %s\n' "$(git -C "$repo" rev-parse HEAD)" >&2
-    printf 'allod: to fix: edit and amend, or to undo: git reset --hard %s\n' "$pre_apply_head" >&2
+    if [[ "$pre_apply_head" == "<unborn>" ]]; then
+      printf 'allod: to fix: edit and amend; to undo: reclone or manually remove the newly created history\n' >&2
+    else
+      printf 'allod: to fix: edit and amend, or to undo: git reset --hard %s\n' "$pre_apply_head" >&2
+    fi
     exit 1
   fi
 
   printf 'allod: applied %s patch(es)\n' "$patch_count"
-  git -C "$repo" log --oneline "$applied_range"
+  if [[ "$pre_apply_head" == "<unborn>" ]]; then
+    git -C "$repo" log --oneline HEAD
+  else
+    git -C "$repo" log --oneline "$applied_range"
+  fi
   git -C "$repo" show --stat --oneline HEAD
 
   if [[ "$push" == true ]]; then
@@ -1012,7 +1100,11 @@ patch_apply() {
       printf 'allod: pre-apply HEAD: %s\n' "$pre_apply_head" >&2
       printf 'allod: current HEAD: %s\n' "$(git -C "$repo" rev-parse HEAD)" >&2
       printf 'allod: to push manually: git -C "%s" push\n' "$repo" >&2
-      printf 'allod: to undo: git -C "%s" reset --hard %s\n' "$repo" "$pre_apply_head" >&2
+      if [[ "$pre_apply_head" == "<unborn>" ]]; then
+        printf 'allod: to undo: reclone or manually remove the newly created history\n' >&2
+      else
+        printf 'allod: to undo: git -C "%s" reset --hard %s\n' "$repo" "$pre_apply_head" >&2
+      fi
       exit 1
     fi
   else
@@ -1021,13 +1113,15 @@ patch_apply() {
 }
 
 patch_receive() {
-  local target="" dest_repo="" base="origin/master" push=false
+  local target="" dest_repo="" base="" base_set=false push=false
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --base)
         require_option_value "$1" "$#"
+        [[ -n "$2" ]] || die 1 "--base cannot be empty"
         base="$2"
+        base_set=true
         shift 2
         ;;
       --push)
@@ -1064,7 +1158,8 @@ patch_receive() {
   parent_tmpdir=$(mktemp -d /tmp/allod-patch-receive.XXXXXXXXXX)
   artifact_dir="$parent_tmpdir/artifact"
 
-  local fetch_args=("$target" --base "$base" --output "$artifact_dir")
+  local fetch_args=("$target" --output "$artifact_dir")
+  [[ "$base_set" != true ]] || fetch_args+=(--base "$base")
   local fetch_status=0
   set +e
   (patch_fetch "${fetch_args[@]}")

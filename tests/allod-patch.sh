@@ -121,6 +121,14 @@ clone_repo() {
   git -C "$dest" config user.email "test@example.invalid"
 }
 
+clone_empty_repo() {
+  local remote="$1" dest="$2"
+  mkdir -p "$(dirname "$dest")"
+  git clone -q "$remote" "$dest" 2>/dev/null
+  git -C "$dest" config user.name "Test User"
+  git -C "$dest" config user.email "test@example.invalid"
+}
+
 add_commit() {
   local repo="$1" msg="$2" content="${3:-}"
   if [[ -n "$content" ]]; then
@@ -356,6 +364,18 @@ m_count=$(jq -r '.patch_count' "$artifact_path/manifest.json")
 assert_equal "$m_count" "3" "fetch produces 3 patches for 3 commits"
 rm -rf "$artifact_path"
 
+# --- Default branch detection ---
+source_repo="$TMP/repos/fetch-default-main-source"
+init_repo "$source_repo" main
+add_commit "$source_repo" "main branch default change"
+
+reset_mock_ssh
+capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo"
+assert_status 0 "fetch defaults to source default branch"
+assert_contains "$CAPTURE_OUTPUT" "fetched 1 patch" "fetch default branch reports patch count"
+artifact_path=$(printf '%s' "$CAPTURE_OUTPUT" | grep 'artifact dir:' | sed 's/.*artifact dir: //')
+rm -rf "$artifact_path"
+
 # --- Input validation ---
 reset_mock_ssh
 capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch ":$source_repo"
@@ -428,6 +448,29 @@ reset_mock_ssh
 capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo"
 assert_status 11 "fetch no commits exits 11"
 assert_contains "$CAPTURE_OUTPUT" "not ahead" "fetch no commits message"
+
+# --- Root export when no source base exists ---
+source_repo="$TMP/repos/fetch-root-source"
+root_remote="$TMP/remotes/fetch-root.git"
+git init -q --bare -b main "$root_remote"
+git init -q -b main "$source_repo"
+git -C "$source_repo" config user.name "Test User"
+git -C "$source_repo" config user.email "test@example.invalid"
+printf 'root export\n' > "$source_repo/tracked.txt"
+git -C "$source_repo" add tracked.txt
+git -C "$source_repo" commit -qm "root export initial"
+git -C "$source_repo" remote add origin "$root_remote"
+
+reset_mock_ssh
+capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo"
+assert_status 0 "fetch falls back to root export when no source base exists"
+assert_contains "$CAPTURE_OUTPUT" "root.." "fetch root export reports root range"
+artifact_path=$(printf '%s' "$CAPTURE_OUTPUT" | grep 'artifact dir:' | sed 's/.*artifact dir: //')
+assert_equal "$(jq -r '.root_export' "$artifact_path/manifest.json")" "true" \
+  "fetch root export marks manifest"
+assert_equal "$(jq -r '.base_commit == null' "$artifact_path/manifest.json")" "true" \
+  "fetch root export has null base commit"
+rm -rf "$artifact_path"
 
 # --- Base not ancestor ---
 source_repo="$TMP/repos/fetch-not-ancestor"
@@ -815,6 +858,31 @@ assert_contains "$CAPTURE_OUTPUT" "while resolving: <destination-repo>" \
 assert_contains "$CAPTURE_OUTPUT" "to fix:" "apply missing destination shows fix hint"
 assert_not_contains "$CAPTURE_OUTPUT" "repo identity mismatch" \
   "apply missing destination is not reported as identity mismatch"
+rm -rf "$artifact"
+
+# --- Root export into non-empty destination is rejected ---
+source_repo="$TMP/repos/apply-root-nonempty-source"
+root_remote="$TMP/remotes/apply-root-nonempty.git"
+git init -q --bare -b main "$root_remote"
+git init -q -b main "$source_repo"
+git -C "$source_repo" config user.name "Test User"
+git -C "$source_repo" config user.email "test@example.invalid"
+printf 'root apply\n' > "$source_repo/tracked.txt"
+git -C "$source_repo" add tracked.txt
+git -C "$source_repo" commit -qm "root apply initial"
+git -C "$source_repo" remote add origin "$root_remote"
+
+dest_repo_root_nonempty="$TMP/repos/apply-root-nonempty-dest"
+init_repo "$dest_repo_root_nonempty" main
+git -C "$dest_repo_root_nonempty" remote set-url origin "$root_remote"
+
+artifact="$TMP/artifacts/apply-root-nonempty"
+make_artifact "$source_repo" "$artifact"
+
+capture bash "$ALLOD" patch apply "$artifact" --repo "$dest_repo_root_nonempty"
+assert_status 14 "apply rejects root export into non-empty destination"
+assert_contains "$CAPTURE_OUTPUT" "empty destination history" \
+  "apply root export non-empty destination message"
 rm -rf "$artifact"
 
 # --- Checksum mismatch ---
@@ -1251,6 +1319,29 @@ recv_artifact=$(printf '%s' "$CAPTURE_OUTPUT" | grep 'artifact dir:' | tail -1 |
 
 recv_content=$(cat "$dest_repo_recv/tracked.txt")
 assert_equal "$recv_content" "received content" "receive applies patches to destination"
+
+# --- Root export into empty destination ---
+source_repo="$TMP/repos/receive-root-source"
+root_remote="$TMP/remotes/receive-root.git"
+git init -q --bare -b main "$root_remote"
+git init -q -b main "$source_repo"
+git -C "$source_repo" config user.name "Test User"
+git -C "$source_repo" config user.email "test@example.invalid"
+printf 'root received\n' > "$source_repo/tracked.txt"
+git -C "$source_repo" add tracked.txt
+git -C "$source_repo" commit -qm "receive root initial"
+git -C "$source_repo" remote add origin "$root_remote"
+
+dest_repo_root="$TMP/repos/receive-root-dest"
+clone_empty_repo "$root_remote" "$dest_repo_root"
+
+reset_mock_ssh
+capture_with_path "$MOCK_PATH" bash "$ALLOD" patch receive "testhost:$source_repo" "$dest_repo_root"
+assert_status 0 "receive applies root export to empty destination"
+recv_content=$(cat "$dest_repo_root/tracked.txt")
+assert_equal "$recv_content" "root received" "receive root export produces content"
+assert_equal "$(git -C "$dest_repo_root" rev-list --count HEAD)" "1" \
+  "receive root export creates expected commit count"
 
 # --- Equivalent Git remote URL forms ---
 source_repo="$TMP/repos/receive-normalized-port-source"

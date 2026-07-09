@@ -12,7 +12,7 @@ Fetch patches from a remote source repo via SSH.
 allod patch fetch <ssh-host>:<source-repo> [--base <ref>] [--output <dir>]
 ```
 
-- `--base <ref>` - Base ref for patch range (default: `origin/master`)
+- `--base <ref>` - Base ref for patch range (default: source branch upstream, same-named origin branch, or origin default branch; if none exists, export from root)
 - `--output <dir>` - Local directory for artifacts (default: auto-generated in `/tmp`)
 
 SSHes into the source VM, validates the worktree is clean, generates `git format-patch` artifacts, transfers them via tar, and cleans up the remote temp dir.
@@ -28,7 +28,7 @@ allod patch apply <artifact-dir> [--repo <destination-repo>] [--push]
 - `--repo <path>` - Destination repo (default: current directory)
 - `--push` - Push after successful apply
 
-Validates the manifest and checksums, verifies the destination repo matches the source's origin URL, and applies patches with `git am --3way`. Common equivalent remote URL forms such as `https://github.com/org/repo.git`, `git@github.com:org/repo.git`, and `ssh://git@github.com/org/repo.git` are normalized before comparison.
+Validates the manifest and checksums, verifies the destination repo matches the source's origin URL, and applies patches with `git am --3way`. Common equivalent remote URL forms such as `https://github.com/org/repo.git`, `git@github.com:org/repo.git`, and `ssh://git@github.com/org/repo.git` are normalized before comparison. Root exports can only be applied to an empty destination history.
 
 ### receive
 
@@ -82,7 +82,7 @@ Every SSH invocation uses static remote command text. Dynamic values (source rep
 Fetch patches from a dev VM:
 
 ```sh
-allod patch fetch devvm:/home/user/work/myrepo --base origin/master
+allod patch fetch devvm:/home/user/work/myrepo
 ```
 
 Apply fetched patches:
