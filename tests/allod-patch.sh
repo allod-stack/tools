@@ -1330,14 +1330,16 @@ git -C "$source_repo" config user.email "test@example.invalid"
 printf 'root received\n' > "$source_repo/tracked.txt"
 git -C "$source_repo" add tracked.txt
 git -C "$source_repo" commit -qm "receive root initial"
-git -C "$source_repo" remote add origin "$root_remote"
+git -C "$source_repo" remote add origin "https://forge.anarch.diy/allod/nexus.git"
 
 dest_repo_root="$TMP/repos/receive-root-dest"
 clone_empty_repo "$root_remote" "$dest_repo_root"
+git -C "$dest_repo_root" remote set-url origin \
+  "ssh://git@forge.anarch.diy:2222/allod/nexus.git"
 
 reset_mock_ssh
 capture_with_path "$MOCK_PATH" bash "$ALLOD" patch receive "testhost:$source_repo" "$dest_repo_root"
-assert_status 0 "receive applies root export to empty destination"
+assert_status 0 "receive applies root export to empty destination with normalized remotes"
 recv_content=$(cat "$dest_repo_root/tracked.txt")
 assert_equal "$recv_content" "root received" "receive root export produces content"
 assert_equal "$(git -C "$dest_repo_root" rev-list --count HEAD)" "1" \
