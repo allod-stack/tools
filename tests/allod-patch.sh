@@ -1345,6 +1345,34 @@ assert_equal "$recv_content" "root received" "receive root export produces conte
 assert_equal "$(git -C "$dest_repo_root" rev-list --count HEAD)" "1" \
   "receive root export creates expected commit count"
 
+# --- Root export with no source remote into empty destination ---
+source_repo="$TMP/repos/receive-root-no-remote-source"
+root_remote="$TMP/remotes/receive-root-no-remote.git"
+git init -q --bare -b main "$root_remote"
+git init -q -b main "$source_repo"
+git -C "$source_repo" config user.name "Test User"
+git -C "$source_repo" config user.email "test@example.invalid"
+printf 'root no remote\n' > "$source_repo/tracked.txt"
+git -C "$source_repo" add tracked.txt
+git -C "$source_repo" commit -qm "receive root no remote initial"
+
+dest_repo_root="$TMP/repos/receive-root-no-remote-dest"
+clone_empty_repo "$root_remote" "$dest_repo_root"
+git -C "$dest_repo_root" remote set-url origin \
+  "ssh://git@forge.anarch.diy:2222/allod/nexus.git"
+
+reset_mock_ssh
+capture_with_path "$MOCK_PATH" bash "$ALLOD" patch receive "testhost:$source_repo" "$dest_repo_root"
+assert_status 0 "receive applies root export with no source remote"
+assert_not_contains "$CAPTURE_OUTPUT" "repo identity mismatch" \
+  "receive root export no source remote skips identity mismatch"
+recv_artifact=$(printf '%s' "$CAPTURE_OUTPUT" | grep 'artifact dir:' | tail -1 | sed 's/.*artifact dir: //')
+assert_equal "$(jq -r '.repo_remote' "$recv_artifact/manifest.json")" "" \
+  "receive root export no source remote records empty manifest remote"
+recv_content=$(cat "$dest_repo_root/tracked.txt")
+assert_equal "$recv_content" "root no remote" \
+  "receive root export no source remote produces content"
+
 # --- Equivalent Git remote URL forms ---
 source_repo="$TMP/repos/receive-normalized-port-source"
 init_repo "$source_repo" master

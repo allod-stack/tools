@@ -980,26 +980,29 @@ patch_apply() {
     exit 16
   fi
 
-  local dest_remote
+  local dest_has_head=false
+  if git -C "$repo" rev-parse --verify 'HEAD^{commit}' >/dev/null 2>&1; then
+    dest_has_head=true
+  fi
+
+  if [[ "$root_export" == true && "$dest_has_head" == true ]]; then
+    printf 'allod: root export can only be applied to an empty destination history\n' >&2
+    exit 14
+  fi
+
+  local dest_remote allow_missing_source_remote=false
   dest_remote=$(git -C "$repo" remote get-url origin 2>/dev/null || printf '')
-  if ! git_remotes_match "$dest_remote" "$repo_remote"; then
+  if [[ -z "$repo_remote" && "$root_export" == true && "$dest_has_head" != true ]]; then
+    allow_missing_source_remote=true
+  fi
+  if [[ "$allow_missing_source_remote" != true ]] && ! git_remotes_match "$dest_remote" "$repo_remote"; then
     printf 'allod: repo identity mismatch\n' >&2
     printf 'allod: manifest remote: %s\n' "$repo_remote" >&2
     printf 'allod: destination remote: %s\n' "$dest_remote" >&2
     exit 13
   fi
 
-  local dest_has_head=false
-  if git -C "$repo" rev-parse --verify 'HEAD^{commit}' >/dev/null 2>&1; then
-    dest_has_head=true
-  fi
-
-  if [[ "$root_export" == true ]]; then
-    if [[ "$dest_has_head" == true ]]; then
-      printf 'allod: root export can only be applied to an empty destination history\n' >&2
-      exit 14
-    fi
-  else
+  if [[ "$root_export" != true ]]; then
     if ! git -C "$repo" rev-parse --verify "$base_commit^{commit}" >/dev/null 2>&1; then
       printf 'allod: base commit %s not found in destination; run git fetch first\n' "$base_commit" >&2
       exit 14

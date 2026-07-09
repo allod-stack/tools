@@ -28,7 +28,7 @@ allod patch apply <artifact-dir> [--repo <destination-repo>] [--push]
 - `--repo <path>` - Destination repo (default: current directory)
 - `--push` - Push after successful apply
 
-Validates the manifest and checksums, verifies the destination repo matches the source's origin URL, and applies patches with `git am --3way`. Common equivalent remote URL forms such as `https://github.com/org/repo.git`, `git@github.com:org/repo.git`, and `ssh://git@github.com/org/repo.git` are normalized before comparison. Root exports can only be applied to an empty destination history.
+Validates the manifest and checksums, verifies the destination repo matches the source's origin URL, and applies patches with `git am --3way`. Common equivalent remote URL forms such as `https://github.com/org/repo.git`, `git@github.com:org/repo.git`, and `ssh://git@github.com/org/repo.git` are normalized before comparison. Root exports can only be applied to an empty destination history; if a root-export source has no `origin`, the remote identity check is skipped only for that empty-destination bootstrap case.
 
 ### receive
 
