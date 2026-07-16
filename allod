@@ -24,6 +24,7 @@ Usage: allod <namespace> <command> [options]
 Namespaces:
   change   Manage code changes (begin, record, submit, cleanup)
   patch    Transfer patches between environments (fetch, apply, receive)
+  pm       Manage the PM board overlay in the private state repo
 EOF
 }
 
@@ -1211,6 +1212,39 @@ patch_main() {
   esac
 }
 
+resolve_pm_script() {
+  local script_dir candidate
+  script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+
+  if [[ -n "${ALLOD_TOOLS_DIR:-}" ]]; then
+    candidate="${ALLOD_TOOLS_DIR%/}/pm/pm"
+    [[ -x "$candidate" ]] && {
+      printf '%s\n' "$candidate"
+      return 0
+    }
+  fi
+
+  candidate="$script_dir/pm/pm"
+  [[ -x "$candidate" ]] && {
+    printf '%s\n' "$candidate"
+    return 0
+  }
+
+  candidate="${WORK_DIR%/}/allod/tools/pm/pm"
+  [[ -x "$candidate" ]] && {
+    printf '%s\n' "$candidate"
+    return 0
+  }
+
+  die 1 "pm tool files not found; set ALLOD_TOOLS_DIR to an allod/tools checkout"
+}
+
+pm_main() {
+  local pm_script
+  pm_script=$(resolve_pm_script)
+  WORK_DIR="$WORK_DIR" exec bash "$pm_script" "$@"
+}
+
 main() {
   local namespace="${1:-}"
   case "$namespace" in
@@ -1221,6 +1255,10 @@ main() {
     patch)
       shift
       patch_main "$@"
+      ;;
+    pm)
+      shift
+      pm_main "$@"
       ;;
     -h|--help|"")
       usage

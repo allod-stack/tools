@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "updated": "2026-07-15T12:00:00Z",
+  "policy": "triage-policy.md",
+  "repos": ["allod/tools"],
+  "plans": [
+    {
+      "id": "pm-m1",
+      "title": "Automated PM - M1 tooling",
+      "goal": "Groom + render, dogfooded on the real backlog.",
+      "status": "active",
+      "phases": [
+        { "id": "build", "gate": "hermetic acceptance tests pass", "issues": ["allod/tools#103"] },
+        { "id": "seed", "gate": "state repo produces the seed", "issues": ["allod/tools#98"] }
+      ]
+    }
+  ],
+  "priority": [
+    { "issue": "allod/tools#103", "tier": "P1", "note": "PM tool ownership moves into allod/tools" },
+    { "issue": "allod/nexus#8", "tier": "P2", "note": "cross-repo ref resolves even though nexus is not in repos[]" }
+  ],
+  "gates": [
+    {
+      "blocked": "allod/nexus#9",
+      "by": ["allod/nexus#8"],
+      "reason": "verify rotation blast radius after the ISO re-key"
+    }
+  ],
+  "decisions_pending": [
+    {
+      "id": "iframe-render",
+      "q": "Does the forge file view render committed pm.html as a page, not source?",
+      "issue": "allod/tools#98"
+    }
+  ]
+}

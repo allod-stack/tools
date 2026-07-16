@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://forge.anarch.diy/allod/tools/src/branch/master/pm/pm.schema.json",
+  "title": "Automated PM overlay (pm.json)",
+  "description": "Overlay, not mirror. pm.json stores only what Forgejo cannot express (priority ordering, plan/phase grouping, the gate DAG, pending decisions) and references issues by owner/repo#num STRINGS. It never caches issue facts (title/body/state/status/assignee) - Forgejo stays authoritative and the renderer joins the two. Purity is enforced structurally: issue refs are strings, every object sets additionalProperties:false, and no issue-fact field is defined on any issue-referencing object.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "updated", "repos"],
+  "properties": {
+    "schema": {
+      "description": "Overlay format version.",
+      "const": 1
+    },
+    "updated": {
+      "description": "When the overlay was last regenerated (RFC3339). Overlay-authored, not a forge fact.",
+      "type": "string",
+      "format": "date-time",
+      "minLength": 1
+    },
+    "policy": {
+      "description": "Repo-relative path to the triage policy the groom applies (produced by Stage 0).",
+      "type": "string"
+    },
+    "repos": {
+      "description": "The explicit managed repo list. The groom reads only these; never org enumeration.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/repoSlug" },
+      "uniqueItems": true
+    },
+    "plans": {
+      "description": "Multi-step plans, each a set of phases with gates.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/plan" }
+    },
+    "priority": {
+      "description": "ORDERED priority list - array position is the rank. tier is a coarse bucket, note is optional rationale.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/priorityEntry" }
+    },
+    "gates": {
+      "description": "The gate DAG: issue X is blocked by issues Y.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/gate" }
+    },
+    "decisions_pending": {
+      "description": "Open questions awaiting a human decision.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/decision" }
+    }
+  },
+  "$defs": {
+    "issueRef": {
+      "description": "A forge issue reference, owner/repo#num. A plain string - there is no per-issue object to hang cached facts on.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*#[1-9][0-9]*$"
+    },
+    "repoSlug": {
+      "description": "A forge repo slug, owner/repo.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "plan": {
+      "description": "A plan. title/status/goal here are overlay-authored plan facts, NOT cached forge-issue facts, so they are legitimate.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "phases"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "title": { "type": "string" },
+        "goal": { "type": "string" },
+        "status": { "type": "string", "enum": ["active", "blocked", "paused", "done"] },
+        "phases": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/phase" }
+        }
+      }
+    },
+    "phase": {
+      "description": "A plan phase. Issue-referencing: no issue-fact fields allowed.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "issues"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "gate": { "type": "string" },
+        "issues": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/issueRef" }
+        }
+      }
+    },
+    "priorityEntry": {
+      "description": "One ranked issue. Issue-referencing: only overlay-authored tier/note beside the ref - no cached issue facts.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["issue", "tier"],
+      "properties": {
+        "issue": { "$ref": "#/$defs/issueRef" },
+        "tier": { "type": "string", "enum": ["P0", "P1", "P2", "P3"] },
+        "note": { "type": "string" }
+      }
+    },
+    "gate": {
+      "description": "One gate edge: blocked is blocked BY the refs in by. Issue-referencing: no issue-fact fields.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["blocked", "by"],
+      "properties": {
+        "blocked": { "$ref": "#/$defs/issueRef" },
+        "by": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/issueRef" }
+        },
+        "reason": { "type": "string" }
+      }
+    },
+    "decision": {
+      "description": "One pending decision. May reference the issue it concerns. Issue-referencing: no issue-fact fields.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "q"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "q": { "type": "string" },
+        "issue": { "$ref": "#/$defs/issueRef" }
+      }
+    }
+  }
+}

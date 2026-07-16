@@ -1,0 +1,139 @@
+#!/bin/sh
+# integrity-check - validate a pm.json overlay.
+#
+#   integrity-check <pm.json>
+#
+# Exits NON-ZERO on any hard failure:
+#   - schema violation (validated against pm.schema.json via check-jsonschema),
+#   - an issue ref (owner/repo#num) that does not resolve on the forge (dangling),
+#   - an overlay-purity violation (a cached issue-fact field on an issue-referencing
+#     object). The schema already forbids these structurally; this is an explicit,
+#     defense-in-depth assertion with a targeted message.
+# Orphans (open issues in the managed repos that the overlay references nowhere)
+# are reported as WARNINGS and do not affect the exit code.
+#
+# Uses the token the `forge` CLI reads (~/.config/git/forgejo-token, or
+# $FORGEJO_TOKEN / $FORGEJO_TOKEN_FILE) for read-only forge access. Schema
+# validation uses check-jsonschema; if it is not on PATH it is invoked via
+# `nix run nixpkgs#check-jsonschema`.
+set -eu
+
+FORGE="${FORGEJO_HOST:-https://forge.anarch.diy}"
+TOKEN_FILE="${FORGEJO_TOKEN_FILE:-$HOME/.config/git/forgejo-token}"
+SCRIPT_DIR=$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)
+SCHEMA="$SCRIPT_DIR/pm.schema.json"
+
+[ $# -eq 1 ] || { echo "usage: integrity-check <pm.json>" >&2; exit 2; }
+pm="$1"
+[ -f "$pm" ] || { echo "integrity-check: no such pm.json: $pm" >&2; exit 2; }
+[ -f "$SCHEMA" ] || { echo "integrity-check: schema not found at $SCHEMA" >&2; exit 2; }
+jq -e . "$pm" >/dev/null 2>&1 || { echo "integrity-check: $pm is not valid JSON" >&2; exit 2; }
+
+fail=0
+
+# --- 1. Schema validation -------------------------------------------------
+if command -v check-jsonschema >/dev/null 2>&1; then
+  CJS="check-jsonschema"
+  run_cjs() { check-jsonschema "$@"; }
+elif command -v nix >/dev/null 2>&1; then
+  CJS="nix run nixpkgs#check-jsonschema --"
+  run_cjs() { nix run nixpkgs#check-jsonschema -- "$@"; }
+else
+  echo "integrity-check: need check-jsonschema (or nix to run it)" >&2
+  exit 2
+fi
+echo "== schema ($CJS) =="
+if run_cjs --schemafile "$SCHEMA" "$pm"; then
+  echo "  ok: $pm validates against pm.schema.json"
+else
+  echo "  FAIL: schema validation failed" >&2
+  fail=1
+fi
+
+# --- 2. Overlay purity (explicit, defense-in-depth) -----------------------
+# No issue-fact field (title/body/state/status/assignee) may appear on any
+# issue-referencing object: priority entries, gate edges, decision entries, or
+# plan phases. (Plans themselves legitimately carry overlay-authored
+# title/status, so they are not scanned.)
+echo "== overlay purity =="
+impure=$(jq -r '
+  ["title","body","state","status","assignee"] as $forbidden
+  | [ (.priority[]?          | to_entries[] | .key),
+      (.gates[]?             | to_entries[] | .key),
+      (.decisions_pending[]? | to_entries[] | .key),
+      (.plans[]?.phases[]?   | to_entries[] | .key) ]
+  | map(select(. as $k | $forbidden | index($k))) | unique | .[]' "$pm")
+if [ -n "$impure" ]; then
+  echo "  FAIL: cached issue-fact field(s) on issue-referencing object(s): $(echo "$impure" | tr '\n' ' ')" >&2
+  fail=1
+else
+  echo "  ok: no cached issue-fact fields"
+fi
+
+# --- 3. Reference resolution ----------------------------------------------
+token=$(printf '%s' "${FORGEJO_TOKEN:-}")
+[ -n "$token" ] || token=$(cat "$TOKEN_FILE" 2>/dev/null || true)
+[ -n "$token" ] || { echo "integrity-check: no forge token (\$FORGEJO_TOKEN or $TOKEN_FILE)" >&2; exit 2; }
+
+refs=$(jq -r '
+  [ (.plans[]?.phases[]?.issues[]?),
+    (.priority[]?.issue),
+    (.gates[]?.blocked),
+    (.gates[]?.by[]?),
+    (.decisions_pending[]?.issue) ]
+  | map(select(. != null)) | unique[]' "$pm")
+
+echo "== references =="
+if [ -z "$refs" ]; then
+  echo "  (no issue refs in overlay)"
+else
+  for ref in $refs; do
+    repo=${ref%#*}; num=${ref#*#}
+    code=$(curl -s -o /dev/null -w '%{http_code}' \
+      -H "Authorization: token $token" \
+      "$FORGE/api/v1/repos/$repo/issues/$num" 2>/dev/null || echo 000)
+    if [ "$code" = "200" ]; then
+      echo "  ok: $ref"
+    else
+      echo "  FAIL: $ref does not resolve (HTTP $code)" >&2
+      fail=1
+    fi
+  done
+fi
+
+# --- 4. Orphan reporting (warnings only) ----------------------------------
+# Open issues in the managed repos that the overlay references nowhere.
+echo "== orphans (warnings) =="
+orphans=0
+for repo in $(jq -r '.repos[]?' "$pm"); do
+  page=1
+  while :; do
+    list=$(curl -sf -H "Authorization: token $token" \
+      "$FORGE/api/v1/repos/$repo/issues?state=open&type=issues&limit=50&page=$page" 2>/dev/null || true)
+    [ -n "$list" ] || break
+    count=$(printf '%s' "$list" | jq 'length')
+    [ "$count" -gt 0 ] || break
+    # emit "num<TAB>title" for issues in this repo not referenced by the overlay
+    unref=$(printf '%s' "$list" | jq -r --arg repo "$repo" --argjson refs \
+      "$(printf '%s' "$refs" | jq -R . | jq -cs .)" '
+      ($refs | map(select(startswith($repo + "#")))) as $used
+      | .[] | select( ($repo + "#" + (.number|tostring)) as $r | ($used | index($r)) | not )
+      | "\($repo)#\(.number)\t\(.title)"')
+    if [ -n "$unref" ]; then
+      printf '%s\n' "$unref" | while IFS="$(printf '\t')" read -r r t; do
+        echo "  warning: orphan (in managed repo, unreferenced): $r  $t" >&2
+      done
+      orphans=$((orphans + $(printf '%s\n' "$unref" | grep -c . )))
+    fi
+    [ "$count" -eq 50 ] || break
+    page=$((page + 1))
+  done
+done
+[ "$orphans" -eq 0 ] && echo "  none"
+
+echo "=="
+if [ "$fail" -ne 0 ]; then
+  echo "integrity-check: FAILED" >&2
+  exit 1
+fi
+echo "integrity-check: OK"

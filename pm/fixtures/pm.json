@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "updated": "2026-07-15T00:00:00Z",
+  "policy": "triage-policy.md",
+  "repos": ["allod/tools", "allod/nexus", "allod/memory"],
+  "plans": [
+    {
+      "id": "pm-self-build",
+      "title": "Automated PM system - M1 self-build",
+      "goal": "Ship the groom + render tooling and dogfood it on this backlog.",
+      "status": "active",
+      "phases": [
+        {
+          "id": "p1-tooling",
+          "gate": "hermetic acceptance tests (schema, render, integrity) pass",
+          "issues": ["allod/tools#103", "allod/tools#9001"]
+        },
+        {
+          "id": "p2-seed",
+          "gate": "Stage 0 produces the first real pm.json seed",
+          "issues": ["allod/tools#98", "allod/tools#83"]
+        }
+      ]
+    }
+  ],
+  "priority": [
+    { "issue": "allod/tools#9001", "tier": "P0", "note": "hostile-title fixture - proves the renderer HTML-escapes forge text" },
+    { "issue": "allod/nexus#8", "tier": "P1", "note": "re-key the installer ISO on host-key rotation" }
+  ],
+  "gates": [
+    {
+      "blocked": "allod/nexus#9",
+      "by": ["allod/nexus#8"],
+      "reason": "rotation blast-radius verification waits on the ISO re-key"
+    }
+  ],
+  "decisions_pending": [
+    {
+      "id": "board-render",
+      "q": "Confirm the forge sandboxed-iframe renders committed pm.html as a page, not source.",
+      "issue": "allod/memory#12"
+    }
+  ]
+}

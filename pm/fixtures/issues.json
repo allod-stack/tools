@@ -1,0 +1,9 @@
+{
+  "allod/tools#103": { "title": "Port the PM board tool into allod tools", "state": "open" },
+  "allod/tools#9001": { "title": "<script>alert('xss')</script> \"><img src=x onerror=alert(1)> https://evil.example/pwn", "state": "open" },
+  "allod/tools#98": { "title": "Migrate program-shaped bash tools to Go", "state": "open" },
+  "allod/tools#83": { "title": "Improve allod tool ergonomics", "state": "open" },
+  "allod/nexus#8": { "title": "nexus-host-key rotation must re-key the installer ISO", "state": "open" },
+  "allod/nexus#9": { "title": "Rotation lifecycle: verify host-key blast radius", "state": "closed" },
+  "allod/memory#12": { "title": "Clarify public-org audit guidance", "state": "open" }
+}

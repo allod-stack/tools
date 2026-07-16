@@ -8,8 +8,9 @@ packaged via `pkgs.writeShellApplication` in `profiles` (dev VMs) and
 ## Layout
 
 ```
-allod                     main CLI (change begin/record/submit/cleanup)
+allod                     main CLI (change, patch, pm)
 forge                     Forgejo CLI
+pm/                       PM board tools (schema, renderer, groom prompt)
 workspace/                daily workspace sync and status
   pull-all                pull every repo under ~/work/
   work-diff               show staged/unstaged changes across repos

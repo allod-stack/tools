@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# allod pm — manage the Allod PM board (a pm.json overlay rendered to pm.html, committed to vnprc/pm-state).
+#
+#   allod pm                  show this help
+#   allod pm refresh [--no-push]
+#                            re-render pm.html from pm.json + LIVE forge state, and commit.
+#                            Freshens issue titles/open-closed state for the issues already on
+#                            the board. Does NOT add/drop issues (that is 'pm groom'). No LLM.
+#   allod pm groom (--claude|--codex) [--dry-run] [--no-push]
+#                            spin up the pm-groom subagent to rebuild pm.json from current forge
+#                            state (adds new issues, drops closed, re-prioritizes), then re-render
+#                            and commit. An LLM run; choose the harness explicitly with --claude
+#                            or --codex. --dry-run: rebuild + render + show the diff but leave it
+#                            uncommitted (review, then 'allod pm commit' or 'allod pm discard').
+#   allod pm commit [--no-push]
+#                            commit the pending working-tree board changes — e.g. a groom you
+#                            approved after 'allod pm groom --dry-run', or a hand-edit of pm.json.
+#   allod pm discard         revert working-tree changes to pm.json + pm.html.
+#   ALLOD_PM_DIR=<path>      override the state checkout (default: ${WORK_DIR:-~/work}/pm-state).
+set -euo pipefail
+
+PM_DIR="$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)"
+STATE_DIR="${ALLOD_PM_DIR:-${WORK_DIR:-$HOME/work}/pm-state}"
+STATE_REPO="$(git -C "$STATE_DIR" rev-parse --show-toplevel 2>/dev/null)" || {
+  echo "pm: state checkout not found: $STATE_DIR" >&2
+  echo "pm: clone vnprc/pm-state or set ALLOD_PM_DIR" >&2
+  exit 1
+}
+PMJSON="$STATE_REPO/pm.json"; PMHTML="$STATE_REPO/pm.html"
+REL_JSON="pm.json"; REL_HTML="pm.html"
+
+usage() { sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; }
+
+validate() { echo "== integrity-check =="; "$PM_DIR/integrity-check" "$PMJSON"; }
+
+render_board() {
+  echo "== render =="
+  "$PM_DIR/render" "$PMJSON" > "$PMHTML"
+  if grep -qiE '<script|<link|<img|<iframe|<object|<embed|<[^>]*\bsrc\s*=|@import|url\(|<[^>]*href\s*=\s*.?https?:' "$PMHTML"; then
+    echo "pm: rendered pm.html contains JS/external refs — refusing to commit" >&2; exit 1
+  fi
+}
+
+commit_board() {  # <subject> <dryrun:true|false> <push:true|false>
+  cd "$STATE_REPO"
+  if git diff --quiet -- "$REL_JSON" "$REL_HTML"; then
+    echo "pm: board already current — nothing to commit"; return 0
+  fi
+  git --no-pager diff --stat -- "$REL_JSON" "$REL_HTML"
+  if [ "$2" = true ]; then
+    echo "pm: --dry-run — not committing. The rebuilt board is in your working tree:"
+    echo "      approve:  allod pm commit    (re-render + commit + push)"
+    echo "      discard:  allod pm discard   (revert pm.json + pm.html)"
+    return 0
+  fi
+  git add "$REL_JSON" "$REL_HTML"
+  git commit -m "$1"
+  if [ "$3" = true ]; then git push; fi
+  echo "pm: board updated"
+}
+
+cmd="${1:-}"; shift || true
+push=true; dryrun=false; assistant=""
+for a in "$@"; do case "$a" in
+  --no-push) push=false ;;
+  --dry-run) dryrun=true ;;
+  --claude|--codex)
+    requested_assistant="${a#--}"
+    if [ -n "$assistant" ] && [ "$assistant" != "$requested_assistant" ]; then
+      echo "pm: choose only one of --claude or --codex" >&2; exit 2
+    fi
+    assistant="$requested_assistant" ;;
+  *) echo "pm: unknown option: $a (try 'pm help')" >&2; exit 2 ;;
+esac; done
+
+case "$cmd" in
+  ""|help|-h|--help)
+    usage ;;
+  refresh)
+    [ -n "$assistant" ] && { echo "pm: --claude/--codex applies to 'pm groom', not 'refresh'" >&2; exit 2; }
+    [ "$dryrun" = true ] && { echo "pm: --dry-run applies to 'pm groom', not 'refresh'" >&2; exit 2; }
+    validate; render_board
+    commit_board "pm: refresh board $(date -u +%Y-%m-%dT%H:%MZ)" false "$push" ;;
+  groom)
+    [ -n "$assistant" ] || { echo "pm: groom requires --claude or --codex" >&2; exit 2; }
+    command -v yolo >/dev/null 2>&1 || { echo "pm: groom needs 'yolo' on PATH" >&2; exit 1; }
+    # pass only the fenced prompt body — the YAML frontmatter would be parsed as CLI flags
+    prompt="$(awk '/^```/{f=!f; next} f' "$PM_DIR/skills/pm-groom/SKILL.md" \
+      | sed \
+        -e "s|notes/allod/pm/pm.json|$PMJSON|g" \
+        -e "s|pm-state/pm.json|$PMJSON|g" \
+        -e "s|notes/allod/pm/triage-policy.md|$STATE_REPO/triage-policy.md|g" \
+        -e "s|pm-state/triage-policy.md|$STATE_REPO/triage-policy.md|g" \
+        -e "s|pm-state/pm.html|$PMHTML|g" \
+        -e "s|notes/allod/pm/integrity-check|$PM_DIR/integrity-check|g" \
+        -e "s|notes/allod/pm/render|$PM_DIR/render|g")"
+    echo "== groom (yolo $assistant) — surveying the backlog, usually a few minutes... =="
+    glog="$(mktemp)"
+    case "$assistant" in
+      claude) yolo claude -p "$prompt" >"$glog" 2>&1 & ;;
+      codex) yolo codex exec --skip-git-repo-check "$prompt" >"$glog" 2>&1 & ;;
+    esac
+    gpid=$!; t0=$SECONDS; spin='|/-\'; si=0
+    while kill -0 "$gpid" 2>/dev/null; do
+      if [ -t 1 ]; then printf '\r  %s grooming...  %ds ' "${spin:$si:1}" "$((SECONDS-t0))"; fi
+      si=$(((si+1)%4)); sleep 0.5
+    done
+    grc=0; wait "$gpid" || grc=$?
+    if [ -t 1 ]; then printf '\r%*s\r' 44 ''; fi
+    if [ "$grc" -ne 0 ]; then
+      echo "pm: groom failed after $((SECONDS-t0))s (exit $grc). Agent output:" >&2
+      sed 's/^/  | /' "$glog" >&2; rm -f "$glog"; exit 1
+    fi
+    echo "  groom finished in $((SECONDS-t0))s. Report:"
+    sed 's/^/  | /' "$glog"; rm -f "$glog"
+    validate; render_board
+    commit_board "pm: groom board $(date -u +%Y-%m-%dT%H:%MZ)" "$dryrun" "$push" ;;
+  commit)
+    [ -n "$assistant" ] && { echo "pm: --claude/--codex applies to 'pm groom', not 'pm commit'" >&2; exit 2; }
+    [ "$dryrun" = true ] && { echo "pm: --dry-run does not apply to 'pm commit'" >&2; exit 2; }
+    validate; render_board
+    commit_board "pm: update board $(date -u +%Y-%m-%dT%H:%MZ)" false "$push" ;;
+  discard)
+    [ -n "$assistant" ] && { echo "pm: --claude/--codex applies to 'pm groom', not 'pm discard'" >&2; exit 2; }
+    cd "$STATE_REPO"
+    if git diff --quiet -- "$REL_JSON" "$REL_HTML"; then
+      echo "pm: nothing to discard"
+    else
+      git checkout -- "$REL_JSON" "$REL_HTML"
+      echo "pm: discarded working-tree changes to pm.json + pm.html"
+    fi ;;
+  *)
+    echo "pm: unknown command: $cmd (try 'pm help')" >&2; exit 2 ;;
+esac
