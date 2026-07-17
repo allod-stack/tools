@@ -725,8 +725,9 @@ pr_find_by_head() {
   require_repo
   local head_branch="${POSITIONAL_ARGS[0]}"
   # Prints the PR number if an open PR exists for this head branch; prints nothing if not found.
-  api GET "/repos/$REPO/pulls?state=open&limit=50&head=$(urlencode "$head_branch")" \
-    | jq -r 'first(.[] | .number) // empty'
+  # The pulls list endpoint does not honor a head filter, so fetch open PRs and match head.ref here.
+  api GET "/repos/$REPO/pulls?state=open&limit=50" \
+    | jq -r --arg head "$head_branch" 'first(.[] | select(.head.ref == $head) | .number) // empty'
 }
 
 resolve_pr_target() {
@@ -757,8 +758,8 @@ resolve_pr_target() {
   fi
 
   require_repo
-  PR_NUMBER=$(api GET "/repos/$REPO/pulls?state=open&limit=50&head=$(urlencode "$target")" \
-    | jq -r 'first(.[] | .number) // empty')
+  PR_NUMBER=$(api GET "/repos/$REPO/pulls?state=open&limit=50" \
+    | jq -r --arg head "$target" 'first(.[] | select(.head.ref == $head) | .number) // empty')
   [[ -n "$PR_NUMBER" ]] || die "no open PR found for branch: $target"
 }
 

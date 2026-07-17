@@ -95,14 +95,10 @@ case "$url" in
   */api/v1/repos/acme/widget)
     printf '%s\n' '{"default_branch":"master"}'
     ;;
-  */api/v1/repos/acme/widget/pulls\?state=open\&limit=50\&head=topic)
-    printf '%s\n' '[{"number":31}]'
-    ;;
-  */api/v1/repos/acme/widget/pulls\?state=open\&limit=50\&head=*)
-    printf '%s\n' '[]'
-    ;;
   */api/v1/repos/acme/widget/pulls\?state=open\&limit=50)
-    printf '%s\n' '[{"number":12,"title":"Improve tool","user":{"login":"alice"},"head":{"label":"acme:topic"},"base":{"label":"master"}}]'
+    # The real pulls list endpoint ignores head/base filters and returns every open PR;
+    # the client matches head.ref itself. Two PRs with distinct heads exercise that path.
+    printf '%s\n' '[{"number":12,"title":"Improve tool","user":{"login":"alice"},"head":{"label":"acme:topic","ref":"topic"},"base":{"label":"master","ref":"master"}},{"number":31,"title":"Branch PR","user":{"login":"alice"},"head":{"label":"acme:feature","ref":"feature"},"base":{"label":"master","ref":"master"}}]'
     ;;
   */api/v1/repos/acme/widget/issues\?type=issues\&state=open\&limit=30)
     printf '%s\n' '[{"number":20,"title":"Fix backup","user":{"login":"bob"},"labels":[{"id":1,"name":"bug","color":"ff0000"}],"milestone":{"id":3,"title":"July batch"}}]'
@@ -132,7 +128,7 @@ case "$url" in
     ;;
   */api/v1/repos/acme/widget/pulls/31)
     if [[ "$method" == GET ]]; then
-      printf '%s\n' '{"title":"Branch PR","state":"open","body":"","user":{"login":"alice"},"head":{"label":"acme:topic","ref":"topic"},"base":{"label":"master","ref":"master"}}'
+      printf '%s\n' '{"title":"Branch PR","state":"open","body":"","user":{"login":"alice"},"head":{"label":"acme:feature","ref":"feature"},"base":{"label":"master","ref":"master"}}'
     else
       printf '%s\n' '{"html_url":"https://forge.example/acme/widget/pulls/31"}'
     fi

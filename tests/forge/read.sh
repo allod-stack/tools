@@ -24,7 +24,11 @@ assert_contains "$output" "Inline note" "shows inline comment body"
 
 reset_requests
 output=$(run_capture -R acme/widget pr find-by-head topic)
-assert_equal "$output" "31" "finds an open pull request by head branch"
+assert_equal "$output" "12" "finds an open pull request by its head branch"
+output=$(run_capture -R acme/widget pr find-by-head feature)
+assert_equal "$output" "31" "matches the head ref, not merely the first open PR"
+output=$(run_capture -R acme/widget pr find-by-head no-such-branch)
+assert_equal "$output" "" "returns nothing when no open PR has that head"
 
 reset_requests
 output=$(run_capture issue list)

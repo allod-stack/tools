@@ -28,9 +28,9 @@ assert_json 1 '. == {state: "closed"}' "sends the closed state for URL target"
 reset_requests
 run_ok pr close topic
 assert_equal "$(request_count)" "2" "branch close looks up the PR first"
-assert_request 1 GET "/api/v1/repos/acme/widget/pulls?state=open&limit=50&head=topic" \
-  "finds the PR by head branch"
-assert_request 2 PATCH "/api/v1/repos/acme/widget/pulls/31" \
+assert_request 1 GET "/api/v1/repos/acme/widget/pulls?state=open&limit=50" \
+  "lists open PRs to resolve the branch"
+assert_request 2 PATCH "/api/v1/repos/acme/widget/pulls/12" \
   "closes the PR found by branch lookup"
 assert_json 2 '. == {state: "closed"}' "sends the closed state for branch target"
 
@@ -66,11 +66,11 @@ assert_request 4 DELETE "/api/v1/repos/acme/widget/branches/topic" \
 reset_requests
 run_ok pr close topic -d
 assert_equal "$(request_count)" "4" "branch target with delete-branch makes four API requests"
-assert_request 1 GET "/api/v1/repos/acme/widget/pulls?state=open&limit=50&head=topic" \
+assert_request 1 GET "/api/v1/repos/acme/widget/pulls?state=open&limit=50" \
   "resolves branch name before fetching PR details"
-assert_request 2 GET "/api/v1/repos/acme/widget/pulls/31" \
+assert_request 2 GET "/api/v1/repos/acme/widget/pulls/12" \
   "fetches PR details for branch-resolved target"
-assert_request 3 PATCH "/api/v1/repos/acme/widget/pulls/31" \
+assert_request 3 PATCH "/api/v1/repos/acme/widget/pulls/12" \
   "closes the branch-resolved PR"
 assert_request 4 DELETE "/api/v1/repos/acme/widget/branches/topic" \
   "deletes the branch for branch-resolved target"
@@ -81,9 +81,9 @@ run_fail "no open PR found for branch" \
 
 reset_requests
 run_fail "no open PR found" \
-  "URL-encodes slashes in branch lookup" pr close "feat/sub"
-assert_request 1 GET "/api/v1/repos/acme/widget/pulls?state=open&limit=50&head=feat%2Fsub" \
-  "encodes slash as %2F in query parameter"
+  "reports no match for an unknown branch" pr close "feat/sub"
+assert_request 1 GET "/api/v1/repos/acme/widget/pulls?state=open&limit=50" \
+  "lists open PRs when resolving a slashed branch name"
 
 reset_requests
 run_ok pr close 99 -d
