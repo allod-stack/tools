@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# allod pm — manage the Allod PM board (a pm.json overlay rendered to pm.html, committed to vnprc/pm-state).
+# allod pm — manage the Allod PM board (a pm.json overlay rendered to pm.html, committed to a separate pm-state repo).
 #
 #   allod pm                  show this help
 #   allod pm refresh [--no-push]
@@ -23,7 +23,7 @@ PM_DIR="$(unset CDPATH; cd -- "$(dirname -- "$0")" && pwd)"
 STATE_DIR="${ALLOD_PM_DIR:-${WORK_DIR:-$HOME/work}/pm-state}"
 STATE_REPO="$(git -C "$STATE_DIR" rev-parse --show-toplevel 2>/dev/null)" || {
   echo "pm: state checkout not found: $STATE_DIR" >&2
-  echo "pm: clone vnprc/pm-state or set ALLOD_PM_DIR" >&2
+  echo "pm: clone your pm-state repo to that path, or set ALLOD_PM_DIR" >&2
   exit 1
 }
 PMJSON="$STATE_REPO/pm.json"; PMHTML="$STATE_REPO/pm.html"

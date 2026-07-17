@@ -31,7 +31,7 @@ Example `pull-all --switch` output:
 ```
   allod/tools            pulled     [master]
   allod/vm                  up to date [master]
-  hashpool                  skipped    [on agent/my-feature — 2 unpushed commits]
+  my-project                skipped    [on agent/my-feature — 2 unpushed commits]
   allod/nexus               up to date [master]
   allod/profiles            pulled     [master]
 ```
