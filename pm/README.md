@@ -28,7 +28,8 @@ These files are the **tool** and carry no board data. The board **state**
 | `render` | `(pm.json + forge issue data) -> pm.html`. Self-contained, inline `<style>`, no `<script>`, no external URLs (the forge serves committed `.html` in a sandboxed, JS-free iframe). Live mode fetches each referenced issue's title + state from the forge with the `forge` token, HTML-escaping all of it; `--issue-snapshot <file>` reads from a fixed JSON snapshot instead for byte-deterministic runs. Exits non-zero on any dangling ref. |
 | `integrity-check` | Validates `pm.json` against the schema (`check-jsonschema`), resolves every `owner/repo#num` ref on the forge (non-zero on a dangling ref), asserts overlay purity, warns on orphans. |
 | `pm.schema.json` | JSON Schema for `pm.json`. Enforces overlay purity structurally: string-only issue refs, `additionalProperties: false`, no cached issue-fact fields. |
-| `skills/pm-groom/SKILL.md` | The steady-state, read-only groom prompt. Applies `triage-policy.md`, writes only `pm.json`. Hard-stops if `triage-policy.md` is absent. |
+| `skills/pm-groom/SKILL.md` | The steady-state, read-only groom prompt. Applies `triage-policy.md`, writes only `pm.json`, and reports per-issue hygiene recommendations (relevance/completion/correct-repo/quality) as the run's primary output. Hard-stops if `triage-policy.md` is absent. |
+| `skills/pm-issue-review/SKILL.md` | Supervised, mutating per-issue review prompt — the executor for the groom's recommendations. Rewrites/refiles/closes issues with per-action human approval. Interactive/attended only; never wired into the unattended `groom` path. |
 | `fixtures/` | Hermetic render + validation fixtures (one hostile title proves HTML escaping). |
 
 ## Overlay shape

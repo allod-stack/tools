@@ -1,6 +1,6 @@
 ---
 name: pm-groom
-description: Steady-state, READ-ONLY project-manager groom. Surveys the configured Forgejo repos, applies pm-state/triage-policy.md, and writes/updates pm-state/pm.json. Writes nothing to the forge and caches no issue facts. Run after Stage 0 (pm-cleanup) has produced the seed pm.json + triage-policy.md.
+description: Steady-state, READ-ONLY project-manager groom. Surveys the configured Forgejo repos, applies pm-state/triage-policy.md, writes/updates pm-state/pm.json, and reports per-issue hygiene recommendations (relevance/completion/correct-repo/quality) as the run's primary output. Writes nothing to the forge and caches no issue facts. Run after Stage 0 (pm-cleanup) has produced the seed pm.json + triage-policy.md.
 ---
 
 # pm-groom — steady-state read-only PM groom
@@ -15,6 +15,9 @@ cleanup (`notes/allod/pm-cleanup-prompt.md`). Stage 0 mutates the forge (labels,
 milestones, dependencies, state) with a human approving each batch and leaves the
 seed `pm.json` + `triage-policy.md`. This groom does neither: it is **read-only on
 the forge** and only regenerates the `pm.json` overlay from current forge state.
+Acting on any recommendation it surfaces — closing, refiling, or rewriting an
+issue — is the separate, interactive **pm-issue-review** skill; the groom itself
+never mutates the forge.
 
 ## Prompt
 
@@ -65,7 +68,28 @@ Process:
    closed), PRs, labels, milestones, and native Depends-on/Blocks edges. Paginate;
    do not assume one page. Build a current-state model in memory - do not write it
    to pm.json as cached facts.
-2. Apply triage-policy.md:
+2. Per-issue hygiene review (READ-ONLY). For each OPEN issue - using the survey
+   model, and only when completion is in question the referenced code and merged
+   PRs - assess four things and record the outcome:
+   - Still relevant? Check the world, not just the issue text: is its anchor/
+     blocking work done, do the files/scripts it names still exist, has another
+     issue superseded it?
+   - Already done? Verify against code and merged PRs, NOT the tracker's open
+     state; treat scrubbed or rewritten git history as unreliable and read the
+     actual files (cite path:line). Distinguish adjacent work that landed from
+     THIS issue's work.
+   - In the right repo? Apply the cross-tracker convention in triage-policy.md:
+     public framework work belongs in the allod org, private implementation in the
+     fork. Flag misfiles.
+   - Well-formed? Does the body match the issue-writing shape (allod/memory
+     issue-writing.md): a plain one-sentence opener, primary-goals bullets,
+     technical detail, scope - and NOT a "user story / So that I can" preamble?
+     Flag ones that need a rewrite.
+   Keep this read-only: carry the findings into the final report (step 6), where
+   they are the primary output. Optionally park a deferred item under
+   decisions_pending. NEVER touch the forge here - closing/refiling/rewriting is
+   the supervised, interactive pm-issue-review skill, not the groom.
+3. Apply triage-policy.md:
    - Rank issues into the ordered "priority" array (array position = rank; "tier"
      is the coarse bucket P0..P3; "note" is optional short rationale).
    - Group multi-step work into "plans" (id, optional title/goal/status) with
@@ -74,7 +98,7 @@ Process:
      derived from native Forgejo dependencies and/or the policy.
    - Carry forward or add "decisions_pending" ({id, q, optional issue}) for
      anything needing a human ruling.
-3. Write pm-state/pm.json:
+4. Write pm-state/pm.json:
    - Set "schema": 1 and refresh "updated" (RFC3339).
    - Keep "repos" as the managed list.
    - Refs are owner/repo#num STRINGS. No title/body/state/status/assignee anywhere
@@ -82,15 +106,24 @@ Process:
      (overlay-authored, not forge facts).
    - Preserve human-authored notes/decisions where still applicable; drop entries
      whose issues are gone or resolved per policy.
-4. Validate before finishing. Run:
+5. Validate before finishing. Run:
      notes/allod/pm/integrity-check pm-state/pm.json
    It must pass (schema valid, every ref resolves on the forge, overlay pure).
    Orphans are reported as warnings - fold genuinely un-planned issues into a plan
    or note them; leave deliberately-untracked ones as warnings.
-5. Report (final message): what changed in pm.json (plans/priorities/gates added,
-   moved, or removed), any newly dangling or newly orphaned issues, any gate that
-   is now unblocked, and any decision that needs a human. Do NOT include a forge
-   diff - you made no forge writes.
+6. Report (final message) - THIS IS THE PRIMARY OUTPUT of the run. Lead with the
+   per-issue hygiene review (step 2) as a NUMBERED list the human can act on. For
+   each flagged issue give:
+   - the ref (owner/repo#num) + a one-line verdict (still-relevant? / looks-done /
+     misfiled / needs-rewrite),
+   - the evidence (merged PR, path:line, superseding issue, board signal),
+   - the recommended action (keep / close-as-done / close-as-superseded /
+     refile-to-<public-repo> / rewrite-to-issue-writing-shape).
+   Number them so the human can approve, decline, or dig into each; acting on them
+   is the interactive pm-issue-review skill, not this run. THEN, secondarily,
+   summarize what changed in pm.json (plans/priorities/gates added, moved, or
+   removed), any newly dangling or newly orphaned issues, and any gate that is now
+   unblocked. Do NOT include a forge diff - you made no forge writes.
 
 Begin with the survey. If pm-state/triage-policy.md is missing, stop and say
 so. Confirm the repo list from pm.json before surveying.
@@ -101,6 +134,10 @@ so. Confirm the repo list from pm.json before surveying.
 - The groom's read-only contract is verified by acceptance test 6 in
   `notes/allod/pm-groom-render-dev-plan.md`: snapshot issue metadata before and
   after a run and diff - any difference means the groom wrote to the forge.
+- The per-issue hygiene recommendations are surfaced in the final report ONLY;
+  acting on them (close/refile/rewrite) is the separate, interactive
+  `pm-issue-review` skill, which runs attended and writes to the forge. The groom
+  itself never mutates.
 - `triage-policy.md` is a Stage 0 output; this groom consumes it and never edits
   it. Policy changes are a human/Stage-0 activity.
 - After the groom writes `pm.json`, render the board with
