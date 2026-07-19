@@ -114,16 +114,22 @@ Process:
 6. Report (final message) - THIS IS THE PRIMARY OUTPUT of the run. Lead with the
    per-issue hygiene review (step 2) as a NUMBERED list the human can act on. For
    each flagged issue give:
-   - the ref (owner/repo#num) + a one-line verdict (still-relevant? / looks-done /
-     misfiled / needs-rewrite),
+   - the ref as a CLICKABLE link - a markdown link like
+     [owner/repo#num](https://forge.anarch.diy/<owner>/<repo>/issues/<num>)
+     (use .../pulls/<num> for a PR) so the terminal/harness linkifies it and the
+     human can jump straight to the issue - plus a one-line verdict
+     (still-relevant? / looks-done / misfiled / needs-rewrite),
    - the evidence (merged PR, path:line, superseding issue, board signal),
    - the recommended action (keep / close-as-done / close-as-superseded /
      refile-to-<public-repo> / rewrite-to-issue-writing-shape).
    Number them so the human can approve, decline, or dig into each; acting on them
-   is the interactive pm-issue-review skill, not this run. THEN, secondarily,
-   summarize what changed in pm.json (plans/priorities/gates added, moved, or
-   removed), any newly dangling or newly orphaned issues, and any gate that is now
-   unblocked. Do NOT include a forge diff - you made no forge writes.
+   is the interactive pm-issue-review skill, not this run. Render EVERY issue/PR
+   reference in the report as such a clickable forge link - this applies to the
+   report only; pm.json keeps bare owner/repo#num strings per the overlay rule.
+   THEN, secondarily, summarize what changed in pm.json (plans/priorities/gates
+   added, moved, or removed), any newly dangling or newly orphaned issues, and any
+   gate that is now unblocked. Do NOT include a forge diff - you made no forge
+   writes.
 
 Begin with the survey. If pm-state/triage-policy.md is missing, stop and say
 so. Confirm the repo list from pm.json before surveying.

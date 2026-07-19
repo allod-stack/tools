@@ -69,7 +69,9 @@ Per issue:
 
 Report (final message): per issue, the verdict, the action taken, the new ref if
 it moved, and every item still needing a human relay (allod-org pushes, the
-pm.json/board commit).
+pm.json/board commit). Render every issue/PR reference as a CLICKABLE link - a
+markdown link like [owner/repo#num](https://forge.anarch.diy/<owner>/<repo>/issues/<num>)
+(.../pulls/<num> for a PR) - so the human can jump straight to it.
 
 Begin by confirming the list of issues to review, and read triage-policy.md and
 the issue-writing guidance first. If a requested issue does not exist or is
