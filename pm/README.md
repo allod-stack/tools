@@ -14,7 +14,8 @@ These files are the **tool** and carry no board data. The board **state**
 | Command | What |
 |---|---|
 | `allod pm refresh` | Re-render `pm.html` from `pm.json` + live forge state and commit. No LLM; freshens issue titles and open/closed state for issues already on the board, but does not add or drop issues. |
-| `allod pm groom (--claude\|--codex) [--dry-run]` | Rebuild `pm.json` from current forge state (add new issues, drop closed, re-prioritize) via the `pm-groom` subagent, then re-render and commit. `--dry-run` leaves the rebuild uncommitted for review (`allod pm commit` / `allod pm discard`). |
+| `allod pm groom (--claude\|--codex) [--dry-run]` | Rebuild `pm.json` from current forge state (add new issues, drop closed, re-prioritize) via the `pm-groom` subagent, then re-render and commit. `--dry-run` leaves the rebuild uncommitted for review (`allod pm commit` / `allod pm discard`). Saves its per-issue findings to `pm-review.md` for `allod pm review`. |
+| `allod pm review (--claude\|--codex)` | Promote the last groom's findings to an INTERACTIVE action session (the `pm-issue-review` skill): rewrite/refile/close flagged issues with per-write approval. Reads `pm-review.md`; attended only; defaults to `--claude`. |
 | `allod pm commit` | Commit pending working-tree board changes — an approved dry-run groom, or a hand-edit of `pm.json`. |
 | `allod pm discard` | Revert working-tree changes to `pm.json` + `pm.html`. |
 

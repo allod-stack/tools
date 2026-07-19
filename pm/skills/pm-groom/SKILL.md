@@ -143,7 +143,9 @@ so. Confirm the repo list from pm.json before surveying.
 - The per-issue hygiene recommendations are surfaced in the final report ONLY;
   acting on them (close/refile/rewrite) is the separate, interactive
   `pm-issue-review` skill, which runs attended and writes to the forge. The groom
-  itself never mutates.
+  itself never mutates. The `allod pm` wrapper saves this report to
+  `pm-state/pm-review.md`, and `allod pm review` promotes it straight into an
+  interactive `pm-issue-review` session with those findings as context.
 - `triage-policy.md` is a Stage 0 output; this groom consumes it and never edits
   it. Policy changes are a human/Stage-0 activity.
 - After the groom writes `pm.json`, render the board with

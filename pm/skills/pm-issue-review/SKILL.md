@@ -42,6 +42,9 @@ Hard rules (non-negotiable):
 Inputs:
 - The issues to review: the refs the human names (typically from a pm-groom
   report), or a human-given list.
+- The groom's findings, when promoted from a groom run (e.g. `allod pm review`
+  seeds this session with the saved pm-review.md): ingest them as LEADS that focus
+  the review, NOT as proof - re-verify each per the Per-issue step before any write.
 - pm-state/triage-policy.md - the cross-tracker convention (public framework ->
   allod org, private implementation -> the fork) and priority tiers.
 - allod/memory issue-writing.md - the issue-writing shape (plain one-sentence

@@ -12,6 +12,11 @@
 #                            and commit. An LLM run; choose the harness explicitly with --claude
 #                            or --codex. --dry-run: rebuild + render + show the diff but leave it
 #                            uncommitted (review, then 'allod pm commit' or 'allod pm discard').
+#   allod pm review (--claude|--codex)
+#                            promote the LAST groom's findings to an INTERACTIVE action session
+#                            (the pm-issue-review skill): rewrite/refile/close the flagged issues
+#                            with your approval for each forge write. Reads pm-review.md saved by
+#                            the last groom. Attended only; defaults to --claude.
 #   allod pm commit [--no-push]
 #                            commit the pending working-tree board changes — e.g. a groom you
 #                            approved after 'allod pm groom --dry-run', or a hand-edit of pm.json.
@@ -29,7 +34,7 @@ STATE_REPO="$(git -C "$STATE_DIR" rev-parse --show-toplevel 2>/dev/null)" || {
 PMJSON="$STATE_REPO/pm.json"; PMHTML="$STATE_REPO/pm.html"
 REL_JSON="pm.json"; REL_HTML="pm.html"
 
-usage() { sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next}{exit}' "$0"; }
 
 validate() { echo "== integrity-check =="; "$PM_DIR/integrity-check" "$PMJSON"; }
 
@@ -112,9 +117,37 @@ case "$cmd" in
       sed 's/^/  | /' "$glog" >&2; rm -f "$glog"; exit 1
     fi
     echo "  groom finished in $((SECONDS-t0))s. Report:"
-    sed 's/^/  | /' "$glog"; rm -f "$glog"
+    sed 's/^/  | /' "$glog"
+    cp "$glog" "$STATE_REPO/pm-review.md"; rm -f "$glog"
+    echo "  findings saved to $STATE_REPO/pm-review.md"
+    echo "  -> promote to an interactive action session with: allod pm review [--claude|--codex]"
     validate; render_board
     commit_board "pm: groom board $(date -u +%Y-%m-%dT%H:%MZ)" "$dryrun" "$push" ;;
+  review)
+    [ "$dryrun" = true ] && { echo "pm: --dry-run does not apply to 'pm review'" >&2; exit 2; }
+    review_file="$STATE_REPO/pm-review.md"
+    [ -s "$review_file" ] || { echo "pm: no groom findings at $review_file — run 'allod pm groom --claude|--codex' first" >&2; exit 1; }
+    asst="${assistant:-claude}"
+    command -v "$asst" >/dev/null 2>&1 || { echo "pm: 'pm review' needs '$asst' on PATH" >&2; exit 1; }
+    # pass only the fenced prompt body — the YAML frontmatter would be parsed as CLI flags
+    skill="$(awk '/^```/{f=!f; next} f' "$PM_DIR/skills/pm-issue-review/SKILL.md" \
+      | sed \
+        -e "s|pm-state/pm.json|$PMJSON|g" \
+        -e "s|pm-state/triage-policy.md|$STATE_REPO/triage-policy.md|g" \
+        -e "s|allod/memory issue-writing.md|${WORK_DIR:-$HOME/work}/allod-memory/issue-writing.md|g")"
+    seed="$skill
+
+--- Groom findings (context to ingest — treat as leads, re-verify before any write) ---
+
+$(cat "$review_file")
+
+--- Task ---
+Act on the flagged issues above one at a time, waiting for my approval before each forge write. Begin by listing them and asking which to take first."
+    echo "== review ($asst, interactive) — promoting the last groom's findings to an action session =="
+    case "$asst" in
+      claude) exec claude "$seed" ;;
+      codex)  exec codex "$seed" ;;
+    esac ;;
   commit)
     [ -n "$assistant" ] && { echo "pm: --claude/--codex applies to 'pm groom', not 'pm commit'" >&2; exit 2; }
     [ "$dryrun" = true ] && { echo "pm: --dry-run does not apply to 'pm commit'" >&2; exit 2; }
