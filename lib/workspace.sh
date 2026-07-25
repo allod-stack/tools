@@ -17,9 +17,15 @@ workspace_collect_repos() {
     return
   fi
 
-  local sub
-  for sub in "$dir"/*/; do
+  local sub base
+  for sub in "$dir"/*/ "$dir"/.[!.]*/ "$dir"/..?*/; do
     [[ -d "$sub" ]] || continue
+    sub="${sub%/}"
+    base="${sub##*/}"
+    [[ "$base" == ".git" ]] && continue
+    if [[ "$base" == .* ]] && ! workspace_is_repo_root "$sub"; then
+      continue
+    fi
     workspace_collect_repos "$work_dir" "$sub"
   done
 }

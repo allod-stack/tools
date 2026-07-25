@@ -9,7 +9,7 @@ export HOME="$TMP/home"
 export MOCK_LOG="$TMP/git.log"
 mkdir -p "$HOME/work/.git" "$HOME/work/group/nested" "$TMP/bin"
 
-for repo in clean dirty local unpushed switched pull-fail group/nested/repo; do
+for repo in clean dirty local unpushed switched pull-fail group/nested/repo .profile .cache/ignored; do
   mkdir -p "$HOME/work/$repo/.git"
   : > "$HOME/work/$repo/.git/HEAD"
 done
@@ -185,6 +185,10 @@ assert_output_contains "pull-fail                 error      [pull failed: netwo
   "default: reports the first line of a pull failure"
 assert_output_contains "group/nested/repo         pulled     [master]" \
   "default: discovers and pulls a nested repository"
+assert_output_contains ".profile                  up to date [master]" \
+  "default: discovers and pulls a dot-named repository"
+assert_log_not_contains $'^ignored\t' \
+  "default: does not recurse through a dot-named non-repo directory"
 
 assert_log_not_contains $'^(local|unpushed|switched)\tcheckout' \
   "default: never checks out non-default branches"
@@ -210,6 +214,8 @@ assert_output_contains "pull-fail                 error      [pull failed: netwo
   "--switch: reports the first line of a pull failure"
 assert_output_contains "group/nested/repo         pulled     [master]" \
   "--switch: discovers and pulls a nested repository"
+assert_output_contains ".profile                  up to date [master]" \
+  "--switch: discovers and pulls a dot-named repository"
 
 assert_log_contains $'switched\tcheckout master' \
   "--switch: checks out the default branch before pulling"
@@ -217,6 +223,8 @@ assert_log_contains $'switched\tpull' \
   "--switch: pulls after switching branches"
 assert_log_contains $'repo\tpull' \
   "--switch: pulls a recursively discovered repository"
+assert_log_contains $'.profile\tpull' \
+  "--switch: pulls a dot-named repository"
 
 assert_log_not_contains $'^(dirty|local|unpushed)\tpull$' \
   "--switch: never pulls repositories that were skipped"

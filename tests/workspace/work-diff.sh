@@ -7,7 +7,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 export HOME="$TMP/home"
 WORK="$HOME/work"
-mkdir -p "$WORK/.git" "$WORK/group"
+mkdir -p "$WORK/.git" "$WORK/group" "$WORK/.cache"
 
 init_repo() {
   local dir="$1"
@@ -22,6 +22,8 @@ init_repo() {
 init_repo "$WORK/clean"
 init_repo "$WORK/changed"
 init_repo "$WORK/group/nested"
+init_repo "$WORK/.profile"
+init_repo "$WORK/.cache/ignored"
 
 printf 'staged\n' > "$WORK/changed/staged.txt"
 git -C "$WORK/changed" add staged.txt
@@ -73,6 +75,8 @@ assert_contains "$output" "+staged" "renders staged diff content"
 assert_contains "$output" "--- unstaged ---" "labels the unstaged diff section"
 assert_contains "$output" "+unstaged" "renders unstaged diff content"
 assert_contains "$output" "group/nested  [master]" "recursively discovers a nested repository"
+assert_contains "$output" ".profile  [master]" "discovers a dot-named repository"
+assert_not_contains "$output" ".cache/ignored" "does not recurse through a dot-named non-repo directory"
 
 embedded="$TMP/work-diff-embedded"
 {
@@ -82,6 +86,8 @@ embedded="$TMP/work-diff-embedded"
 embedded_output=$(bash "$embedded")
 assert_contains "$embedded_output" "group/nested  [master]" \
   "works when the shared library is embedded by Nix packaging"
+assert_contains "$embedded_output" ".profile  [master]" \
+  "embedded library discovers a dot-named repository"
 
 target=$(bash "$ROOT/workspace/work-diff" changed)
 assert_contains "$target" "changed  [master]" "shows the requested repository in targeted mode"

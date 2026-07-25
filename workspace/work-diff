@@ -49,20 +49,11 @@ show_repo() {
     [[ -n "$unstaged" ]] && printf '\n--- unstaged ---\n%s\n' "$unstaged"
 }
 
-walk() {
-    local dir="${1%/}"
-    if workspace_is_repo_root "$dir"; then
-        show_repo "$dir"
-        return
-    fi
-    for sub in "$dir"/*/; do
-        [[ -d "$sub" ]] || continue
-        walk "$sub"
-    done
-}
-
 show_all() {
-    walk "$WORK_DIR"
+    local repo
+    while IFS= read -r repo; do
+        show_repo "$WORK_DIR/$repo"
+    done < <(workspace_collect_repos "$WORK_DIR")
 }
 
 case "${1:-}" in
