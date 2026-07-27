@@ -134,7 +134,7 @@ case "$cmd" in
       | sed \
         -e "s|pm-state/pm.json|$PMJSON|g" \
         -e "s|pm-state/triage-policy.md|$STATE_REPO/triage-policy.md|g" \
-        -e "s|allod/memory issue-writing.md|${WORK_DIR:-$HOME/work}/allod-memory/issue-writing.md|g")"
+        -e "s|allod/memory issue-writing.md|${WORK_DIR:-$HOME/work}/allod/memory/issue-writing.md|g")"
     seed="$skill
 
 --- Groom findings (context to ingest — treat as leads, re-verify before any write) ---
