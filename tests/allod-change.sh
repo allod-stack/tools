@@ -117,7 +117,9 @@ init_repo() {
 init_repo_no_origin_head() {
   local repo="$1" branch="${2:-master}"
   init_repo "$repo" "$branch"
-  git -C "$repo" remote set-head origin -d >/dev/null 2>&1
+  # Silent on success; a failure here must be legible rather than swallowed,
+  # since the fixture it builds is the whole point of the test that uses it.
+  git -C "$repo" remote set-head origin -d
 }
 
 init_repo_no_remote() {
@@ -369,7 +371,6 @@ repo="$HOME/work/begin-protected-no-desc"
 init_repo "$repo" main
 protect_repo "$repo" main
 capture bash "$ALLOD" change begin "$repo"
-[[ "$CAPTURE_STATUS" -ne 0 ]] || fail "begin requires -d on protected repo" "$CAPTURE_OUTPUT"
 assert_status 1 "begin requires -d on protected repo"
 assert_contains "$CAPTURE_OUTPUT" "requires -d" "begin missing -d explains failure"
 
