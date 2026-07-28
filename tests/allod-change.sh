@@ -845,10 +845,26 @@ assert_status 1 "record rejects --files followed by another option"
 assert_contains "$CAPTURE_OUTPUT" "requires a value" "record names --files as missing its value before an option"
 capture record_in_repo "$repo" -m "no paths" -f
 assert_status 1 "record rejects a trailing -f with no path"
-capture record_in_repo "$repo" -m "no paths" --
-assert_status 1 "record rejects a bare -- with no path"
 assert_equal "$(git -C "$repo" rev-parse HEAD)" "$head_before" \
-  "record commits nothing when a path list is empty"
+  "record commits nothing when an option is missing its value"
+
+# A bare '--' ends option parsing and names nothing. Unlike an option missing
+# its value, that is not an error: it leaves the 'git add -u' default in force,
+# exactly as omitting the file flags entirely would.
+repo="$HOME/work/record-bare-dashdash"
+init_repo "$repo" master
+git -C "$repo" checkout -q -b bare-dashdash
+printf 'one\n' > "$repo/file1.txt"
+printf 'two\n' > "$repo/file2.txt"
+git -C "$repo" add file1.txt file2.txt
+git -C "$repo" commit -qm "add tracked files"
+printf 'one changed\n' > "$repo/file1.txt"
+printf 'two changed\n' > "$repo/file2.txt"
+capture record_in_repo "$repo" -m "bare dashdash" --
+assert_status 0 "record accepts a bare -- with no path"
+files=$(changed_files_in_head "$repo")
+assert_contains "$files" "file1.txt" "bare -- falls back to add -u for the first file"
+assert_contains "$files" "file2.txt" "bare -- falls back to add -u for the second file"
 
 # '--' ends option parsing, so a path that begins with '-' is still reachable.
 repo="$HOME/work/record-files-dash"

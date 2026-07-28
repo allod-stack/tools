@@ -546,9 +546,11 @@ change_record() {
         ;;
       --)
         # record takes no positional arguments, so everything past '--' is a
-        # path. Refusing an empty list keeps it from falling back to 'add -u'.
+        # path. A bare '--' names nothing and is a no-op, per convention: it
+        # ends option parsing rather than requiring an operand. Naming no file
+        # by any route leaves the 'git add -u' default below, same as omitting
+        # the flags entirely.
         shift
-        [[ $# -gt 0 ]] || die 1 "-- requires at least one file"
         files+=("$@")
         break
         ;;
