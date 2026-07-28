@@ -122,6 +122,28 @@ init_repo_no_origin_head() {
   git -C "$repo" remote set-head origin -d
 }
 
+# A repo carrying a committed submodule. 'begin' leaves the submodule
+# unpopulated, which removes fine; populating it is what 'git worktree remove'
+# refuses, so both states are exercised.
+init_repo_with_submodule() {
+  local repo="$1" branch="${2:-master}" sub="$TMP/submodule-source-$((repo_number + 1))"
+  git init -q -b "$branch" "$sub"
+  git -C "$sub" config user.name "Test User"
+  git -C "$sub" config user.email "test@example.invalid"
+  printf 'sub\n' > "$sub/sub.txt"
+  git -C "$sub" add sub.txt
+  git -C "$sub" commit -qm "submodule initial"
+
+  init_repo "$repo" "$branch"
+  git -C "$repo" -c protocol.file.allow=always submodule add -q "$sub" vendor
+  git -C "$repo" commit -qm "add submodule"
+  git -C "$repo" push -q origin "$branch"
+}
+
+populate_submodules() {
+  git -C "$1" -c protocol.file.allow=always submodule update --init -q
+}
+
 init_repo_no_remote() {
   local repo="$1" branch="${2:-master}"
   mkdir -p "$(dirname "$repo")"
@@ -558,7 +580,7 @@ desc="${RUN_ID}-rows"
 path=$(begin_worktree "$desc" "$repo")
 capture bash "$ALLOD" change list "$repo"
 assert_status 0 "list exits 0 with a worktree present"
-assert_equal "$(printf '%s\n' "$CAPTURE_OUTPUT" | wc -l)" "1" "list prints one row per linked worktree"
+assert_equal "$(printf '%s' "$CAPTURE_OUTPUT" | grep -c .)" "1" "list prints one row per linked worktree"
 assert_equal "$CAPTURE_OUTPUT" "$(printf 'list-rows\t%s\tagent/%s\tclean' "$path" "$desc")" \
   "list row carries repo, path, branch, and state"
 
@@ -608,6 +630,24 @@ assert_list_matches_cleanup "$repo" "$path" locked "a locked worktree"
 git -C "$repo" worktree unlock "$path"
 assert_list_matches_cleanup "$repo" "$path" clean "the same worktree once unlocked"
 
+# 'git worktree remove' refuses a populated submodule, which is a sixth cleanup
+# blocker beyond the five the dev plan enumerates. The unpopulated case is the
+# one begin itself produces, so it must keep reporting clean.
+sub_repo="$HOME/work/list-submodule"
+init_repo_with_submodule "$sub_repo" master
+
+desc="${RUN_ID}-state-sub-unpopulated"
+path=$(begin_worktree "$desc" "$sub_repo")
+assert_equal "$(git -C "$path" status --porcelain)" "" "an unpopulated submodule leaves a clean status"
+assert_list_matches_cleanup "$sub_repo" "$path" clean "a worktree whose submodule is unpopulated"
+
+desc="${RUN_ID}-state-sub-populated"
+path=$(begin_worktree "$desc" "$sub_repo")
+populate_submodules "$path"
+assert_equal "$(git -C "$path" status --porcelain)" "" \
+  "a populated submodule at its recorded commit leaves a clean status"
+assert_list_matches_cleanup "$sub_repo" "$path" submodule "a worktree with a populated submodule"
+
 # Precedence, one assertion per adjacent pair of the reporting order.
 
 repo="$HOME/work/list-precedence"
@@ -624,6 +664,12 @@ path=$(begin_worktree "$desc" "$repo")
 git -C "$path" checkout -q --detach
 printf 'dirty\n' > "$path/tracked.txt"
 assert_equal "$(list_state_for "$repo" "$path")" "detached" "list reports detached ahead of dirty"
+
+desc="${RUN_ID}-submodule-dirty"
+path=$(begin_worktree "$desc" "$sub_repo")
+populate_submodules "$path"
+printf 'dirty\n' > "$path/tracked.txt"
+assert_equal "$(list_state_for "$sub_repo" "$path")" "submodule" "list reports submodule ahead of dirty"
 
 desc="${RUN_ID}-dirty-unpushed"
 path=$(begin_worktree "$desc" "$repo")

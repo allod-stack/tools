@@ -46,7 +46,7 @@ is the in-place flow for committing to a repo's default branch.
 
 'list' prints one tab-separated row per linked worktree — repo, path, branch,
 state — where the state is the one thing standing between that worktree and
-'cleanup': prunable, locked, detached, dirty, unpushed, or clean.
+'cleanup': prunable, locked, detached, submodule, dirty, unpushed, or clean.
 EOF
 }
 
@@ -419,12 +419,34 @@ change_list_repo() {
   done < <(git -C "$main_repo" worktree list --porcelain 2>/dev/null; printf '\n')
 }
 
+# 'git worktree remove' refuses a worktree containing a populated submodule, so
+# that is a cleanup blocker like a lock is. A gitlink whose directory holds no
+# '.git' is unpopulated and removes fine — which is the state 'begin' itself
+# leaves behind, so this must not fire on every worktree of a repo that merely
+# has submodules.
+worktree_has_populated_submodule() {
+  local path="$1" entry sub
+  while IFS= read -r -d '' entry; do
+    case "$entry" in
+      '160000 '*) sub="${entry#*$'\t'}" ;;
+      *) continue ;;
+    esac
+    if [[ -e "$path/$sub/.git" ]]; then
+      return 0
+    fi
+  done < <(git -C "$path" ls-files --stage -z 2>/dev/null)
+  return 1
+}
+
 # The strongest blocker wins, which is deliberately not the order 'cleanup'
 # evaluates in: a locked and dirty worktree reports 'locked' while 'cleanup'
 # fails on the dirty check first. The binding contract is only that 'clean' is
-# reported exactly when 'cleanup' would succeed, so it is the negation of all
-# five of cleanup's refusal sources — a missing directory, a detached HEAD, a
-# dirty tree, unpushed commits, and a lock — not just the two it names.
+# reported exactly when 'cleanup' would succeed, so it is the negation of every
+# one of cleanup's refusal sources — a missing directory, a detached HEAD, a
+# populated submodule, a dirty tree, unpushed commits, and a lock — not just the
+# two it names. The dev plan enumerates five of those six; 'worktree remove'
+# also refuses populated submodules, which is loud and non-destructive when hit
+# but would otherwise be reported here as 'clean'.
 change_worktree_state() {
   local path="$1" prunable="$2" locked="$3" detached="$4"
   local state
@@ -435,6 +457,8 @@ change_worktree_state() {
     state=locked
   elif [[ "$detached" == true ]]; then
     state=detached
+  elif worktree_has_populated_submodule "$path"; then
+    state=submodule
   elif [[ -n "$(git -C "$path" status --porcelain 2>/dev/null)" ]]; then
     state=dirty
   elif has_unpushed_commits "$path"; then

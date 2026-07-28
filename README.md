@@ -88,15 +88,22 @@ dead agent from a working one.
 
 | State | Meaning | Reclaim |
 |---|---|---|
-| `prunable` | the directory is gone; only the admin entry is left | `git -C <repo> worktree prune` |
+| `prunable` | git can no longer reach the worktree through its admin entry | `git -C <repo> worktree prune` |
 | `locked` | held by `git worktree lock` | unlock, then reassess |
 | `detached` | HEAD is detached, so any commits there are unreachable by branch | create a branch at HEAD, then reassess |
+| `submodule` | a populated submodule is present, which `git worktree remove` refuses | deinit the submodules, then reassess |
 | `dirty` | uncommitted changes | commit or discard them |
 | `unpushed` | commits that exist nowhere else | `allod change record`, or handle them |
 | `clean` | nothing to lose | `allod change cleanup <path>` |
 
 Exactly one word is reported: the strongest blocker. `clean` is reported if and
 only if `allod change cleanup` on that path would succeed.
+
+`prunable` does not mean the directory is gone. It means the link between the
+worktree and the repo is broken — usually because the directory was deleted, but
+also when the directory survives and its `.git` file did not. `git worktree
+prune` clears the admin entry and never deletes a directory, so check what is
+left behind before removing it by hand: it may still hold uncommitted work.
 
 ### Updating a flake input
 
