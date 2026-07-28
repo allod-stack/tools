@@ -21,7 +21,7 @@ git-hooks/                git hook policy and setup
   protected-refs-policy   branch protection, signing, remote restrictions
   setup-tracked-hooks     hookspath setup from repository registry
 lib/                      shared shell libraries
-  workspace.sh            repo discovery and default-branch helpers
+  workspace.sh            repo, worktree, and default-branch helpers
 ```
 
 ## Documentation
@@ -36,6 +36,11 @@ lib/                      shared shell libraries
 `lib/workspace.sh` provides repo discovery and default-branch helpers used by
 `allod`, `pull-all`, `work-diff`, `flake-status`, and `flake-update-cascade`.
 It also sets `WORK_DIR` (defaults to `~/work/`, overridable via the environment).
+
+`workspace_collect_repos` returns exactly the checkouts under `WORK_DIR`, which
+is what the tools that mutate repos consume. `workspace_collect_worktrees`
+returns a repo's linked worktrees, wherever they are sited; only the read-only
+`work-diff` uses it.
 
 ## Workflow
 

@@ -22,12 +22,30 @@ init_repo() {
 init_repo "$WORK/clean"
 init_repo "$WORK/changed"
 init_repo "$WORK/group/nested"
+init_repo "$WORK/untracked"
 init_repo "$WORK/.profile"
 init_repo "$WORK/.cache/ignored"
 
 printf 'staged\n' > "$WORK/changed/staged.txt"
 git -C "$WORK/changed" add staged.txt
 printf 'base\nunstaged\n' > "$WORK/changed/file.txt"
+
+printf 'loose\n' > "$WORK/untracked/loose.txt"
+
+# Linked worktrees, sited outside the workspace the way agent worktrees are.
+WT="$TMP/worktrees"
+mkdir -p "$WT"
+
+git -C "$WORK/changed" worktree add -q -b agent/demo "$WT/demo"
+printf 'wt-staged\n' > "$WT/demo/wt-staged.txt"
+git -C "$WT/demo" add wt-staged.txt
+printf 'base\nfrom-worktree\n' > "$WT/demo/file.txt"
+
+git -C "$WORK/clean" worktree add -q --detach "$WT/detached"
+printf 'base\ndetached-edit\n' > "$WT/detached/file.txt"
+
+git -C "$WORK/group/nested" worktree add -q -b agent/gone "$WT/gone"
+rm -rf "$WT/gone"
 
 test_number=0
 
@@ -62,7 +80,13 @@ assert_not_contains() {
   fi
 }
 
-output=$(bash "$ROOT/workspace/work-diff")
+if output=$(bash "$ROOT/workspace/work-diff"); then
+  pass "renders every repo without aborting on an untracked-only working tree"
+else
+  fail "renders every repo without aborting on an untracked-only working tree" \
+    "work-diff exited non-zero; output:" "$output"
+fi
+
 assert_not_contains "$output" "$WORK  [" \
   "ignores an invalid .git marker at the workspace root"
 assert_contains "$output" "clean  [master]" "discovers a top-level clean repository"
@@ -77,6 +101,46 @@ assert_contains "$output" "+unstaged" "renders unstaged diff content"
 assert_contains "$output" "group/nested  [master]" "recursively discovers a nested repository"
 assert_contains "$output" ".profile  [master]" "discovers a dot-named repository"
 assert_not_contains "$output" ".cache/ignored" "does not recurse through a dot-named non-repo directory"
+assert_contains "$output" "untracked  [master]" "discovers a repository with only untracked changes"
+assert_contains "$output" "?? loose.txt" "shows untracked-only porcelain status"
+
+# --- Linked worktrees -------------------------------------------------------
+
+assert_contains "$output" "↳ worktree $WT/demo  [agent/demo]" \
+  "shows a linked worktree attributed to its branch"
+assert_contains "$output" "A  wt-staged.txt" "shows staged status from inside a worktree"
+assert_contains "$output" "+from-worktree" "renders uncommitted worktree changes"
+assert_contains "$output" "↳ worktree $WT/detached  [detached]" \
+  "labels a worktree with a detached HEAD"
+assert_contains "$output" "+detached-edit" "renders changes in a detached worktree"
+assert_not_contains "$output" "$WT/gone" \
+  "skips a worktree whose directory no longer exists"
+
+before_worktree="${output%%↳ worktree*}"
+assert_contains "$before_worktree" "changed  [master]" \
+  "nests a worktree under the repo that owns it"
+assert_not_contains "$before_worktree" "clean  [master]" \
+  "does not defer worktree output past the next repository"
+
+worktrees=$(bash -c 'source "$1"; workspace_collect_worktrees "$2"' _ \
+  "$ROOT/lib/workspace.sh" "$WORK/changed")
+assert_contains "$worktrees" "$WT/demo"$'\t'"agent/demo" \
+  "workspace_collect_worktrees reports path and branch"
+assert_not_contains "$worktrees" "$WORK/changed"$'\t' \
+  "workspace_collect_worktrees skips the main checkout"
+
+# C5: the mutating consumers (pull-all, flake-status, flake-update-cascade) read
+# workspace_collect_repos, whose output set stays exactly the registry checkouts
+# even for repos that have linked worktrees.
+collected=$(bash -c 'source "$1"; workspace_collect_repos "$2"' _ \
+  "$ROOT/lib/workspace.sh" "$WORK")
+expected=$'changed\nclean\ngroup/nested\nuntracked\n.profile'
+if [[ "$collected" == "$expected" ]]; then
+  pass "workspace_collect_repos returns exactly the registry checkouts"
+else
+  fail "workspace_collect_repos returns exactly the registry checkouts" \
+    "expected:" "$expected" "actual:" "$collected"
+fi
 
 embedded="$TMP/work-diff-embedded"
 {
@@ -88,10 +152,16 @@ assert_contains "$embedded_output" "group/nested  [master]" \
   "works when the shared library is embedded by Nix packaging"
 assert_contains "$embedded_output" ".profile  [master]" \
   "embedded library discovers a dot-named repository"
+assert_contains "$embedded_output" "↳ worktree $WT/demo  [agent/demo]" \
+  "embedded library renders linked worktrees"
 
 target=$(bash "$ROOT/workspace/work-diff" changed)
 assert_contains "$target" "changed  [master]" "shows the requested repository in targeted mode"
 assert_not_contains "$target" "clean  [master]" "excludes other repositories in targeted mode"
+assert_contains "$target" "↳ worktree $WT/demo  [agent/demo]" \
+  "shows the requested repository's worktrees in targeted mode"
+assert_not_contains "$target" "$WT/detached" \
+  "excludes other repositories' worktrees in targeted mode"
 
 help=$(bash "$ROOT/workspace/work-diff" --help)
 assert_contains "$help" "Usage: work-diff" "prints usage for --help"

@@ -1,7 +1,8 @@
 # Workspace Tools
 
-Daily workspace sync and status tools. Both scripts operate on every git
-repo under `~/work/`.
+Daily workspace sync and status tools. Both scripts operate on every git repo
+under `~/work/`. `pull-all` mutates repos, so it stays on those checkouts only;
+`work-diff` is read-only and also reports each repo's linked worktrees.
 
 ## `pull-all`
 
@@ -50,3 +51,18 @@ work-diff <repo-name>      # single repo
 ```
 
 Use this to see what's in-flight before syncing or after returning to a machine.
+
+Each repo's linked worktrees are shown under it, attributed to their branch, so
+agent branch work stays visible even though it lives outside `~/work/`.
+Worktrees are enumerated with `git worktree list`, never by scanning a
+directory, so the report is correct wherever they are sited.
+
+```
+════════════════════════════════════════════════════════════
+  allod/tools  [master]
+════════════════════════════════════════════════════════════
+  (clean)
+
+  ↳ worktree /home/you/changes/tools-fix-collector  [agent/fix-collector]
+ M lib/workspace.sh
+```

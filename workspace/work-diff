@@ -14,26 +14,19 @@ Usage: work-diff [--all | <repo-name>]
   --all           same as above
   <repo-name>     show only ~/work/<repo-name>
   -h, --help      this message
+
+Each repo's linked worktrees are shown under it, wherever they are sited.
 EOF
     exit 0
 }
 
 sep() { printf '%.0s═' $(seq 1 60); echo; }
 
-show_repo() {
+show_tree_state() {
     local dir="$1"
-    workspace_is_repo_root "$dir" || return 0
 
-    local name branch status staged unstaged
-    name="${dir#"$WORK_DIR"/}"
-    name="${name%/}"
-    branch=$(git -C "$dir" branch --show-current 2>/dev/null)
+    local status staged unstaged
     status=$(git -C "$dir" status --porcelain 2>/dev/null)
-
-    echo
-    sep
-    printf '  %s  [%s]\n' "$name" "$branch"
-    sep
 
     if [[ -z "$status" ]]; then
         echo "  (clean)"
@@ -47,6 +40,38 @@ show_repo() {
 
     [[ -n "$staged" ]]   && printf '\n--- staged ---\n%s\n' "$staged"
     [[ -n "$unstaged" ]] && printf '\n--- unstaged ---\n%s\n' "$unstaged"
+    # Explicit: a trailing test that fails would abort the whole run under set -e.
+    return 0
+}
+
+# Linked worktrees hold agent branch work that lives outside ~/work, so render
+# them under the repo they belong to, attributed to their branch.
+show_worktrees() {
+    local dir="$1" path branch
+
+    while IFS=$'\t' read -r path branch; do
+        echo
+        printf '  ↳ worktree %s  [%s]\n' "$path" "${branch:-detached}"
+        show_tree_state "$path"
+    done < <(workspace_collect_worktrees "$dir")
+}
+
+show_repo() {
+    local dir="$1"
+    workspace_is_repo_root "$dir" || return 0
+
+    local name branch
+    name="${dir#"$WORK_DIR"/}"
+    name="${name%/}"
+    branch=$(git -C "$dir" branch --show-current 2>/dev/null)
+
+    echo
+    sep
+    printf '  %s  [%s]\n' "$name" "$branch"
+    sep
+
+    show_tree_state "$dir"
+    show_worktrees "$dir"
 }
 
 show_all() {

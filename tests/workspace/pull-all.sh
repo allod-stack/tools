@@ -194,6 +194,10 @@ assert_log_not_contains $'^(local|unpushed|switched)\tcheckout' \
   "default: never checks out non-default branches"
 assert_log_not_contains $'^dirty\tpull$' \
   "default: never pulls dirty repos"
+# Sync mutates its input, so it reads registry checkouts only: it must never
+# enumerate worktrees, let alone pull one.
+assert_log_not_contains $'\tworktree' \
+  "default: never enumerates worktrees"
 
 # --- --switch mode: switch clean branches ---
 
