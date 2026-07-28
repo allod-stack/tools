@@ -773,6 +773,27 @@ assert_contains "$files" "file1.txt" "record -f stages first selected file"
 assert_contains "$files" "file2.txt" "record -f stages second selected file"
 assert_not_contains "$files" "file3.txt" "record -f leaves unselected file out of commit"
 
+# The usage string documents '--files' as a repeatable single-value flag, so
+# assert both halves of that claim: the documented long-flag form parses and
+# accumulates, and a bare second path is refused by name rather than absorbed.
+repo="$HOME/work/record-files-repeated"
+init_repo "$repo" master
+git -C "$repo" checkout -q -b repeated-files
+printf 'one\n' > "$repo/file1.txt"
+printf 'two\n' > "$repo/file2.txt"
+git -C "$repo" add file1.txt file2.txt
+git -C "$repo" commit -qm "add files"
+printf 'one changed\n' > "$repo/file1.txt"
+printf 'two changed\n' > "$repo/file2.txt"
+capture record_in_repo "$repo" -m "bare path" --files file1.txt file2.txt
+assert_status 1 "record refuses a bare path after --files"
+assert_contains "$CAPTURE_OUTPUT" "file2.txt" "record names the rejected bare path"
+capture record_in_repo "$repo" -m "repeated files" --files file1.txt --files file2.txt
+assert_status 0 "record accepts the documented repeated --files form"
+files=$(changed_files_in_head "$repo")
+assert_contains "$files" "file1.txt" "record --files stages first repeated path"
+assert_contains "$files" "file2.txt" "record --files stages second repeated path"
+
 repo="$HOME/work/record-add-u"
 init_repo "$repo" master
 git -C "$repo" checkout -q -b add-u

@@ -34,8 +34,8 @@ change_usage() {
 Usage:
   allod change begin [-d <description>] [<repo-path>]
   allod change list [<repo-path>]
-  allod change record -m <message> [--files <file>...]
-  allod change record -M <file|-> [--files <file>...]
+  allod change record -m <message> [--files <file>]...
+  allod change record -M <file|-> [--files <file>]...
   allod change submit -t <title> (-b <body> | -F <file|->) [--base <branch>] [--depends-on <text>] [--dry-run]
   allod change cleanup <worktree-path>
 
@@ -47,6 +47,9 @@ is the in-place flow for committing to a repo's default branch.
 'list' prints one tab-separated row per linked worktree — repo, path, branch,
 state — where the state is the one thing standing between that worktree and
 'cleanup': prunable, locked, detached, submodule, dirty, unpushed, or clean.
+
+'--files' takes one path and may be repeated; a bare path after the first is
+not consumed. Name each file with its own flag.
 EOF
 }
 
