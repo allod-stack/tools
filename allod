@@ -34,8 +34,8 @@ change_usage() {
 Usage:
   allod change begin [-d <description>] [<repo-path>]
   allod change list [<repo-path>]
-  allod change record -m <message> [--files <file>]...
-  allod change record -M <file|-> [--files <file>]...
+  allod change record -m <message> [--files <file>...]
+  allod change record -M <file|-> [--files <file>...]
   allod change submit -t <title> (-b <body> | -F <file|->) [--base <branch>] [--depends-on <text>] [--dry-run]
   allod change cleanup <worktree-path>
 
@@ -48,8 +48,11 @@ is the in-place flow for committing to a repo's default branch.
 state — where the state is the one thing standing between that worktree and
 'cleanup': prunable, locked, detached, submodule, dirty, unpushed, or clean.
 
-'--files' takes one path and may be repeated; a bare path after the first is
-not consumed. Name each file with its own flag.
+'--files' takes one or more paths and may be repeated, so '--files a b' and
+'--files a --files b' both stage a and b. It stops at the next option, so it
+can go anywhere in the line; pass a path that begins with '-' after '--',
+which ends option parsing. With no path named, record stages every tracked
+change — in a shared checkout, that includes another agent's.
 EOF
 }
 
@@ -532,8 +535,22 @@ change_record() {
         ;;
       -f|--files)
         require_option_value "$1" "$#"
-        files+=("$2")
-        shift 2
+        # A '-'-prefixed token is the next option, never a path, so it both
+        # ends the list and means no path was given when it comes first.
+        [[ "$2" != -* ]] || die 1 "$1 requires a value"
+        shift
+        while [[ $# -gt 0 && "$1" != -* ]]; do
+          files+=("$1")
+          shift
+        done
+        ;;
+      --)
+        # record takes no positional arguments, so everything past '--' is a
+        # path. Refusing an empty list keeps it from falling back to 'add -u'.
+        shift
+        [[ $# -gt 0 ]] || die 1 "-- requires at least one file"
+        files+=("$@")
+        break
         ;;
       -h|--help)
         change_usage

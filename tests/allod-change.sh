@@ -773,26 +773,98 @@ assert_contains "$files" "file1.txt" "record -f stages first selected file"
 assert_contains "$files" "file2.txt" "record -f stages second selected file"
 assert_not_contains "$files" "file3.txt" "record -f leaves unselected file out of commit"
 
-# The usage string documents '--files' as a repeatable single-value flag, so
-# assert both halves of that claim: the documented long-flag form parses and
-# accumulates, and a bare second path is refused by name rather than absorbed.
-repo="$HOME/work/record-files-repeated"
+# '--files' is plural: one flag takes as many paths as follow it, the repeated
+# form still accumulates, and the two combine in one invocation.
+repo="$HOME/work/record-files-variadic"
 init_repo "$repo" master
-git -C "$repo" checkout -q -b repeated-files
+git -C "$repo" checkout -q -b variadic-files
 printf 'one\n' > "$repo/file1.txt"
 printf 'two\n' > "$repo/file2.txt"
-git -C "$repo" add file1.txt file2.txt
+printf 'three\n' > "$repo/file3.txt"
+printf 'four\n' > "$repo/file4.txt"
+git -C "$repo" add file1.txt file2.txt file3.txt file4.txt
 git -C "$repo" commit -qm "add files"
 printf 'one changed\n' > "$repo/file1.txt"
 printf 'two changed\n' > "$repo/file2.txt"
-capture record_in_repo "$repo" -m "bare path" --files file1.txt file2.txt
-assert_status 1 "record refuses a bare path after --files"
-assert_contains "$CAPTURE_OUTPUT" "file2.txt" "record names the rejected bare path"
-capture record_in_repo "$repo" -m "repeated files" --files file1.txt --files file2.txt
-assert_status 0 "record accepts the documented repeated --files form"
+printf 'three changed\n' > "$repo/file3.txt"
+printf 'four changed\n' > "$repo/file4.txt"
+capture record_in_repo "$repo" -m "several paths" --files file1.txt file2.txt
+assert_status 0 "record accepts several paths after one --files"
 files=$(changed_files_in_head "$repo")
-assert_contains "$files" "file1.txt" "record --files stages first repeated path"
-assert_contains "$files" "file2.txt" "record --files stages second repeated path"
+assert_contains "$files" "file1.txt" "record --files stages the first path of a list"
+assert_contains "$files" "file2.txt" "record --files stages a later path of the same list"
+assert_not_contains "$files" "file3.txt" "record --files leaves an unnamed file out of the commit"
+printf 'one again\n' > "$repo/file1.txt"
+printf 'three again\n' > "$repo/file3.txt"
+capture record_in_repo "$repo" -m "mixed forms" -f file1.txt file3.txt --files file4.txt
+assert_status 0 "record combines a -f list with a repeated --files"
+files=$(changed_files_in_head "$repo")
+assert_contains "$files" "file1.txt" "record -f stages the first path of a list"
+assert_contains "$files" "file3.txt" "record -f stages a later path of the same list"
+assert_contains "$files" "file4.txt" "record also stages the path from the repeated flag"
+
+# A following option ends the path list, so flag order changes nothing.
+repo="$HOME/work/record-files-order"
+init_repo "$repo" master
+git -C "$repo" checkout -q -b files-order
+printf 'one\n' > "$repo/file1.txt"
+printf 'two\n' > "$repo/file2.txt"
+printf 'three\n' > "$repo/file3.txt"
+git -C "$repo" add file1.txt file2.txt file3.txt
+git -C "$repo" commit -qm "add files"
+printf 'one changed\n' > "$repo/file1.txt"
+printf 'two changed\n' > "$repo/file2.txt"
+printf 'three changed\n' > "$repo/file3.txt"
+capture record_in_repo "$repo" --files file1.txt file2.txt -m "files before message"
+assert_status 0 "record accepts a message flag after a --files list"
+assert_equal "$(git -C "$repo" log -1 --format=%s)" "files before message" \
+  "record stops consuming paths at the next option"
+files_first=$(changed_files_in_head "$repo")
+assert_not_contains "$files_first" "file3.txt" "record leaves an unnamed file out when --files comes first"
+printf 'one again\n' > "$repo/file1.txt"
+printf 'two again\n' > "$repo/file2.txt"
+capture record_in_repo "$repo" -m "message before files" --files file1.txt file2.txt
+assert_status 0 "record accepts a --files list after the message flag"
+assert_equal "$(git -C "$repo" log -1 --format=%s)" "message before files" \
+  "record keeps the message when the path list comes last"
+assert_equal "$(changed_files_in_head "$repo")" "$files_first" \
+  "record stages the same files whichever order the flags come in"
+
+# A path list that consumed nothing must fail loud rather than fall through to
+# the 'git add -u' sweep.
+repo="$HOME/work/record-files-empty"
+init_repo "$repo" master
+git -C "$repo" checkout -q -b empty-files
+printf 'changed\n' > "$repo/tracked.txt"
+head_before=$(git -C "$repo" rev-parse HEAD)
+capture record_in_repo "$repo" -m "no paths" --files
+assert_status 1 "record rejects a trailing --files with no path"
+assert_contains "$CAPTURE_OUTPUT" "requires a value" "record names --files as missing its value"
+capture record_in_repo "$repo" --files -m "no paths"
+assert_status 1 "record rejects --files followed by another option"
+assert_contains "$CAPTURE_OUTPUT" "requires a value" "record names --files as missing its value before an option"
+capture record_in_repo "$repo" -m "no paths" -f
+assert_status 1 "record rejects a trailing -f with no path"
+capture record_in_repo "$repo" -m "no paths" --
+assert_status 1 "record rejects a bare -- with no path"
+assert_equal "$(git -C "$repo" rev-parse HEAD)" "$head_before" \
+  "record commits nothing when a path list is empty"
+
+# '--' ends option parsing, so a path that begins with '-' is still reachable.
+repo="$HOME/work/record-files-dash"
+init_repo "$repo" master
+git -C "$repo" checkout -q -b dash-files
+printf 'one\n' > "$repo/file1.txt"
+printf 'dash\n' > "$repo/-dash.txt"
+git -C "$repo" add -- file1.txt -dash.txt
+git -C "$repo" commit -qm "add files"
+printf 'one changed\n' > "$repo/file1.txt"
+printf 'dash changed\n' > "$repo/-dash.txt"
+capture record_in_repo "$repo" -m "dash path" --files file1.txt -- -dash.txt
+assert_status 0 "record stages a '-'-prefixed path after --"
+files=$(changed_files_in_head "$repo")
+assert_contains "$files" "file1.txt" "record keeps the --files list when -- follows it"
+assert_contains "$files" "-dash.txt" "record stages the path named after --"
 
 repo="$HOME/work/record-add-u"
 init_repo "$repo" master
