@@ -7,6 +7,7 @@ if ! declare -F workspace_is_repo_root >/dev/null; then
 fi
 
 PROTECTED_BRANCHES_FILE="${HOME}/.config/git/protected-branches"
+CHANGES_DIR="${HOME}/changes"
 declare -a TEMP_FILES=()
 
 cleanup_temp_files() {
@@ -22,7 +23,7 @@ usage() {
 Usage: allod <namespace> <command> [options]
 
 Namespaces:
-  change   Manage code changes (begin, record, submit, cleanup)
+  change   Manage code changes (begin, list, record, submit, cleanup)
   patch    Transfer patches between environments (fetch, apply, receive)
   pm       Manage the PM board overlay in the private state repo
 EOF
@@ -32,10 +33,20 @@ change_usage() {
   cat <<'EOF'
 Usage:
   allod change begin [-d <description>] [<repo-path>]
+  allod change list [<repo-path>]
   allod change record -m <message> [--files <file>...]
   allod change record -M <file|-> [--files <file>...]
   allod change submit -t <title> (-b <body> | -F <file|->) [--base <branch>] [--depends-on <text>] [--dry-run]
   allod change cleanup <worktree-path>
+
+'-d' is the isolation switch, for every repo whether protected or not: it
+creates a worktree under ~/changes on a new agent/<description> branch.
+Without it, begin prints the shared checkout path and creates nothing, which
+is the in-place flow for committing to a repo's default branch.
+
+'list' prints one tab-separated row per linked worktree — repo, path, branch,
+state — where the state is the one thing standing between that worktree and
+'cleanup': prunable, locked, detached, dirty, unpushed, or clean.
 EOF
 }
 
@@ -237,9 +248,35 @@ refuse_protected_branch_record() {
   fi
 }
 
+# Undo a half-created worktree. Neither step can destroy anything it should not
+# — prune only drops admin entries whose gitdir is already gone — but prune
+# reports a failed delete and still exits 0, so the entry is checked rather than
+# the exit status. The branch is deliberately not deleted: the pre-checks prove
+# it did not exist when begin started, but another agent may have created it
+# since, and deleting it would be the exact collision this command exists to
+# prevent.
+begin_rollback_worktree() {
+  local repo="$1" worktree_path="$2" branch="$3"
+  local listing
+
+  rm -rf "$worktree_path"
+  git -C "$repo" worktree prune >/dev/null 2>&1 || true
+
+  listing=$(git -C "$repo" worktree list --porcelain 2>/dev/null || true)
+  case $'\n'"$listing"$'\n' in
+    *$'\n'"worktree $worktree_path"$'\n'*)
+      printf 'allod: worktree %s is still registered; run: git -C %s worktree prune\n' \
+        "$worktree_path" "$repo" >&2
+      ;;
+  esac
+
+  printf "allod: branch %s may have been left behind; check: git -C %s branch --list 'agent/*'\\n" \
+    "$branch" "$repo" >&2
+}
+
 change_begin() {
-  local desc="" desc_set=false repo_arg="" repo="" protected_branch="" branch=""
-  local slug worktree_path output status
+  local desc="" desc_set=false repo_arg="" repo="" protected_branch="" branch="" base=""
+  local slug worktree_path git_dir output status
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -266,15 +303,34 @@ change_begin() {
 
   repo=$(resolve_git_repo "${repo_arg:-$PWD}")
   protected_branch=$(protected_branch_for_dir "$repo" || true)
-  if [[ -z "$protected_branch" ]]; then
+
+  # No -d: the in-place flow. Print the shared checkout path and create nothing.
+  # A protected repo has no legitimate in-place change, so it refuses instead —
+  # protection is a validation input here, never the isolation switch.
+  if [[ "$desc_set" != true ]]; then
+    [[ -z "$protected_branch" ]] ||
+      die 1 "change begin requires -d <description> to branch in protected repo '$repo'"
     printf '%s\n' "$repo"
     return 0
   fi
 
-  [[ "$desc_set" == true ]] ||
-    die 1 "change begin requires -d <description> for protected repo '$repo'"
   validate_description "$desc"
   branch="agent/$desc"
+
+  git -C "$repo" remote get-url origin >/dev/null 2>&1 ||
+    die 1 "repository '$repo' has no 'origin' remote; an isolated change needs one"
+
+  # A protected-branches entry names the base for the repos that have one; every
+  # other repo's base is origin/HEAD. That ref is asserted here rather than left
+  # to workspace_repo_default_branch, whose '|| echo master' fallback does fire
+  # under 'set -o pipefail' and would silently branch a repo off the wrong base.
+  if [[ -z "$protected_branch" ]]; then
+    git -C "$repo" symbolic-ref --quiet refs/remotes/origin/HEAD >/dev/null 2>&1 ||
+      die 1 "could not resolve the default branch of '$repo'; run: git -C $repo remote set-head origin -a"
+  fi
+  base="${protected_branch:-$(default_remote_branch_for_dir "$repo")}"
+  [[ -n "$base" ]] ||
+    die 1 "could not resolve the default branch of '$repo'; run: git -C $repo remote set-head origin -a"
 
   if ref_exists_local "$repo" "$branch"; then
     die 5 "branch '$branch' already exists locally; use a different -d or clean it up"
@@ -289,15 +345,140 @@ change_begin() {
     exit "$status"
   }
 
+  git -C "$repo" rev-parse --verify --quiet "refs/remotes/origin/${base}^{commit}" >/dev/null ||
+    die 1 "'origin/$base' does not exist in '$repo' after fetching origin; check the branch name"
+
+  mkdir -p "$CHANGES_DIR"
   slug=$(repo_slug_for_dir "$repo")
-  worktree_path=$(mktemp -d "/tmp/allod-change-${slug}-${desc}-XXXXXX")
-  output=$(git -C "$repo" worktree add "$worktree_path" -b "$branch" "origin/$protected_branch" 2>&1) || {
+  worktree_path=$(mktemp -d "$CHANGES_DIR/${slug}-${desc}-XXXXXX")
+  output=$(git -C "$repo" worktree add "$worktree_path" -b "$branch" "origin/$base" 2>&1) || {
     status=$?
-    rm -rf "$worktree_path"
     printf '%s\n' "$output" >&2
+    begin_rollback_worktree "$repo" "$worktree_path" "$branch"
     exit "$status"
   }
+
+  # C3 handoff: record the branch begin created in the worktree's own git dir,
+  # which 'record' reads to detect a checkout moved out from under it. A missing
+  # file means begin was never called, so a failed write would silently downgrade
+  # that guard and is fatal here instead.
+  status=0
+  git_dir=$(git -C "$worktree_path" rev-parse --path-format=absolute --git-dir 2>/dev/null) || status=$?
+  if [[ "$status" -eq 0 ]]; then
+    printf '%s\n' "$branch" > "$git_dir/allod-change-branch" || status=$?
+  fi
+  if [[ "$status" -ne 0 ]]; then
+    printf 'allod: could not write the branch handoff file for %s\n' "$worktree_path" >&2
+    begin_rollback_worktree "$repo" "$worktree_path" "$branch"
+    exit 1
+  fi
+
   printf '%s\n' "$worktree_path"
+}
+
+# Print one tab-separated row per linked worktree of $1: repo, path, branch (or
+# '(detached)'), state. Enumeration is git's, never a filesystem glob, so
+# worktrees sited anywhere — including the /tmp ones that predate ~/changes —
+# are found. The first record 'worktree list --porcelain' emits is the main
+# checkout and is skipped.
+change_list_repo() {
+  local repo_dir="$1"
+  local main_repo name line
+  local path='' branch='' detached=false locked=false prunable=false record=0
+
+  main_repo=$(main_repo_dir_for_dir "$repo_dir")
+  case "$main_repo" in
+    "${WORK_DIR%/}"/*) name="${main_repo#"${WORK_DIR%/}"/}" ;;
+    *) name="$main_repo" ;;
+  esac
+
+  # The trailing printf guarantees a terminating blank line for the last record
+  # even if git ever stops emitting one.
+  while IFS= read -r line; do
+    case "$line" in
+      'worktree '*)
+        path="${line#worktree }"
+        branch=''
+        detached=false
+        locked=false
+        prunable=false
+        record=$((record + 1))
+        ;;
+      'branch refs/heads/'*) branch="${line#branch refs/heads/}" ;;
+      detached) detached=true ;;
+      locked|'locked '*) locked=true ;;
+      prunable|'prunable '*) prunable=true ;;
+      '')
+        if (( record > 1 )) && [[ -n "$path" ]]; then
+          printf '%s\t%s\t%s\t%s\n' "$name" "$path" "${branch:-(detached)}" \
+            "$(change_worktree_state "$path" "$prunable" "$locked" "$detached")"
+        fi
+        path=''
+        ;;
+    esac
+  done < <(git -C "$main_repo" worktree list --porcelain 2>/dev/null; printf '\n')
+}
+
+# The strongest blocker wins, which is deliberately not the order 'cleanup'
+# evaluates in: a locked and dirty worktree reports 'locked' while 'cleanup'
+# fails on the dirty check first. The binding contract is only that 'clean' is
+# reported exactly when 'cleanup' would succeed, so it is the negation of all
+# five of cleanup's refusal sources — a missing directory, a detached HEAD, a
+# dirty tree, unpushed commits, and a lock — not just the two it names.
+change_worktree_state() {
+  local path="$1" prunable="$2" locked="$3" detached="$4"
+  local state
+
+  if [[ "$prunable" == true ]]; then
+    state=prunable
+  elif [[ "$locked" == true ]]; then
+    state=locked
+  elif [[ "$detached" == true ]]; then
+    state=detached
+  elif [[ -n "$(git -C "$path" status --porcelain 2>/dev/null)" ]]; then
+    state=dirty
+  elif has_unpushed_commits "$path"; then
+    state=unpushed
+  else
+    state=clean
+  fi
+
+  printf '%s\n' "$state"
+}
+
+change_list() {
+  local repo_arg="" name repo_dir
+  local -a repos=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -h|--help)
+        change_usage
+        exit 0
+        ;;
+      -*)
+        die 1 "unknown option for change list: $1"
+        ;;
+      *)
+        [[ -z "$repo_arg" ]] || die 1 "change list accepts at most one repo path"
+        repo_arg="$1"
+        shift
+        ;;
+    esac
+  done
+
+  if [[ -n "$repo_arg" ]]; then
+    repos+=("$(resolve_git_repo "$repo_arg")")
+  else
+    while IFS= read -r name; do
+      [[ -n "$name" ]] || continue
+      repos+=("${WORK_DIR%/}/$name")
+    done < <(workspace_collect_repos "$WORK_DIR")
+  fi
+
+  for repo_dir in "${repos[@]}"; do
+    change_list_repo "$repo_dir"
+  done
 }
 
 change_record() {
@@ -522,6 +703,7 @@ change_main() {
 
   case "$command" in
     begin) change_begin "$@" ;;
+    list) change_list "$@" ;;
     record) change_record "$@" ;;
     submit) change_submit "$@" ;;
     cleanup) change_cleanup "$@" ;;

@@ -12,12 +12,13 @@ test_number=0
 repo_number=0
 declare -a WORKTREES=()
 
+# Worktrees now land under $HOME/changes, and $HOME is the temp dir removed
+# below, so no sweep outside $TMP is needed.
 cleanup() {
   local path
   for path in "${WORKTREES[@]}"; do
     rm -rf "$path"
   done
-  find /tmp -maxdepth 1 -type d -name "allod-change-*-${RUN_ID}-*" -exec rm -rf {} +
   rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -113,6 +114,12 @@ init_repo() {
   git -C "$repo" remote set-head origin "$branch" >/dev/null 2>&1 || true
 }
 
+init_repo_no_origin_head() {
+  local repo="$1" branch="${2:-master}"
+  init_repo "$repo" "$branch"
+  git -C "$repo" remote set-head origin -d >/dev/null 2>&1
+}
+
 init_repo_no_remote() {
   local repo="$1" branch="${2:-master}"
   mkdir -p "$(dirname "$repo")"
@@ -156,6 +163,48 @@ remote_has_branch() {
 changed_files_in_head() {
   local repo="$1"
   git -C "$repo" diff-tree --no-commit-id --name-only -r HEAD | sort
+}
+
+worktree_count() {
+  git -C "$1" worktree list | wc -l
+}
+
+# Count the worktree directories begin would have created for a description.
+# Named rather than counting all of $HOME/changes, because earlier tests leave
+# their own worktrees there.
+changes_entries_for() {
+  local desc="$1" count=0 entry
+  shopt -s nullglob
+  for entry in "$HOME/changes/"*"-${desc}-"*; do
+    if [[ -e "$entry" ]]; then
+      count=$((count + 1))
+    fi
+  done
+  shopt -u nullglob
+  printf '%s\n' "$count"
+}
+
+list_state_for() {
+  local repo="$1" path="$2"
+  bash "$ALLOD" change list "$repo" | awk -F'\t' -v p="$path" '$2 == p { print $4 }'
+}
+
+# The binding contract: list reports 'clean' if and only if cleanup on that path
+# would succeed. Asserted by running cleanup rather than by restating its
+# refusals, since list's precedence order deliberately differs from the order
+# cleanup evaluates in and the error messages need not agree.
+assert_list_matches_cleanup() {
+  local repo="$1" path="$2" expected="$3" label="$4"
+
+  assert_equal "$(list_state_for "$repo" "$path")" "$expected" "list reports $expected for $label"
+  capture bash "$ALLOD" change cleanup "$path"
+  if [[ "$expected" == "clean" ]]; then
+    assert_status 0 "cleanup succeeds where list reported clean: $label"
+  elif [[ "$CAPTURE_STATUS" -ne 0 ]]; then
+    pass "cleanup refuses where list reported $expected: $label"
+  else
+    fail "cleanup refuses where list reported $expected: $label" "$CAPTURE_OUTPUT"
+  fi
 }
 
 make_restricted_path_without_forge() {
@@ -212,25 +261,191 @@ EOF
   printf '%s\n' "$bin"
 }
 
+# A git wrapper that forwards to the real git, with one of three behaviours:
+#
+#   push-log            record every push invocation (the default)
+#   lose-worktree-race  another agent creates agent/<desc> between begin's
+#                       branch pre-check and its 'worktree add', which then
+#                       fails
+#   block-handoff       'worktree add' registers, then the handoff file is
+#                       pre-created read-only so begin's C3 write fails. The
+#                       file is made unwritable, never its directory: an
+#                       unwritable admin directory would also stop the
+#                       rollback's prune, which reports the failure and still
+#                       exits 0.
 make_mock_git_path() {
-  local bin="$TMP/mock-git-bin-$1"
+  local name="$1" mode="${2:-push-log}"
+  local bin="$TMP/mock-git-bin-$name"
   mkdir -p "$bin"
-  cat > "$bin/git" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-for arg in "$@"; do
-  if [[ "$arg" == "push" ]]; then
-    printf '%s\n' "$*" >> "$GIT_PUSH_LOG"
-    break
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'set -euo pipefail\n'
+    printf 'MOCK_GIT_MODE=%q\n' "$mode"
+    cat <<'EOF'
+worktree_add=false
+repo=""
+path=""
+branch=""
+argc=$#
+i=1
+while (( i <= argc )); do
+  cur="${!i}"
+  j=$((i + 1))
+  k=$((i + 2))
+  nxt=""
+  if (( j <= argc )); then
+    nxt="${!j}"
   fi
+  case "$cur" in
+    -C) repo="$nxt" ;;
+    -b) branch="$nxt" ;;
+    worktree)
+      if [[ "$nxt" == "add" ]] && (( k <= argc )); then
+        worktree_add=true
+        path="${!k}"
+      fi
+      ;;
+    push)
+      if [[ "$MOCK_GIT_MODE" == "push-log" ]]; then
+        printf '%s\n' "$*" >> "$GIT_PUSH_LOG"
+      fi
+      ;;
+  esac
+  i=$((i + 1))
 done
+
+if [[ "$worktree_add" == true && "$MOCK_GIT_MODE" == "lose-worktree-race" ]]; then
+  "$REAL_GIT" -C "$repo" branch "$branch" HEAD
+  printf "fatal: a branch named '%s' already exists\n" "$branch" >&2
+  exit 128
+fi
+
+if [[ "$worktree_add" == true && "$MOCK_GIT_MODE" == "block-handoff" ]]; then
+  "$REAL_GIT" "$@"
+  git_dir=$("$REAL_GIT" -C "$path" rev-parse --path-format=absolute --git-dir)
+  : > "$git_dir/allod-change-branch"
+  chmod a-w "$git_dir/allod-change-branch"
+  exit 0
+fi
+
 exec "$REAL_GIT" "$@"
 EOF
+  } > "$bin/git"
   chmod +x "$bin/git"
   printf '%s:%s\n' "$bin" "$PATH"
 }
 
 # begin tests
+#
+# Everything that must leave $HOME/changes untouched is asserted first, while
+# the directory is still guaranteed absent: the first successful 'begin -d'
+# creates it for the rest of the run.
+
+repo="$HOME/work/begin-open"
+init_repo "$repo" master
+capture bash "$ALLOD" change begin "$repo"
+assert_status 0 "begin without -d succeeds for a non-protected repo"
+assert_equal "$CAPTURE_OUTPUT" "$repo" "begin without -d prints the shared checkout path"
+assert_equal "$(worktree_count "$repo")" "1" "begin without -d creates no worktree"
+assert_equal "$(git -C "$repo" branch --list 'agent/*')" "" "begin without -d creates no agent branch"
+[[ ! -e "$HOME/changes" ]] &&
+  pass "begin without -d does not create the changes directory" ||
+  fail "begin without -d does not create the changes directory" "exists: $HOME/changes"
+printf 'in place\n' > "$repo/tracked.txt"
+capture record_in_repo "$repo" -m "in-place commit" -f tracked.txt
+assert_status 0 "record commits in place after begin without -d"
+assert_equal "$(git -C "$repo" log -1 --format=%s)" "in-place commit" \
+  "in-place record uses the given message"
+assert_equal "$(git -C "$repo" rev-list --count origin/master..HEAD)" "0" \
+  "in-place record pushes the commit to origin"
+
+outside="$TMP/outside-repo"
+init_repo_no_remote "$outside" master
+capture bash "$ALLOD" change begin "$outside"
+assert_status 0 "begin without -d succeeds for an outside-HOME repo with no origin"
+assert_equal "$CAPTURE_OUTPUT" "$outside" "outside-HOME repo is treated as unprotected"
+
+repo="$HOME/work/begin-protected-no-desc"
+init_repo "$repo" main
+protect_repo "$repo" main
+capture bash "$ALLOD" change begin "$repo"
+[[ "$CAPTURE_STATUS" -ne 0 ]] || fail "begin requires -d on protected repo" "$CAPTURE_OUTPUT"
+assert_status 1 "begin requires -d on protected repo"
+assert_contains "$CAPTURE_OUTPUT" "requires -d" "begin missing -d explains failure"
+
+repo="$HOME/work/begin-no-origin"
+init_repo_no_remote "$repo" master
+capture bash "$ALLOD" change begin -d "${RUN_ID}-no-origin" "$repo"
+assert_status 1 "begin -d refuses a repo with no origin remote"
+assert_contains "$CAPTURE_OUTPUT" "no 'origin' remote" "begin -d names the missing remote"
+assert_not_contains "$CAPTURE_OUTPUT" "could not check origin for branch" \
+  "begin -d fails on the missing remote rather than on ls-remote"
+
+repo="$HOME/work/begin-no-origin-head"
+init_repo_no_origin_head "$repo" master
+capture bash "$ALLOD" change begin -d "${RUN_ID}-no-head" "$repo"
+assert_status 1 "begin -d refuses an unprotected repo with no origin/HEAD"
+assert_contains "$CAPTURE_OUTPUT" "remote set-head" "begin -d names the origin/HEAD repair"
+
+repo="$HOME/work/begin-missing-base"
+init_repo "$repo" master
+protect_repo "$repo" no-such-branch
+desc="${RUN_ID}-missing-base"
+capture bash "$ALLOD" change begin -d "$desc" "$repo"
+assert_status 1 "begin -d refuses a base branch that is missing on origin"
+[[ ! -e "$HOME/changes" ]] &&
+  pass "begin -d creates no worktree directory when the base is missing" ||
+  fail "begin -d creates no worktree directory when the base is missing" "exists: $HOME/changes"
+assert_equal "$(git -C "$repo" branch --list "agent/$desc")" "" \
+  "begin -d creates no branch when the base is missing"
+
+repo="$HOME/work/begin-invalid-open"
+init_repo "$repo" master
+for invalid in "has space" "has/slash" "" ".foo" "foo..bar" "foo.lock"; do
+  capture bash "$ALLOD" change begin -d "$invalid" "$repo"
+  assert_status 1 "begin rejects invalid description '${invalid:-<empty>}' in an unprotected repo"
+done
+
+repo="$HOME/work/begin-invalid"
+init_repo "$repo" master
+protect_repo "$repo" master
+for invalid in "has space" "has/slash" "" ".foo" "foo..bar" "foo.lock"; do
+  capture bash "$ALLOD" change begin -d "$invalid" "$repo"
+  assert_status 1 "begin rejects invalid description '${invalid:-<empty>}'"
+done
+
+# The flip: -d isolates whether or not the repo is protected.
+
+repo="$HOME/work/begin-isolated"
+init_repo "$repo" master
+desc="${RUN_ID}-isolated"
+path=$(begin_worktree "$desc" "$repo")
+case "$path" in
+  "$HOME/changes/work-begin-isolated-${desc}-"??????)
+    pass "begin -d sites an unprotected repo's worktree under ~/changes" ;;
+  *) fail "begin -d sites an unprotected repo's worktree under ~/changes" "actual path: $path" ;;
+esac
+[[ -d "$path" ]] || fail "begin -d creates a worktree for an unprotected repo" "missing worktree: $path"
+pass "begin -d creates a worktree for an unprotected repo"
+assert_equal "$(git -C "$path" branch --show-current)" "agent/$desc" \
+  "begin -d creates the agent branch for an unprotected repo"
+git -C "$path" merge-base --is-ancestor origin/master HEAD &&
+  pass "begin -d starts an unprotected worktree from the default branch" ||
+  fail "begin -d starts an unprotected worktree from the default branch"
+assert_equal "$(git -C "$repo" branch --show-current)" "master" \
+  "begin -d leaves the shared checkout on its default branch"
+assert_equal "$(git -C "$repo" status --porcelain)" "" "begin -d leaves the shared checkout clean"
+
+git_dir=$(git -C "$path" rev-parse --path-format=absolute --git-dir)
+common_dir=$(git -C "$path" rev-parse --path-format=absolute --git-common-dir)
+[[ "$git_dir" != "$common_dir" ]] &&
+  pass "begin -d creates a linked worktree with its own git dir" ||
+  fail "begin -d creates a linked worktree with its own git dir" "git-dir: $git_dir"
+[[ -f "$git_dir/allod-change-branch" ]] &&
+  pass "begin -d writes the branch handoff file" ||
+  fail "begin -d writes the branch handoff file" "missing: $git_dir/allod-change-branch"
+assert_equal "$(cat "$git_dir/allod-change-branch")" "agent/$desc" \
+  "handoff file names the branch begin created"
 
 repo="$HOME/work/begin-protected"
 init_repo "$repo" main
@@ -245,22 +460,6 @@ git -C "$path" merge-base --is-ancestor origin/main HEAD &&
   pass "begin starts from configured protected branch" ||
   fail "begin starts from configured protected branch"
 
-capture bash "$ALLOD" change begin "$repo"
-[[ "$CAPTURE_STATUS" -ne 0 ]] || fail "begin requires -d on protected repo" "$CAPTURE_OUTPUT"
-assert_contains "$CAPTURE_OUTPUT" "requires -d" "begin missing -d explains failure"
-
-repo="$HOME/work/begin-open"
-init_repo "$repo" master
-capture bash "$ALLOD" change begin "$repo"
-assert_status 0 "begin succeeds for non-protected repo"
-assert_equal "$CAPTURE_OUTPUT" "$repo" "begin prints repo path for non-protected repo"
-
-outside="$TMP/outside-repo"
-init_repo_no_remote "$outside" master
-capture bash "$ALLOD" change begin "$outside"
-assert_status 0 "begin succeeds for outside-HOME repo without origin"
-assert_equal "$CAPTURE_OUTPUT" "$outside" "outside-HOME repo is treated as unprotected"
-
 repo="$HOME/work/begin-twice"
 init_repo "$repo" master
 protect_repo "$repo" master
@@ -270,6 +469,15 @@ capture bash "$ALLOD" change begin -d "$desc" "$repo"
 assert_status 5 "begin rejects an existing local agent branch"
 assert_contains "$CAPTURE_OUTPUT" "already exists locally" "begin local branch failure is actionable"
 
+repo="$HOME/work/begin-twice-open"
+init_repo "$repo" master
+desc="${RUN_ID}-twice-open"
+path=$(begin_worktree "$desc" "$repo")
+capture bash "$ALLOD" change begin -d "$desc" "$repo"
+assert_status 5 "begin rejects an existing local agent branch in an unprotected repo"
+assert_contains "$CAPTURE_OUTPUT" "already exists locally" \
+  "begin local branch failure is actionable for an unprotected repo"
+
 repo="$HOME/work/begin-remote-exists"
 init_repo "$repo" master
 protect_repo "$repo" master
@@ -278,23 +486,172 @@ capture bash "$ALLOD" change begin -d "${RUN_ID}-remote" "$repo"
 assert_status 5 "begin rejects an existing remote agent branch"
 assert_contains "$CAPTURE_OUTPUT" "already exists on origin" "begin remote branch failure is actionable"
 
+repo="$HOME/work/begin-remote-exists-open"
+init_repo "$repo" master
+git -C "$repo" push -q origin HEAD:refs/heads/agent/"${RUN_ID}-remote-open"
+capture bash "$ALLOD" change begin -d "${RUN_ID}-remote-open" "$repo"
+assert_status 5 "begin rejects an existing remote agent branch in an unprotected repo"
+assert_contains "$CAPTURE_OUTPUT" "already exists on origin" \
+  "begin remote branch failure is actionable for an unprotected repo"
+
 repo="$HOME/work/allod/tools"
 init_repo "$repo" master
 protect_repo "$repo" master
 desc="${RUN_ID}-nested"
 path=$(begin_worktree "$desc" "$repo")
 case "$path" in
-  /tmp/allod-change-work-allod-tools-"$desc"-*) pass "begin sanitizes nested repo slug for tmp path" ;;
-  *) fail "begin sanitizes nested repo slug for tmp path" "actual path: $path" ;;
+  "$HOME/changes/work-allod-tools-${desc}-"??????)
+    pass "begin sanitizes nested repo slug for the worktree path" ;;
+  *) fail "begin sanitizes nested repo slug for the worktree path" "actual path: $path" ;;
 esac
 
-repo="$HOME/work/begin-invalid"
+# Rollback: a failed 'worktree add' or handoff write leaves nothing behind, and
+# says so when it cannot prove otherwise.
+
+export REAL_GIT
+
+repo="$HOME/work/begin-lost-race"
 init_repo "$repo" master
-protect_repo "$repo" master
-for invalid in "has space" "has/slash" "" ".foo" "foo..bar" "foo.lock"; do
-  capture bash "$ALLOD" change begin -d "$invalid" "$repo"
-  assert_status 1 "begin rejects invalid description '${invalid:-<empty>}'"
-done
+desc="${RUN_ID}-lost-race"
+mock_git_path=$(make_mock_git_path lost-race lose-worktree-race)
+capture_with_path "$mock_git_path" bash "$ALLOD" change begin -d "$desc" "$repo"
+[[ "$CAPTURE_STATUS" -ne 0 ]] &&
+  pass "begin fails when another agent wins the worktree race" ||
+  fail "begin fails when another agent wins the worktree race" "$CAPTURE_OUTPUT"
+[[ -n "$(git -C "$repo" branch --list "agent/$desc")" ]] &&
+  pass "begin leaves a branch it cannot prove it created" ||
+  fail "begin leaves a branch it cannot prove it created"
+assert_equal "$(changes_entries_for "$desc")" "0" \
+  "begin removes its worktree directory after a failed add"
+assert_contains "$CAPTURE_OUTPUT" "may have been left behind" \
+  "begin reports the branch it refused to delete"
+assert_contains "$CAPTURE_OUTPUT" "branch --list 'agent/*'" \
+  "begin points at the branch listing after a failed add"
+assert_not_contains "$CAPTURE_OUTPUT" "allod change list" \
+  "begin does not point at list, which cannot show a branch with no worktree"
+
+repo="$HOME/work/begin-handoff-blocked"
+init_repo "$repo" master
+desc="${RUN_ID}-handoff-blocked"
+mock_git_path=$(make_mock_git_path handoff-blocked block-handoff)
+capture_with_path "$mock_git_path" bash "$ALLOD" change begin -d "$desc" "$repo"
+[[ "$CAPTURE_STATUS" -ne 0 ]] &&
+  pass "begin fails when the handoff write fails" ||
+  fail "begin fails when the handoff write fails" "$CAPTURE_OUTPUT"
+assert_equal "$(changes_entries_for "$desc")" "0" \
+  "begin removes its worktree directory after a failed handoff write"
+assert_equal "$(worktree_count "$repo")" "1" \
+  "begin prunes the worktree admin entry after a failed handoff write"
+
+# list tests
+
+repo="$HOME/work/list-empty"
+init_repo "$repo" master
+capture bash "$ALLOD" change list "$repo"
+assert_status 0 "list exits 0 for a repo with no worktrees"
+assert_equal "$CAPTURE_OUTPUT" "" "list prints nothing for a repo with no worktrees"
+
+repo="$HOME/work/list-rows"
+init_repo "$repo" master
+desc="${RUN_ID}-rows"
+path=$(begin_worktree "$desc" "$repo")
+capture bash "$ALLOD" change list "$repo"
+assert_status 0 "list exits 0 with a worktree present"
+assert_equal "$(printf '%s\n' "$CAPTURE_OUTPUT" | wc -l)" "1" "list prints one row per linked worktree"
+assert_equal "$CAPTURE_OUTPUT" "$(printf 'list-rows\t%s\tagent/%s\tclean' "$path" "$desc")" \
+  "list row carries repo, path, branch, and state"
+
+other_repo="$HOME/work/list-other"
+init_repo "$other_repo" master
+other_desc="${RUN_ID}-other"
+other_path=$(begin_worktree "$other_desc" "$other_repo")
+capture bash "$ALLOD" change list
+assert_status 0 "list exits 0 with no argument"
+assert_contains "$CAPTURE_OUTPUT" "$path" "list with no argument walks the workspace"
+assert_contains "$CAPTURE_OUTPUT" "$other_path" "list with no argument covers every repo"
+capture bash "$ALLOD" change list "$other_repo"
+assert_contains "$CAPTURE_OUTPUT" "$other_path" "list <repo-path> lists that repo's worktrees"
+assert_not_contains "$CAPTURE_OUTPUT" "$path" "list <repo-path> scopes to that repo only"
+
+# One case per state, each checked against what cleanup actually does.
+
+repo="$HOME/work/list-states"
+init_repo "$repo" master
+
+desc="${RUN_ID}-state-clean"
+path=$(begin_worktree "$desc" "$repo")
+assert_list_matches_cleanup "$repo" "$path" clean "a fresh worktree"
+
+desc="${RUN_ID}-state-dirty"
+path=$(begin_worktree "$desc" "$repo")
+printf 'dirty\n' > "$path/tracked.txt"
+assert_list_matches_cleanup "$repo" "$path" dirty "a dirty worktree"
+
+desc="${RUN_ID}-state-unpushed"
+path=$(begin_worktree "$desc" "$repo")
+printf 'unpushed\n' > "$path/tracked.txt"
+git -C "$path" commit -qam "unpushed"
+assert_list_matches_cleanup "$repo" "$path" unpushed "a worktree with unpushed commits"
+
+desc="${RUN_ID}-state-detached"
+path=$(begin_worktree "$desc" "$repo")
+git -C "$path" checkout -q --detach
+assert_contains "$(bash "$ALLOD" change list "$repo")" "(detached)" \
+  "list names a detached worktree in the branch column"
+assert_list_matches_cleanup "$repo" "$path" detached "a detached worktree"
+
+desc="${RUN_ID}-state-locked"
+path=$(begin_worktree "$desc" "$repo")
+git -C "$repo" worktree lock "$path"
+assert_list_matches_cleanup "$repo" "$path" locked "a locked worktree"
+git -C "$repo" worktree unlock "$path"
+assert_list_matches_cleanup "$repo" "$path" clean "the same worktree once unlocked"
+
+# Precedence, one assertion per adjacent pair of the reporting order.
+
+repo="$HOME/work/list-precedence"
+init_repo "$repo" master
+
+desc="${RUN_ID}-locked-dirty"
+path=$(begin_worktree "$desc" "$repo")
+printf 'dirty\n' > "$path/tracked.txt"
+git -C "$repo" worktree lock "$path"
+assert_equal "$(list_state_for "$repo" "$path")" "locked" "list reports locked ahead of dirty"
+
+desc="${RUN_ID}-detached-dirty"
+path=$(begin_worktree "$desc" "$repo")
+git -C "$path" checkout -q --detach
+printf 'dirty\n' > "$path/tracked.txt"
+assert_equal "$(list_state_for "$repo" "$path")" "detached" "list reports detached ahead of dirty"
+
+desc="${RUN_ID}-dirty-unpushed"
+path=$(begin_worktree "$desc" "$repo")
+printf 'committed\n' > "$path/tracked.txt"
+git -C "$path" commit -qam "unpushed"
+printf 'dirty\n' > "$path/tracked.txt"
+assert_equal "$(list_state_for "$repo" "$path")" "dirty" "list reports dirty ahead of unpushed"
+
+desc="${RUN_ID}-locked-gone"
+path=$(begin_worktree "$desc" "$repo")
+git -C "$repo" worktree lock "$path"
+rm -rf "$path"
+assert_equal "$(list_state_for "$repo" "$path")" "locked" \
+  "list reports locked, not prunable, for a locked worktree whose directory is gone"
+
+repo="$HOME/work/list-prunable"
+init_repo "$repo" master
+desc="${RUN_ID}-prunable"
+path=$(begin_worktree "$desc" "$repo")
+rm -rf "$path"
+worktrees_before=$(worktree_count "$repo")
+assert_equal "$(list_state_for "$repo" "$path")" "prunable" \
+  "list reports prunable for a worktree whose directory is gone"
+assert_equal "$(worktree_count "$repo")" "$worktrees_before" \
+  "list does not prune the worktrees it reports"
+capture bash "$ALLOD" change cleanup "$path"
+[[ "$CAPTURE_STATUS" -ne 0 ]] &&
+  pass "cleanup refuses a prunable worktree path" ||
+  fail "cleanup refuses a prunable worktree path" "$CAPTURE_OUTPUT"
 
 # record tests
 

@@ -52,6 +52,52 @@ work-diff         # see anything still in-flight
 flake-status      # spot pin drift across repos
 ```
 
+### Making a change
+
+`-d` is the isolation switch. With it, `begin` creates a worktree and an
+`agent/<description>` branch for every repo, protected or not, so two agents
+changing the same repo never move each other's HEAD:
+
+```bash
+path=$(allod change begin -d fix-thing ~/work/allod/tools)
+cd "$path"
+# edit
+allod change record -m "fix the thing"
+allod change submit -t "Fix the thing" -F body.md
+```
+
+Worktrees land under `~/changes/<slug>-<description>-XXXXXX`, outside `~/work`
+so the workspace stays exactly the checkouts the registry declares. Nothing may
+depend on that path — enumerate with `git worktree list` or `allod change list`.
+
+Without `-d`, `begin` prints the shared checkout path and creates nothing. That
+is the in-place flow for committing to a repo's default branch, which git cannot
+isolate anyway since one branch cannot be checked out in two worktrees. A
+protected repo has no legitimate in-place change, so it refuses instead.
+
+```bash
+cd "$(allod change begin ~/work/allod/memory)"
+```
+
+### Reclaiming worktrees
+
+`allod change list` prints one tab-separated row per linked worktree — repo,
+path, branch, state — for one repo or, with no argument, the whole workspace. It
+only reads: nothing is ever removed implicitly, because no local signal tells a
+dead agent from a working one.
+
+| State | Meaning | Reclaim |
+|---|---|---|
+| `prunable` | the directory is gone; only the admin entry is left | `git -C <repo> worktree prune` |
+| `locked` | held by `git worktree lock` | unlock, then reassess |
+| `detached` | HEAD is detached, so any commits there are unreachable by branch | create a branch at HEAD, then reassess |
+| `dirty` | uncommitted changes | commit or discard them |
+| `unpushed` | commits that exist nowhere else | `allod change record`, or handle them |
+| `clean` | nothing to lose | `allod change cleanup <path>` |
+
+Exactly one word is reported: the strongest blocker. `clean` is reported if and
+only if `allod change cleanup` on that path would succeed.
+
 ### Updating a flake input
 
 ```bash
