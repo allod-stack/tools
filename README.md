@@ -32,6 +32,7 @@ workspace/                daily workspace sync and status
 flake/                    nix flake pin management
   flake-status            inspect flake input pins across repos
   flake-update-cascade    update flake inputs across repos
+  fleet-diff              check which machines a change rebuilds
 git-hooks/                git hook policy and setup
   protected-refs-policy   branch protection, signing, remote restrictions
   setup-tracked-hooks     hookspath setup from repository registry
@@ -42,7 +43,7 @@ lib/                      shared shell libraries
 ## Documentation
 
 - [Workspace tools](workspace/README.md) — `pull-all`, `work-diff`
-- [Flake tools](flake/README.md) — `flake-status`, `flake-update-cascade`
+- [Flake tools](flake/README.md) — `flake-status`, `flake-update-cascade`, `fleet-diff`
 - [forge](docs/forge.md) — Forgejo CLI
 - [PR explanation reports](docs/pr-explain.md) — generate and iterate on a
   comprehension-first HTML report
@@ -142,6 +143,19 @@ flake-update-cascade allod-tools --pr
 # 5. Sync and verify
 pull-all
 flake-status allod-tools
+```
+
+### Checking what a change rebuilds
+
+Before merging work that could reach a real machine, evaluate the fleet against
+what the change claims it does. `--expect-none` is the land-inert case; name
+machines with `--expect` when the change is meant to convert them. A mismatch in
+either direction exits 2.
+
+```bash
+cd ~/work/allod/deploy
+fleet-diff --override 'archetypes/vm=git+https://forge.anarch.diy/allod/vm.git?rev=<40-char-rev>' \
+  --expect-none
 ```
 
 ### Reviewing a PR

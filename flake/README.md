@@ -1,6 +1,6 @@
 # Flake Tools
 
-Nix flake pin inspection and update automation.
+Nix flake pin inspection, update automation, and fleet impact checking.
 
 ## `flake-status`
 
@@ -92,3 +92,104 @@ flake-update-cascade nixpkgs home-manager
 # Update allod-tools across all repos via PRs (works on protected branches)
 flake-update-cascade allod-tools --pr
 ```
+
+---
+
+## `fleet-diff`
+
+Answers whether an unmerged change alters any machine you actually run, and
+fails when the answer differs from what the change claimed it would be.
+
+```
+fleet-diff [<deploy-checkout>] --override <input>=<url> [...]
+           [--expect <machine>,... | --expect-none]
+```
+
+For every machine in a composition-root flake it evaluates
+`config.system.build.toplevel.drvPath` twice — once against the committed lock,
+once with the given revisions substituted — and reports `unchanged` or
+`CHANGES`. The checkout defaults to the current directory.
+
+Evaluation is per-machine and sequential on purpose. `nix flake check` over a
+whole composition root evaluates every machine in one process, peaks near 7 GiB,
+and gets OOM-killed on an 8 GiB VM.
+
+**Expectation.** The point of the tool is the assertion, not the report.
+`--expect` names the machines the change is supposed to alter and `--expect-none`
+says it should alter none — the land-inert case, and the one most runs use. A
+mismatch fails in **both** directions, and the two sets are named separately:
+
+```
+$ fleet-diff ~/work/allod/deploy \
+    --override 'archetypes/vm=git+https://forge.anarch.diy/allod/vm.git?rev=<40-char-rev>' \
+    --expect allod-canary
+fleet-diff: 3 machines in /home/allod/work/allod/deploy
+  override:     archetypes/vm=git+https://forge.anarch.diy/allod/vm.git?rev=<40-char-rev>
+  expectation:  allod-canary
+
+  allod-canary           unchanged
+  allod-dev              CHANGES
+  allod-work             unchanged
+
+1 of 3 machines change.
+Scope: the fleet this checkout composes — another composition root has its own.
+
+Expectation mismatch.
+  changed, not expected:     allod-dev
+  expected, did not change:  allod-canary
+```
+
+Giving neither expectation flag is report-only: the per-machine result prints,
+nothing is asserted, and the exit status is 0 even when machines change. That
+keeps the tool usable for exploration; a gate always names an expectation.
+
+**Exit status** — distinct so it composes as a preflight inside another command:
+
+| Code | Meaning |
+|---|---|
+| 0 | computed set matches the expectation, or none was declared |
+| 1 | usage or precondition error |
+| 2 | expectation mismatch |
+| 3 | evaluation failed |
+
+**Overrides.** `--override` is repeatable and takes one `input=url` per
+occurrence, split at the first `=` so the URL keeps its own query string.
+Transitive inputs override by path (`archetypes/vm`), direct ones by name.
+Always quote the value — an unquoted `&` backgrounds the command.
+
+An override path that names no input in `flake.lock` is refused. Nix itself
+answers that with a warning and evaluates the baseline anyway, exit 0, so an
+unchecked typo would report every machine unchanged and pass `--expect-none`
+while proving nothing.
+
+**Reading the output.** The verdict goes to stdout and Nix's own diagnostics to
+stderr, so `fleet-diff … 2>/dev/null` gives a bare report. Keeping stderr is
+usually worth it: the "not writing modified lock file" block names each
+overridden input and its old and new revision, which is the receipt that the
+override took effect, and a cold run's fetch progress appears there too.
+
+**Preconditions.** The checkout needs both `flake.nix` and a committed
+`flake.lock` — without a lock there is no baseline. An uncommitted `flake.nix`
+or `flake.lock` warns, because the baseline is then the working tree rather than
+the committed lock. Nothing is written: both evaluations pass
+`--no-write-lock-file`.
+
+**Examples:**
+
+```bash
+# Report which machines a branch would alter
+fleet-diff ~/work/allod/deploy \
+  --override 'archetypes/vm=git+https://forge.anarch.diy/allod/vm.git?ref=refs/heads/agent/guest-split&rev=<40-char-rev>'
+
+# Gate a land-inert merge: fail if any machine changes
+fleet-diff --override 'inventory=git+https://forge.anarch.diy/allod/inventory.git?rev=<40-char-rev>' \
+  --expect-none
+
+# Gate an activation change: fail unless exactly these machines change
+fleet-diff --override 'inventory=git+https://forge.anarch.diy/allod/inventory.git?rev=<40-char-rev>' \
+  --expect allod-dev,allod-canary
+```
+
+A run over `allod/deploy` covers the public example fleet only. The
+authoritative run needs the private fleet, so a green public result is not
+fleet-wide proof.
