@@ -1,0 +1,356 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# --- Color support ---
+if [[ -t 1 ]]; then
+  YELLOW=$'\033[33m'
+  RED=$'\033[31m'
+  RESET=$'\033[0m'
+else
+  YELLOW="" RED="" RESET=""
+fi
+
+# --- Exit codes ---
+# Distinct so this composes as a preflight inside another command: a caller can
+# tell "the fleet is not what you claimed" from "you called me wrong".
+readonly EXIT_USAGE=1
+readonly EXIT_MISMATCH=2
+readonly EXIT_EVAL=3
+
+usage() {
+  cat <<'EOF'
+Usage: fleet-diff [<deploy-checkout>] --override <input>=<url> [...]
+                  [--expect <machine>,... | --expect-none]
+
+Evaluate every machine in a composition-root flake twice — once against the
+committed lock, once with the given revisions substituted — and report which
+machines' built systems change. Evaluation is per-machine and sequential;
+`nix flake check` over a whole composition root peaks near 7 GiB and gets
+OOM-killed on an 8 GiB VM.
+
+Arguments:
+  <deploy-checkout>          composition-root flake directory (default: .)
+
+Options:
+  --override <input>=<url>   substitute one flake input, repeatable. Transitive
+                             inputs override by path (archetypes/vm), direct
+                             ones by name (vm). Quote the value: an unquoted &
+                             backgrounds the command.
+  --expect <machine>,...     machines expected to change, comma-separated and
+                             repeatable. Mismatch fails in both directions.
+  --expect-none              expect no machine to change (the land-inert case).
+  -h, --help                 show this help.
+
+Neither expectation flag means report-only: the per-machine result is printed
+and nothing is asserted.
+
+Exit status:
+  0  the computed set matches the expectation, or none was declared
+  1  usage or precondition error
+  2  expectation mismatch
+  3  evaluation failed
+
+Examples:
+  # Report which machines a branch would alter
+  fleet-diff ~/work/allod/deploy \
+    --override 'archetypes/vm=git+https://forge.anarch.diy/allod/vm.git?ref=refs/heads/agent/guest-split&rev=<40-char-rev>'
+
+  # Gate a land-inert merge: fail if any machine changes
+  fleet-diff --override 'vm=git+https://forge.anarch.diy/allod/vm.git?rev=<40-char-rev>' --expect-none
+
+  # Gate an activation change: fail unless exactly these machines change
+  fleet-diff --override 'inventory=git+https://forge.anarch.diy/allod/inventory.git?rev=<40-char-rev>' \
+    --expect allod-dev,allod-canary
+EOF
+}
+
+die_usage() {
+  echo "fleet-diff: $1" >&2
+  usage >&2
+  exit "$EXIT_USAGE"
+}
+
+# --- Arg parsing ---
+
+CHECKOUT=""
+EXPECT_NONE=false
+EXPECT_GIVEN=false
+END_OF_OPTIONS=false
+declare -a OVERRIDE_LABELS=()   # "input=url", for display
+declare -a NIX_OVERRIDE_ARGS=() # --override-input <input> <url>, quoted by the array
+declare -a EXPECTED=()
+
+# Record one --override value. Splitting on the *first* = only, because a flake
+# URL's query string carries its own (?ref=…&rev=…).
+add_override() {
+  local spec="$1" input url
+  case "$spec" in
+    *=*) ;;
+    *) die_usage "--override needs <input>=<url>, got: ${spec}" ;;
+  esac
+  input="${spec%%=*}"
+  url="${spec#*=}"
+  if ! [[ "$input" =~ ^[a-zA-Z0-9_-]+(/[a-zA-Z0-9_-]+)*$ ]]; then
+    die_usage "invalid input name in --override: ${input}"
+  fi
+  [[ -n "$url" ]] || die_usage "--override has an empty url: ${spec}"
+  OVERRIDE_LABELS+=("${input}=${url}")
+  NIX_OVERRIDE_ARGS+=(--override-input "$input" "$url")
+}
+
+# Record one --expect value: comma-separated, and repeating the flag accumulates.
+add_expect() {
+  local value="$1" name
+  local -a parts=()
+  IFS=',' read -r -a parts <<< "$value"
+  [[ ${#parts[@]} -gt 0 ]] || die_usage "--expect consumed no machine name"
+  for name in "${parts[@]}"; do
+    [[ -n "$name" ]] || die_usage "--expect consumed an empty machine name: ${value}"
+    EXPECTED+=("$name")
+  done
+  EXPECT_GIVEN=true
+}
+
+set_checkout() {
+  [[ -z "$CHECKOUT" ]] || die_usage "unexpected argument: $1"
+  CHECKOUT="$1"
+}
+
+while [[ $# -gt 0 ]]; do
+  if [[ "$END_OF_OPTIONS" == true ]]; then
+    set_checkout "$1"
+    shift
+    continue
+  fi
+  case "$1" in
+    --)
+      END_OF_OPTIONS=true
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --override)
+      [[ $# -ge 2 && "$2" != -* ]] || die_usage "--override requires a value: <input>=<url>"
+      add_override "$2"
+      shift 2
+      ;;
+    --override=*)
+      add_override "${1#--override=}"
+      shift
+      ;;
+    --expect)
+      [[ $# -ge 2 && "$2" != -* ]] || die_usage "--expect requires a value: <machine>,..."
+      add_expect "$2"
+      shift 2
+      ;;
+    --expect=*)
+      add_expect "${1#--expect=}"
+      shift
+      ;;
+    --expect-none)
+      EXPECT_NONE=true
+      shift
+      ;;
+    -*)
+      die_usage "unknown option: $1"
+      ;;
+    *)
+      set_checkout "$1"
+      shift
+      ;;
+  esac
+done
+
+# --- Preconditions ---
+
+if [[ "$EXPECT_GIVEN" == true && "$EXPECT_NONE" == true ]]; then
+  die_usage "--expect and --expect-none are mutually exclusive"
+fi
+
+if [[ ${#OVERRIDE_LABELS[@]} -eq 0 ]]; then
+  die_usage "missing required option: --override <input>=<url>"
+fi
+
+[[ -n "$CHECKOUT" ]] || CHECKOUT="."
+# Resolve into a second variable: a failed assignment would overwrite the name
+# the diagnostic has to print.
+if ! resolved=$(cd -- "$CHECKOUT" 2>/dev/null && pwd); then
+  die_usage "not a directory: $CHECKOUT"
+fi
+CHECKOUT="$resolved"
+if [[ ! -f "${CHECKOUT}/flake.nix" ]]; then
+  die_usage "no flake.nix in ${CHECKOUT} — expected a composition-root checkout"
+fi
+if [[ ! -f "${CHECKOUT}/flake.lock" ]]; then
+  die_usage "no flake.lock in ${CHECKOUT} — the baseline must be a committed lock"
+fi
+
+for tool in nix jq; do
+  command -v "$tool" >/dev/null 2>&1 \
+    || die_usage "'${tool}' not found on PATH"
+done
+
+# Resolve an override path through the lock graph, hopping `follows` arrays as
+# well as direct node keys. Prints the node it names, or nothing.
+resolve_input_path() {
+  jq -r --arg path "$1" '
+    def resolve($node; $parts):
+      if ($parts | length) == 0 then $node
+      else
+        (.nodes[$node].inputs[$parts[0]]) as $edge
+        | if $edge == null then null
+          elif ($edge | type) == "string" then resolve($edge; $parts[1:])
+          elif ($edge | type) == "array" then
+            (resolve("root"; $edge)) as $target
+            | if $target == null then null else resolve($target; $parts[1:]) end
+          else null
+          end
+      end;
+    resolve("root"; ($path | split("/"))) // empty
+  ' "${CHECKOUT}/flake.lock"
+}
+
+# Nix treats an override for an input it cannot find as a warning and evaluates
+# the baseline anyway, exit 0 — so a mistyped path would report every machine
+# unchanged and pass --expect-none while proving nothing. Refuse instead.
+declare -a UNRESOLVED=()
+for label in "${OVERRIDE_LABELS[@]}"; do
+  input="${label%%=*}"
+  [[ -n "$(resolve_input_path "$input")" ]] || UNRESOLVED+=("$input")
+done
+if [[ ${#UNRESOLVED[@]} -gt 0 ]]; then
+  echo "fleet-diff: --override names inputs absent from ${CHECKOUT}/flake.lock: ${UNRESOLVED[*]}" >&2
+  echo "  transitive inputs override by path (archetypes/vm), direct ones by name" >&2
+  echo "  direct inputs: $(jq -r '.nodes.root.inputs | keys | join(" ")' "${CHECKOUT}/flake.lock")" >&2
+  exit "$EXIT_USAGE"
+fi
+
+# The baseline is meant to be the *committed* lock. An edited flake.nix or
+# flake.lock in the working tree silently moves it, which would make an
+# unchanged verdict meaningless, so say so rather than quietly comparing the
+# wrong pair.
+dirty=$(git -C "$CHECKOUT" status --porcelain -- flake.nix flake.lock 2>/dev/null || true)
+if [[ -n "$dirty" ]]; then
+  echo "fleet-diff: warning: uncommitted flake.nix/flake.lock in ${CHECKOUT} —" >&2
+  echo "  the baseline is the working tree, not the committed lock" >&2
+fi
+
+# --- Fleet enumeration ---
+
+EXPECTATION_LABEL="none declared"
+if [[ "$EXPECT_NONE" == true ]]; then
+  EXPECTATION_LABEL="no machine changes"
+elif [[ "$EXPECT_GIVEN" == true ]]; then
+  EXPECTATION_LABEL="${EXPECTED[*]}"
+fi
+
+if ! machines_json=$(nix eval "${CHECKOUT}#nixosConfigurations" \
+  --apply builtins.attrNames --json --no-write-lock-file); then
+  echo "fleet-diff: could not enumerate nixosConfigurations in ${CHECKOUT}" >&2
+  exit "$EXIT_EVAL"
+fi
+
+declare -a MACHINES=()
+mapfile -t MACHINES < <(printf '%s' "$machines_json" | jq -r '.[]')
+
+if [[ ${#MACHINES[@]} -eq 0 ]]; then
+  echo "fleet-diff: ${CHECKOUT} composes no nixosConfigurations" >&2
+  exit "$EXIT_EVAL"
+fi
+
+declare -A IN_FLEET=()
+for machine in "${MACHINES[@]}"; do
+  IN_FLEET["$machine"]=1
+done
+
+# Catch a typo before spending minutes of evaluation on it, and so a misspelled
+# name never reads as "expected to change, did not".
+declare -a UNKNOWN=()
+for machine in "${EXPECTED[@]}"; do
+  [[ -n "${IN_FLEET[$machine]:-}" ]] || UNKNOWN+=("$machine")
+done
+if [[ ${#UNKNOWN[@]} -gt 0 ]]; then
+  echo "fleet-diff: --expect names machines not in this fleet: ${UNKNOWN[*]}" >&2
+  echo "  fleet: ${MACHINES[*]}" >&2
+  exit "$EXIT_USAGE"
+fi
+
+# --- Per-machine sequential evaluation ---
+
+printf 'fleet-diff: %d machines in %s\n' "${#MACHINES[@]}" "$CHECKOUT"
+for label in "${OVERRIDE_LABELS[@]}"; do
+  printf '  override:     %s\n' "$label"
+done
+printf '  expectation:  %s\n' "$EXPECTATION_LABEL"
+echo ""
+
+declare -a CHANGED=()
+
+for machine in "${MACHINES[@]}"; do
+  attr="${CHECKOUT}#nixosConfigurations.${machine}.config.system.build.toplevel.drvPath"
+
+  if ! base=$(nix eval "$attr" --raw --no-write-lock-file); then
+    echo "fleet-diff: baseline evaluation failed for ${machine}" >&2
+    exit "$EXIT_EVAL"
+  fi
+  if ! candidate=$(nix eval "$attr" --raw --no-write-lock-file \
+    "${NIX_OVERRIDE_ARGS[@]}"); then
+    echo "fleet-diff: candidate evaluation failed for ${machine}" >&2
+    exit "$EXIT_EVAL"
+  fi
+
+  if [[ "$base" == "$candidate" ]]; then
+    printf '  %-22s %s\n' "$machine" "unchanged"
+  else
+    printf '  %-22s %s\n' "$machine" "${YELLOW}CHANGES${RESET}"
+    CHANGED+=("$machine")
+  fi
+done
+
+echo ""
+printf '%d of %d machines change.\n' "${#CHANGED[@]}" "${#MACHINES[@]}"
+printf 'Scope: the fleet this checkout composes — another composition root has its own.\n'
+
+# --- Expectation ---
+
+if [[ "$EXPECT_GIVEN" == false && "$EXPECT_NONE" == false ]]; then
+  echo "No expectation declared — report only, nothing asserted."
+  exit 0
+fi
+
+declare -A IS_EXPECTED=()
+for machine in "${EXPECTED[@]}"; do
+  IS_EXPECTED["$machine"]=1
+done
+declare -A IS_CHANGED=()
+for machine in "${CHANGED[@]}"; do
+  IS_CHANGED["$machine"]=1
+done
+
+declare -a UNEXPECTED=()
+for machine in "${CHANGED[@]}"; do
+  [[ -n "${IS_EXPECTED[$machine]:-}" ]] || UNEXPECTED+=("$machine")
+done
+declare -a MISSING=()
+for machine in "${MACHINES[@]}"; do
+  if [[ -n "${IS_EXPECTED[$machine]:-}" && -z "${IS_CHANGED[$machine]:-}" ]]; then
+    MISSING+=("$machine")
+  fi
+done
+
+if [[ ${#UNEXPECTED[@]} -eq 0 && ${#MISSING[@]} -eq 0 ]]; then
+  echo "Expectation matches."
+  exit 0
+fi
+
+echo ""
+echo "${RED}Expectation mismatch.${RESET}"
+if [[ ${#UNEXPECTED[@]} -gt 0 ]]; then
+  printf '  changed, not expected:     %s\n' "${UNEXPECTED[*]}"
+fi
+if [[ ${#MISSING[@]} -gt 0 ]]; then
+  printf '  expected, did not change:  %s\n' "${MISSING[*]}"
+fi
+exit "$EXIT_MISMATCH"
