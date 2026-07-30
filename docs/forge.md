@@ -20,17 +20,25 @@ and `-R`/`--repo` may appear before the resource or after the command.
 
 ## Errors
 
-A rejected API call writes one line to stderr and exits 22:
+Any response that is not 2xx writes one line to stderr and exits 22:
 
 ```
 forge: POST /repos/owner/repo/labels failed: HTTP 403: user should have a permission to write to a repo
 ```
 
-The trailing message is the API's own; it is omitted when the response carries no
-body, leaving just the status. A transport failure instead reports `curl exit <n>`
-and returns curl's own code. Exit 22 therefore means the request reached the forge
-and the forge refused it -- read the status to tell a permission problem (403) from
-a missing resource (404) or a rejected payload (422).
+Read the status to tell a permission problem (403) from a missing resource (404) or
+a rejected payload (422). Redirects count as failures too: no `-L` is passed, so a
+3xx body is never the resource that was requested -- an `http://` `FORGE_URL` against
+an https-only forge reports `HTTP 308` rather than looking like an empty result.
+
+The trailing text is the API's `message` when the response carries one. Otherwise it
+is the start of the raw body, which for a proxy error is HTML rather than anything
+the forge said; either way it is truncated to 200 characters, flattened to a single
+line, and stripped of control bytes. A response with no body leaves just the status.
+
+A transport failure -- the request never completing -- instead reports `curl exit <n>`
+and returns curl's own code, so 22 specifically means the forge answered and the
+answer was not a success.
 
 ## PR commands
 

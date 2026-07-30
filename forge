@@ -257,9 +257,15 @@ api() {
   fi
   http_code=$(printf '%s' "$result" | tail -1)
   body=$(printf '%s' "$result" | sed '$d')
-  if [[ "$http_code" == [45]* ]]; then
-    message=$(printf '%s' "$body" | jq -r '.message // empty' 2>/dev/null) || message=""
-    [[ -n "$message" ]] || message=$(printf '%s' "$body" | tr '\n' ' ' | cut -c1-200)
+  # Anything but 2xx is a failure. Redirects are included deliberately: no -L is
+  # passed, so a 3xx body is never the resource that was asked for, and treating
+  # one as success turns an http:// base URL into a silent empty answer.
+  if [[ "$http_code" != 2* ]]; then
+    message=$(printf '%s' "$body" | jq -r 'if type == "object" and (.message | type) == "string" then .message else empty end' 2>/dev/null) || message=""
+    [[ -n "$message" ]] || message="$body"
+    # One line, always: collapse whitespace and drop control bytes so a stray
+    # newline or escape sequence in the payload cannot forge extra output.
+    message=$(printf '%s' "$message" | tr -d '\000-\010\013\014\016-\037\177' | tr '\n\r\t' '   ' | cut -c1-200)
     echo "forge: $method $path failed: HTTP $http_code${message:+: $message}" >&2
     return 22
   fi
@@ -844,7 +850,9 @@ pr_close() {
     -d '{"state":"closed"}' | jq -r '.html_url')
 
   if [[ "$delete_branch" == true && -n "$head_ref" ]]; then
-    if api DELETE "/repos/$REPO/branches/$(urlencode "$head_ref")" >/dev/null 2>&1; then
+    # stderr is deliberately not suppressed: branch deletion needs repo write, so
+    # this is the call most likely to be refused, and the reason belongs on screen.
+    if api DELETE "/repos/$REPO/branches/$(urlencode "$head_ref")" >/dev/null; then
       echo "PR closed: $url (branch $head_ref deleted)"
     else
       echo "PR closed: $url"
@@ -1925,10 +1933,14 @@ project_unavailable() {
 
 verify_token_http() {
   local token="$1"
-  local result http_code
+  local result http_code rc=0
   result=$(curl -s -w '\n%{http_code}' -X GET \
     "$FORGE_URL/api/v1/user" \
-    --config <(printf 'header = "Authorization: token %s"\n' "$token"))
+    --config <(printf 'header = "Authorization: token %s"\n' "$token")) || rc=$?
+  if (( rc != 0 )); then
+    echo "forge: GET /user failed: curl exit $rc" >&2
+    return "$rc"
+  fi
   http_code=$(printf '%s' "$result" | tail -1)
   local body
   body=$(printf '%s' "$result" | sed '$d')

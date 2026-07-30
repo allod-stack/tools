@@ -37,10 +37,11 @@ data=""
 write_out=""
 auth_header=""
 config_file=""
-# Routes below print their body and set status only when it is not 200. The
-# status is appended once, centrally, after the case: real curl honours -w on
-# every request, so a mock that appended it per-route would starve any caller
-# that splits the status back off.
+# Routes below print their body and override this only when they need a non-200
+# status; the empty-body routes stay 200 rather than modelling a real 204, which
+# the split treats identically. The status is appended once, centrally, after the
+# case: real curl honours -w on every request, so a mock that appended it
+# per-route would starve any caller that splits the status back off.
 status=200
 
 while [[ $# -gt 0 ]]; do
@@ -175,12 +176,22 @@ case "$url" in
   */api/v1/repos/acme/widget/issues)
     printf '%s\n' '{"html_url":"https://forge.example/acme/widget/issues/20"}'
     ;;
-  */api/v1/repos/acme/widget/issues/403*)
+  */api/v1/repos/acme/widget/issues/403|*/api/v1/repos/acme/widget/issues/403/*)
     # Fixture for api() error reporting: a Forgejo-shaped error body plus a 4xx
     # status, matching what a real forge returns when the account lacks write
     # access to the repository.
     printf '%s' '{"message":"user should have a permission to write to a repo","url":"https://forge.example/api/swagger"}'
     status=403
+    ;;
+  */api/v1/repos/acme/widget/issues/599)
+    # Fixture for the transport-failure path: curl itself fails without ever
+    # returning a status. 6 is curl's "could not resolve host".
+    exit 6
+    ;;
+  */api/v1/repos/acme/widget/issues/308)
+    # Fixture for a redirect. No -L is passed, so a 3xx body is never the
+    # resource that was requested and must not be mistaken for success.
+    status=308
     ;;
   */api/v1/repos/acme/widget/issues/20)
     if [[ "$method" == GET ]]; then
