@@ -18,6 +18,20 @@ When `FORGEJO_TOKEN` is unset, `forge` reads the token from `FORGE_TOKEN_FILE`.
 Repo is inferred from `git remote get-url origin` when `-R`/`--repo` is omitted,
 and `-R`/`--repo` may appear before the resource or after the command.
 
+## Errors
+
+A rejected API call writes one line to stderr and exits 22:
+
+```
+forge: POST /repos/owner/repo/labels failed: HTTP 403: user should have a permission to write to a repo
+```
+
+The trailing message is the API's own; it is omitted when the response carries no
+body, leaving just the status. A transport failure instead reports `curl exit <n>`
+and returns curl's own code. Exit 22 therefore means the request reached the forge
+and the forge refused it -- read the status to tell a permission problem (403) from
+a missing resource (404) or a rejected payload (422).
+
 ## PR commands
 
 ```bash

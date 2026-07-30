@@ -236,15 +236,34 @@ set_body_option() {
 
 # --- API helper ---
 
+# Reports the HTTP status and the API's own message on failure. curl's -f is
+# deliberately absent: it discards the response body and collapses every status
+# >= 400 into exit 22, so a perfectly informative "403 Forbidden" reached the
+# process and was thrown away. The status is appended to the body as a trailing
+# line and split back off here, the same shape token verification uses.
 api() {
   load_token
   local method="$1"; shift
   local path="$1"; shift
-  curl -sf -X "$method" \
+  local result rc=0 http_code body message
+  result=$(curl -s -w '\n%{http_code}' -X "$method" \
     "$FORGE_URL/api/v1$path" \
     --config <(printf 'header = "Authorization: token %s"\n' "$TOKEN") \
     -H "Content-Type: application/json" \
-    "$@"
+    "$@") || rc=$?
+  if (( rc != 0 )); then
+    echo "forge: $method $path failed: curl exit $rc" >&2
+    return "$rc"
+  fi
+  http_code=$(printf '%s' "$result" | tail -1)
+  body=$(printf '%s' "$result" | sed '$d')
+  if [[ "$http_code" == [45]* ]]; then
+    message=$(printf '%s' "$body" | jq -r '.message // empty' 2>/dev/null) || message=""
+    [[ -n "$message" ]] || message=$(printf '%s' "$body" | tr '\n' ' ' | cut -c1-200)
+    echo "forge: $method $path failed: HTTP $http_code${message:+: $message}" >&2
+    return 22
+  fi
+  [[ -z "$body" ]] || printf '%s\n' "$body"
 }
 
 is_integer() {

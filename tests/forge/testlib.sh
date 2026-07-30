@@ -37,6 +37,11 @@ data=""
 write_out=""
 auth_header=""
 config_file=""
+# Routes below print their body and set status only when it is not 200. The
+# status is appended once, centrally, after the case: real curl honours -w on
+# every request, so a mock that appended it per-route would starve any caller
+# that splits the status back off.
+status=200
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -84,9 +89,10 @@ printf '%s' "$data" > "$MOCK_REQUEST_DIR/$count.data"
 printf '%s' "$auth_header" > "$MOCK_REQUEST_DIR/$count.auth"
 
 # Auth gate: non-verification API calls must carry a valid auth header.
-# Verification calls use -w (write_out) to get the HTTP status code and
-# handle auth failure themselves, so they bypass this gate.
-if [[ "$url" == */api/v1/* && -z "$write_out" && "$auth_header" != *"test-token"* ]]; then
+# Verification hits /api/v1/user and handles auth failure itself, so it bypasses
+# this gate. Keyed on the endpoint rather than on -w, because api() now passes
+# -w on every request in order to read the HTTP status back.
+if [[ "$url" == */api/v1/* && "$url" != */api/v1/user && "$auth_header" != *"test-token"* ]]; then
   echo '{"message":"Unauthorized"}' >&2
   exit 1
 fi
@@ -169,6 +175,13 @@ case "$url" in
   */api/v1/repos/acme/widget/issues)
     printf '%s\n' '{"html_url":"https://forge.example/acme/widget/issues/20"}'
     ;;
+  */api/v1/repos/acme/widget/issues/403*)
+    # Fixture for api() error reporting: a Forgejo-shaped error body plus a 4xx
+    # status, matching what a real forge returns when the account lacks write
+    # access to the repository.
+    printf '%s' '{"message":"user should have a permission to write to a repo","url":"https://forge.example/api/swagger"}'
+    status=403
+    ;;
   */api/v1/repos/acme/widget/issues/20)
     if [[ "$method" == GET ]]; then
       printf '%s\n' '{"html_url":"https://forge.example/acme/widget/issues/20","title":"Fix backup","state":"open","body":"Issue body","user":{"login":"bob"},"labels":[{"id":1,"name":"bug","color":"ff0000"}],"milestone":{"id":3,"title":"July batch"}}'
@@ -235,10 +248,9 @@ case "$url" in
   */api/v1/user)
     if [[ "$auth_header" == *"valid-token"* ]]; then
       printf '%s' '{"login":"testuser"}'
-      [[ -z "$write_out" ]] || printf '\n200'
     else
       printf '%s' '{"message":"Unauthorized"}'
-      [[ -z "$write_out" ]] || printf '\n401'
+      status=401
     fi
     ;;
   *)
@@ -246,6 +258,8 @@ case "$url" in
     exit 1
     ;;
 esac
+
+[[ -z "$write_out" ]] || printf '\n%s' "$status"
 EOF
 
 chmod +x "$MOCK_BIN/git" "$MOCK_BIN/curl"
