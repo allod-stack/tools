@@ -179,6 +179,12 @@ EOF
   MOVED_NEW_SHA=$(git -C "$base_seed" rev-parse HEAD)
   git -C "$base_seed" push -q origin moving-topic
 
+  git -C "$base_seed" checkout -q master
+  git -C "$base_seed" switch -qc moving-base
+  make_commit "$base_seed" "moved base" $'base line\nremote base moved'
+  MOVED_BASE_NEW_SHA=$(git -C "$base_seed" rev-parse HEAD)
+  git -C "$base_seed" push -q origin moving-base
+
   git clone -q https://forge.example/acme/widget.git "$fork_seed"
   git -C "$fork_seed" remote set-url origin https://forge.example/contributor/widget-fork.git
   git -C "$fork_seed" push -q -u origin master
@@ -186,6 +192,12 @@ EOF
   make_commit "$fork_seed" "fork head" $'base line\nfork change'
   FORK_HEAD_SHA=$(git -C "$fork_seed" rev-parse HEAD)
   git -C "$fork_seed" push -q origin fork-topic
+
+  git -C "$fork_seed" checkout -q fork-topic
+  git -C "$fork_seed" switch -qc moving-fork-topic
+  make_commit "$fork_seed" "moved fork head" $'base line\nfork change\nfork remote moved'
+  MOVED_FORK_NEW_SHA=$(git -C "$fork_seed" rev-parse HEAD)
+  git -C "$fork_seed" push -q origin moving-fork-topic
 
   git init -q -b master "$wrong_seed"
   make_commit "$wrong_seed" "wrong base" "unrelated repository"
@@ -197,6 +209,7 @@ EOF
   git clone -q https://forge.example/other/project.git "$TEST_TMP/wrong-checkout"
 
   export BASE_SHA SAME_HEAD_SHA FORK_HEAD_SHA MOVED_OLD_SHA MOVED_NEW_SHA
+  export MOVED_BASE_NEW_SHA MOVED_FORK_NEW_SHA
   export MOCK_BASE_SHA="$BASE_SHA"
 }
 
@@ -216,6 +229,7 @@ invocation=$(tail -n 1 "$MOCK_FORGE_LOG" | tr '\t' ' ')
 
 case " $invocation " in
   *" pr snapshot "*)
+    base_ref=master
     case "${MOCK_SCENARIO:-same}" in
       same|dirty)
         head_owner=acme; head_name=widget; head_full=acme/widget
@@ -242,6 +256,17 @@ case " $invocation " in
         head_url=https://forge.example/acme/widget.git
         head_ref=moving-topic; head_sha="$MOVED_OLD_SHA"
         ;;
+      moved-base)
+        head_owner=acme; head_name=widget; head_full=acme/widget
+        head_url=https://forge.example/acme/widget.git
+        head_ref=topic; head_sha="$SAME_HEAD_SHA"
+        base_ref=moving-base
+        ;;
+      moved-fork-head)
+        head_owner=contributor; head_name=widget-fork; head_full=contributor/widget-fork
+        head_url=https://forge.example/contributor/widget-fork.git
+        head_ref=moving-fork-topic; head_sha="$FORK_HEAD_SHA"
+        ;;
       empty)
         head_owner=acme; head_name=widget; head_full=acme/widget
         head_url=https://forge.example/acme/widget.git
@@ -250,7 +275,7 @@ case " $invocation " in
       *) printf 'unexpected forge scenario: %s\n' "$MOCK_SCENARIO" >&2; exit 2 ;;
     esac
     jq -n \
-      --arg base "$BASE_SHA" --arg head "$head_sha" \
+      --arg base "$BASE_SHA" --arg head "$head_sha" --arg br "$base_ref" \
       --arg ho "$head_owner" --arg hn "$head_name" --arg hf "$head_full" \
       --arg hu "$head_url" --arg hr "$head_ref" '
       {
@@ -266,7 +291,7 @@ case " $invocation " in
             owner: "acme", name: "widget", full_name: "acme/widget",
             clone_url: "https://forge.example/acme/widget.git"
           },
-          ref: "master", sha: $base
+          ref: $br, sha: $base
         },
         head: {
           repository: {owner: $ho, name: $hn, full_name: $hf, clone_url: $hu},
@@ -349,6 +374,58 @@ case "${MOCK_RUNNER_MODE:-success}" in
       exit 24
     }
     cp "$MOCK_BODY_FILE" "$ALLOD_PR_EXPLAIN_REPORT_BODY"
+    ;;
+  body-symlink)
+    [[ -n "${ALLOD_PR_EXPLAIN_REPORT_BODY:-}" ]] || {
+      printf 'missing ALLOD_PR_EXPLAIN_REPORT_BODY\n' >&2
+      exit 24
+    }
+    cp "$MOCK_BODY_FILE" "$prefix.symlink-target.html"
+    rm -f "$ALLOD_PR_EXPLAIN_REPORT_BODY"
+    ln -s "$prefix.symlink-target.html" "$ALLOD_PR_EXPLAIN_REPORT_BODY"
+    ;;
+  body-replace)
+    [[ -n "${ALLOD_PR_EXPLAIN_REPORT_BODY:-}" ]] || {
+      printf 'missing ALLOD_PR_EXPLAIN_REPORT_BODY\n' >&2
+      exit 24
+    }
+    # mv a distinct, already-allocated inode into place — rm+cp in the same
+    # directory risks the filesystem reusing the freed inode number, which
+    # would make this postcondition check pass by coincidence.
+    cp "$MOCK_BODY_FILE" "$prefix.replacement.html"
+    mv -f "$prefix.replacement.html" "$ALLOD_PR_EXPLAIN_REPORT_BODY"
+    ;;
+  tamper-snapshot)
+    [[ -n "${ALLOD_PR_EXPLAIN_REPORT_BODY:-}" ]] || {
+      printf 'missing ALLOD_PR_EXPLAIN_REPORT_BODY\n' >&2
+      exit 24
+    }
+    cp "$MOCK_BODY_FILE" "$ALLOD_PR_EXPLAIN_REPORT_BODY"
+    printf '{"tampered":true}' >> "$job/snapshot.json"
+    ;;
+  move-head)
+    [[ -n "${ALLOD_PR_EXPLAIN_REPORT_BODY:-}" ]] || {
+      printf 'missing ALLOD_PR_EXPLAIN_REPORT_BODY\n' >&2
+      exit 24
+    }
+    cp "$MOCK_BODY_FILE" "$ALLOD_PR_EXPLAIN_REPORT_BODY"
+    git -C "$repo" checkout -q --detach "$MOCK_BASE_SHA"
+    ;;
+  dirty-worktree)
+    [[ -n "${ALLOD_PR_EXPLAIN_REPORT_BODY:-}" ]] || {
+      printf 'missing ALLOD_PR_EXPLAIN_REPORT_BODY\n' >&2
+      exit 24
+    }
+    cp "$MOCK_BODY_FILE" "$ALLOD_PR_EXPLAIN_REPORT_BODY"
+    printf 'runner tampering\n' >> "$repo/example.txt"
+    ;;
+  publish-race)
+    [[ -n "${ALLOD_PR_EXPLAIN_REPORT_BODY:-}" ]] || {
+      printf 'missing ALLOD_PR_EXPLAIN_REPORT_BODY\n' >&2
+      exit 24
+    }
+    cp "$MOCK_BODY_FILE" "$ALLOD_PR_EXPLAIN_REPORT_BODY"
+    printf '%s\n' "${MOCK_RACE_CONTENT:-intruder}" > "$MOCK_RACE_OUTPUT"
     ;;
   *)
     printf 'unknown runner mode: %s\n' "$MOCK_RUNNER_MODE" >&2

@@ -321,4 +321,95 @@ assert_equal "$(cat "$atomic_output")" "known-good previous report" \
 assert_contains "$CAPTURE_OUTPUT" "secret" "reports the blocking secret-content validation"
 assert_file_exists "$(diagnostics_path)/report-body.html" "preserves the rejected staging body for diagnosis"
 
+new_case moved-base
+export MOCK_SCENARIO=moved-base
+capture_explain "$TEST_TMP/checkout" 7 --codex -R acme/widget --output "$CASE_DIR/output/report.html"
+assert_failure "fails when the remote base ref moved away from the snapshot"
+assert_contains "$CAPTURE_OUTPUT" "$BASE_SHA" "reports the snapshotted base object ID on movement"
+assert_contains "$CAPTURE_OUTPUT" "$MOVED_BASE_NEW_SHA" "reports the fetched remote base object ID on movement"
+assert_no_runner "does not disclose source to a runner after base SHA movement"
+assert_file_absent "$CASE_DIR/output/report.html" "does not write a report after base SHA movement"
+assert_file_exists "$(diagnostics_path)/snapshot.json" "preserves the snapshot for a moved-base diagnosis"
+
+new_case moved-fork-head
+export MOCK_SCENARIO=moved-fork-head
+capture_explain "$TEST_TMP/checkout" 7 --codex -R acme/widget --output "$CASE_DIR/output/report.html"
+assert_failure "fails when the fork's remote head ref moved away from the snapshot"
+assert_contains "$CAPTURE_OUTPUT" "$FORK_HEAD_SHA" "reports the snapshotted fork head object ID on movement"
+assert_contains "$CAPTURE_OUTPUT" "$MOVED_FORK_NEW_SHA" "reports the fetched fork remote head object ID on movement"
+assert_no_runner "does not disclose source to a runner after fork head SHA movement"
+assert_file_absent "$CASE_DIR/output/report.html" "does not write a report after fork head SHA movement"
+assert_file_exists "$(diagnostics_path)/snapshot.json" "preserves the snapshot for a moved-fork-head diagnosis"
+
+new_case body-symlink
+write_valid_body codex
+export MOCK_RUNNER_MODE=body-symlink
+capture_explain "$TEST_TMP/checkout" 7 --codex -R acme/widget --output "$CASE_DIR/output/report.html"
+assert_failure "fails closed when the runner replaces the staged body with a symlink"
+assert_contains "$CAPTURE_OUTPUT" "non-regular file" "diagnoses the symlinked body"
+assert_file_absent "$CASE_DIR/output/report.html" "does not publish after a symlinked body"
+assert_file_exists "$(diagnostics_path)/prompt.md" "preserves diagnostics for a symlinked body"
+
+new_case body-inode-replaced
+write_valid_body codex
+export MOCK_RUNNER_MODE=body-replace
+capture_explain "$TEST_TMP/checkout" 7 --codex -R acme/widget --output "$CASE_DIR/output/report.html"
+assert_failure "fails closed when the runner replaces the staged body file instead of populating it in place"
+assert_contains "$CAPTURE_OUTPUT" "instead of populating it in place" "diagnoses the inode replacement"
+assert_file_absent "$CASE_DIR/output/report.html" "does not publish after an inode-replaced body"
+assert_file_exists "$(diagnostics_path)/prompt.md" "preserves diagnostics for an inode-replaced body"
+
+new_case snapshot-tampered
+write_valid_body codex
+export MOCK_RUNNER_MODE=tamper-snapshot
+capture_explain "$TEST_TMP/checkout" 7 --codex -R acme/widget --output "$CASE_DIR/output/report.html"
+assert_failure "fails closed when the runner modifies the immutable PR snapshot"
+assert_contains "$CAPTURE_OUTPUT" "modified the immutable PR snapshot" "diagnoses the tampered snapshot"
+assert_file_absent "$CASE_DIR/output/report.html" "does not publish after a tampered snapshot"
+assert_file_exists "$(diagnostics_path)/prompt.md" "preserves diagnostics for a tampered snapshot"
+
+new_case job-checkout-head-moved
+write_valid_body codex
+export MOCK_RUNNER_MODE=move-head
+capture_explain "$TEST_TMP/checkout" 7 --codex -R acme/widget --output "$CASE_DIR/output/report.html"
+assert_failure "fails closed when the runner moves the detached job checkout away from the snapshotted head"
+assert_contains "$CAPTURE_OUTPUT" "moved the detached job checkout" "diagnoses the moved job checkout"
+assert_file_absent "$CASE_DIR/output/report.html" "does not publish after the job checkout moved"
+assert_file_exists "$(diagnostics_path)/prompt.md" "preserves diagnostics for a moved job checkout"
+
+new_case job-checkout-left-dirty
+write_valid_body codex
+export MOCK_RUNNER_MODE=dirty-worktree
+capture_explain "$TEST_TMP/checkout" 7 --codex -R acme/widget --output "$CASE_DIR/output/report.html"
+assert_failure "fails closed when the runner leaves the detached job checkout dirty"
+assert_contains "$CAPTURE_OUTPUT" "modified the detached job checkout" "diagnoses the dirty job checkout"
+assert_file_absent "$CASE_DIR/output/report.html" "does not publish after the job checkout is left dirty"
+assert_file_exists "$(diagnostics_path)/prompt.md" "preserves diagnostics for a dirty job checkout"
+
+new_case publication-race-no-clobber
+write_valid_body codex
+race_output="$CASE_DIR/output/report.html"
+export MOCK_RUNNER_MODE=publish-race
+export MOCK_RACE_OUTPUT="$race_output"
+export MOCK_RACE_CONTENT="intruder content that appeared mid-run"
+capture_explain "$TEST_TMP/checkout" 7 --codex -R acme/widget --output "$race_output"
+assert_failure "refuses to publish when the output path appeared during generation"
+assert_contains "$CAPTURE_OUTPUT" "appeared during generation" "diagnoses the publication race"
+assert_equal "$(cat "$race_output")" "intruder content that appeared mid-run" \
+  "preserves the file that raced into the no-clobber output path"
+assert_file_exists "$(diagnostics_path)/prompt.md" "preserves diagnostics for a no-clobber publication race"
+unset MOCK_RACE_OUTPUT MOCK_RACE_CONTENT
+
+new_case publication-race-replace
+write_valid_body codex
+race_output="$CASE_DIR/output/report.html"
+export MOCK_RUNNER_MODE=publish-race
+export MOCK_RACE_OUTPUT="$race_output"
+export MOCK_RACE_CONTENT="intruder content that appeared mid-run"
+capture_explain "$TEST_TMP/checkout" 7 --codex -R acme/widget --output "$race_output" --replace
+assert_success "--replace publishes despite a mid-run race, per its documented overwrite consent"
+assert_not_contains "$(cat "$race_output")" "intruder content" \
+  "overwrites the file that raced in, since --replace already authorized overwriting whatever is there"
+unset MOCK_RACE_OUTPUT MOCK_RACE_CONTENT
+
 finish_tests "allod pr explain command"
