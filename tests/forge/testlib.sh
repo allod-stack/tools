@@ -142,10 +142,25 @@ case "$url" in
     ;;
   */api/v1/repos/acme/widget/pulls/12)
     if [[ "$method" == GET ]]; then
-      printf '%s\n' '{"title":"Improve tool","state":"open","body":"PR body","user":{"login":"alice"},"head":{"label":"acme:topic","ref":"topic"},"base":{"label":"master","ref":"master"}}'
+      printf '%s\n' '{"number":12,"html_url":"https://forge.example/acme/widget/pulls/12","title":"Improve tool","state":"open","body":"PR body","user":{"login":"alice"},"head":{"label":"acme:topic","ref":"topic","sha":"2222222222222222222222222222222222222222","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}},"base":{"label":"master","ref":"master","sha":"1111111111111111111111111111111111111111","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}'
     else
       printf '%s\n' '{"html_url":"https://forge.example/acme/widget/pulls/12"}'
     fi
+    ;;
+  */api/v1/repos/acme/widget/pulls/41)
+    printf '%s\n' '{"number":41,"html_url":"https://forge.example/acme/widget/pulls/41","title":"Fork contribution","state":"open","body":null,"head":{"label":"contributor:topic","ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"contributor"},"name":"widget-fork","full_name":"contributor/widget-fork","clone_url":"https://forge.example/contributor/widget-fork.git"}},"base":{"label":"master","ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}'
+    ;;
+  */api/v1/repos/acme/widget/pulls/42)
+    printf '%s\n' '{"number":42,"html_url":"https://forge.example/acme/widget/pulls/42","title":"Malformed snapshot","body":"Bad head object ID","head":{"ref":"topic","sha":"not-an-object-id","repo":{"owner":{"login":"contributor"},"name":"widget-fork","full_name":"contributor/widget-fork","clone_url":"https://forge.example/contributor/widget-fork.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}'
+    ;;
+  */api/v1/repos/acme/widget/pulls/43)
+    printf '%s\n' '{"number":99,"html_url":"https://forge.example/acme/widget/pulls/43","title":"Wrong pull request","body":"Mismatched number","head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}'
+    ;;
+  */api/v1/repos/acme/widget/pulls/44)
+    printf '%s\n' '{"number":44,"html_url":"https://forge.example/acme/widget/pulls/44","title":"Missing ref","body":"Empty head ref","head":{"ref":"","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"contributor"},"name":"widget-fork","full_name":"contributor/widget-fork","clone_url":"https://forge.example/contributor/widget-fork.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}'
+    ;;
+  */api/v1/repos/acme/widget/pulls/45)
+    printf '%s\n' '{"number":45,"html_url":"https://forge.example/acme/widget/pulls/45","title":"Missing repository metadata","body":"No head clone URL","head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"contributor"},"name":"widget-fork","full_name":"contributor/widget-fork"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}'
     ;;
   */api/v1/repos/acme/widget/issues/12/comments)
     if [[ "$method" == GET ]]; then

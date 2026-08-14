@@ -22,6 +22,10 @@ run_fail "cannot be combined" "rejects conflicting issue milestone edit flags" \
   issue edit 20 --milestone "July batch" --remove-milestone
 run_fail "requires --body or --body-file" "requires a pull request comment body" \
   pr comment 12
+run_fail "positive integer" "requires a positive pull request snapshot number" \
+  pr snapshot nope
+run_fail "usage: forge pr snapshot" "requires one pull request snapshot number" \
+  pr snapshot
 run_fail "requires --body or --body-file" "requires an issue comment body" \
   issue comment 20
 run_fail "--clear cannot be combined" "rejects clear plus issue label changes" \

@@ -45,6 +45,7 @@ answer was not a success.
 ```bash
 forge pr list
 forge pr view <number>
+forge pr snapshot <number>                 # stable immutable commit metadata as JSON
 forge pr create --title <title> [--head <branch>] [--base <branch>] \
   [--body <text> | --body-file <file>]
 forge pr comment <number> [--body <text> | --body-file <file>]
@@ -62,6 +63,50 @@ repository's default branch. The `gh` short aliases are also supported:
 `pr close` accepts a PR number, full URL, or head branch name as its target.
 Use `-c`/`--comment` to leave a closing comment and `-d`/`--delete-branch` to
 delete the remote head branch after closing.
+
+`pr snapshot` is the machine-readable interface for tools that need a pull
+request's exact commits. It emits a deliberately small, versioned schema rather
+than the Forgejo API response, so unrelated server fields can change without
+breaking consumers:
+
+```json
+{
+  "schema_version": 1,
+  "pull_request": {
+    "number": 12,
+    "url": "https://forge.example/acme/widget/pulls/12",
+    "title": "Improve widget",
+    "body": "Why this change is useful"
+  },
+  "base": {
+    "repository": {
+      "owner": "acme",
+      "name": "widget",
+      "full_name": "acme/widget",
+      "clone_url": "https://forge.example/acme/widget.git"
+    },
+    "ref": "master",
+    "sha": "1111111111111111111111111111111111111111"
+  },
+  "head": {
+    "repository": {
+      "owner": "contributor",
+      "name": "widget",
+      "full_name": "contributor/widget",
+      "clone_url": "https://forge.example/contributor/widget.git"
+    },
+    "ref": "topic",
+    "sha": "2222222222222222222222222222222222222222"
+  }
+}
+```
+
+All projected fields are present and non-null; a missing PR body becomes the
+empty string. The command fails instead of emitting partial JSON when the API
+omits repository identity, an HTTPS clone URL, a ref, or a 40/64-character
+hexadecimal Git object ID. `base.repository` and `head.repository` are
+independent, which is what lets the same contract represent both
+same-repository and fork heads.
 
 ## Auth commands
 

@@ -43,6 +43,10 @@ assert_contains "$output" "<comment-id>" "pr reply --help shows comment-id posit
 output=$(run_capture pr list --help)
 assert_contains "$output" "--repo" "pr list --help shows --repo flag"
 
+output=$(run_capture pr snapshot --help)
+assert_contains "$output" "<number>" "pr snapshot --help shows number positional"
+assert_contains "$output" "versioned JSON" "pr snapshot --help describes stable output"
+
 output=$(run_capture issue view -h)
 assert_contains "$output" "<number>" "issue view -h shows number positional"
 

@@ -14,6 +14,7 @@
 # pr commands:
 #   forge pr list                              List open pull requests
 #   forge pr view <number>                     Show PR details and comments
+#   forge pr snapshot <number>                 Print a stable immutable PR snapshot as JSON
 #   forge pr review-comments <number>          List inline comments with IDs
 #   forge pr reply <number> <id> --body <text> Reply to an inline comment thread
 #   forge pr create --title <title> [flags]    Create a pull request
@@ -470,6 +471,83 @@ pr_view() {
       printf '%s\n' "$inline_output"
     fi
   fi
+}
+
+pr_snapshot() {
+  contains_help_flag "$@" && { command_usage "pr snapshot"; return; }
+  parse_repo_positionals "pr snapshot" "$@"
+  [[ "${#POSITIONAL_ARGS[@]}" -eq 1 ]] || die "usage: forge pr snapshot <number>"
+  local number="${POSITIONAL_ARGS[0]}"
+  is_integer "$number" && [[ "$number" -gt 0 ]] || die "PR number must be a positive integer"
+  require_repo
+
+  local pr snapshot
+  pr=$(api GET "/repos/$REPO/pulls/$number")
+  if ! snapshot=$(printf '%s\n' "$pr" | jq -e --argjson number "$number" '
+    def nonempty_string:
+      type == "string" and length > 0;
+    def oid:
+      type == "string" and test("^([0-9a-f]{40}|[0-9a-f]{64})$");
+    def repository:
+      type == "object"
+      and (.owner | type == "object")
+      and (.owner.login | nonempty_string)
+      and (.name | nonempty_string)
+      and (.full_name | nonempty_string)
+      and (.full_name == ((.owner.login) + "/" + .name))
+      and (.clone_url | nonempty_string)
+      and (.clone_url | test("^https://"));
+    def side:
+      type == "object"
+      and (.ref | nonempty_string)
+      and (.sha | oid)
+      and (.repo | repository);
+
+    if type == "object"
+       and (.number | type == "number")
+       and (.number == $number)
+       and (.html_url | nonempty_string)
+       and (.html_url | test("^https://"))
+       and (.title | nonempty_string)
+       and ((.body == null) or (.body | type == "string"))
+       and (.base | side)
+       and (.head | side)
+    then {
+      schema_version: 1,
+      pull_request: {
+        number: .number,
+        url: .html_url,
+        title: .title,
+        body: (.body // "")
+      },
+      base: {
+        repository: {
+          owner: .base.repo.owner.login,
+          name: .base.repo.name,
+          full_name: .base.repo.full_name,
+          clone_url: .base.repo.clone_url
+        },
+        ref: .base.ref,
+        sha: .base.sha
+      },
+      head: {
+        repository: {
+          owner: .head.repo.owner.login,
+          name: .head.repo.name,
+          full_name: .head.repo.full_name,
+          clone_url: .head.repo.clone_url
+        },
+        ref: .head.ref,
+        sha: .head.sha
+      }
+    }
+    else error("missing or malformed snapshot fields")
+    end
+  ' 2>/dev/null); then
+    die "PR #$number response is missing or has malformed snapshot fields"
+  fi
+
+  printf '%s\n' "$snapshot"
 }
 
 pr_review_comments() {
@@ -2036,6 +2114,17 @@ Flags:
   -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
 USAGE
       ;;
+    "pr snapshot") cat <<'USAGE'
+Usage: forge pr snapshot <number> [-R <owner/repo>]
+
+Print a stable, versioned JSON snapshot of a pull request and its immutable
+base/head commits. Fork pull requests retain each side's repository identity
+and HTTPS clone URL.
+
+Flags:
+  -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
+USAGE
+      ;;
     "pr review-comments") cat <<'USAGE'
 Usage: forge pr review-comments <number> [-R <owner/repo>]
 
@@ -2365,6 +2454,8 @@ PR commands:
       List open pull requests
   forge pr view <number>
       Show PR details and comments
+  forge pr snapshot <number>
+      Print a stable immutable PR snapshot as JSON
   forge pr review-comments <number>
       List inline review comments with IDs (for use with reply)
   forge pr reply <number> <comment-id> [-b <text> | -F <file>]
@@ -2459,6 +2550,7 @@ case "$RESOURCE" in
     case "$COMMAND" in
       list)    pr_list "$@" ;;
       view)    pr_view "$@" ;;
+      snapshot) pr_snapshot "$@" ;;
       review-comments) pr_review_comments "$@" ;;
       reply)   pr_reply "$@" ;;
       edit)    pr_edit "$@" ;;
