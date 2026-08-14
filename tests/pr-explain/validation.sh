@@ -296,4 +296,77 @@ sed -i '0,/<\/script>/s#</script>#fetch("https://outside.example");</script>#' "
 validation_failure "$SABOTAGE" 'script|template|fetch|network' \
   "rejects network APIs in the inline enhancement script"
 
+# A code walk must be able to faithfully quote the exact markup and CSS a
+# frontend diff removed, including substrings ("style=", "onclick=",
+# "url(...)", "@import", "transform: rotate(...)") that the active-markup and
+# CSS-behavior heuristics would otherwise mistake for live report content.
+CODEWALK_FRAGMENT="$CASE_DIR/codewalk-fragment.html"
+cat > "$CODEWALK_FRAGMENT" <<'HTML'
+<section id="frontend-diff" aria-labelledby="frontend-diff-h">
+  <h2 id="frontend-diff-h">The frontend diff moved presentation into the stylesheet</h2>
+  <p class="rx-claim">Quoting the removed markup and CSS verbatim shows exactly what the change deleted.</p>
+  <figure class="rx-figure rx-codewalk" id="cw-diff">
+    <div class="rx-scroll" role="region" tabindex="0" aria-label="Removed inline presentation">
+      <pre class="rx-code" data-lang="html"><code>&lt;button style="color:red" onclick="handleClick()"&gt;Send&lt;/button&gt;
+<mark class="rx-hl" id="cw-diff-h1">.rx-old { background: url(sprite.png); transform: rotate(45deg); }</mark>
+@import "legacy.css";</code></pre>
+    </div>
+    <ol class="rx-notes">
+      <li class="rx-note" data-hl="cw-diff-h1"><a href="#cw-diff-h1">Removed rule</a> — the deleted selector no longer loads a sprite or rotates its icon.</li>
+    </ol>
+    <figcaption class="rx-caption">The report quotes the exact deleted markup and CSS without executing or loading any of it.</figcaption>
+  </figure>
+</section>
+HTML
+
+splice_before_main_close() {
+  local source="$1" fragment="$2" destination="$3"
+  awk -v fragfile="$fragment" '
+    $0 == "</main>" { while ((getline line < fragfile) > 0) print line }
+    { print }
+  ' "$source" > "$destination"
+}
+
+ESCAPED_CODEWALK="$CASE_DIR/escaped-codewalk.html"
+splice_before_main_close "$VALID_REPORT" "$CODEWALK_FRAGMENT" "$ESCAPED_CODEWALK"
+capture "$ALLOD" pr _validate-report "$ESCAPED_CODEWALK" "$SNAPSHOT" codex
+assert_success \
+  "accepts a code walk that faithfully quotes style=, onclick=, url(), @import, and transform: rotate() as escaped code"
+
+# The exclusion is scoped to <pre>/<code> content, not prose in general: the
+# same dangerous substring outside a code element must still fail.
+LIVE_FRAGMENT="$CASE_DIR/live-fragment.html"
+cat > "$LIVE_FRAGMENT" <<'HTML'
+<section id="prose-leak" aria-labelledby="prose-leak-h">
+  <h2 id="prose-leak-h">A prose leak is not a code quotation</h2>
+  <p class="rx-claim">Prose describing behavior is not the same as quoting exact removed code.</p>
+  <p>The removed rule used url(https://outside.example/track.gif) to load a tracking pixel.</p>
+</section>
+HTML
+sabotage_copy prose-network-url
+splice_before_main_close "$SABOTAGE" "$LIVE_FRAGMENT" "$CASE_DIR/prose-network-url-spliced.html"
+mv "$CASE_DIR/prose-network-url-spliced.html" "$SABOTAGE"
+validation_failure "$SABOTAGE" 'style|css|import|template|network|resource' \
+  "rejects a network-capable CSS function named in prose outside any code element"
+
+# A live attribute nested inside a code block is a real, rendered attribute
+# on a real element — not quoted text — and must still fail.
+NESTED_LIVE_FRAGMENT="$CASE_DIR/nested-live-fragment.html"
+cat > "$NESTED_LIVE_FRAGMENT" <<'HTML'
+<figure class="rx-figure rx-codewalk" id="cw-evil">
+  <div class="rx-scroll" role="region" tabindex="0" aria-label="Evil nested style">
+    <pre class="rx-code" data-lang="html"><code><mark class="rx-hl" id="cw-evil-h1" style="color:red">live text</mark></code></pre>
+  </div>
+  <ol class="rx-notes">
+    <li class="rx-note" data-hl="cw-evil-h1"><a href="#cw-evil-h1">Note</a> — the highlighted line carries a live attribute, not a quoted example.</li>
+  </ol>
+  <figcaption class="rx-caption">A real attribute nested inside a code block must still fail even though it sits inside a pre element.</figcaption>
+</figure>
+HTML
+sabotage_copy live-style-inside-code
+splice_before_main_close "$SABOTAGE" "$NESTED_LIVE_FRAGMENT" "$CASE_DIR/live-style-inside-code-spliced.html"
+mv "$CASE_DIR/live-style-inside-code-spliced.html" "$SABOTAGE"
+validation_failure "$SABOTAGE" 'style|attribute|HTML|tag|complete' \
+  "rejects a live style attribute on a real element nested inside a code block"
+
 finish_tests "PR explanation report validator"

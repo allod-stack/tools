@@ -1021,10 +1021,52 @@ pr_explain_extract_asset() {
   ' "$report" >"$output"
 }
 
+# Drop text content quoted inside <pre>/<code> (a code walk faithfully
+# quoting a frontend diff, e.g. `style="..."`, `url(...)`, `transform:
+# rotate(...)`) before scanning for live/active HTML, CSS, or JS structure.
+# Tags themselves are always kept, so a real element nested inside pre/code
+# (unescaped markup smuggled past the tag vocabulary check) still shows up.
+# The canonical template style/script blocks are skipped verbatim — already
+# byte-compared elsewhere — so stray '<'/'>' in real CSS/JS cannot desync the
+# tag scan that follows them.
+pr_explain_strip_quoted_code() {
+  awk '
+    $0 == "<style id=\"rx-template-css\">" { in_style = 1; next }
+    in_style && $0 == "</style>" { in_style = 0; next }
+    in_style { next }
+    $0 == "<script id=\"rx-template-js\">" { in_script = 1; next }
+    in_script && $0 == "</script>" { in_script = 0; next }
+    in_script { next }
+    {
+      rest = $0
+      out = ""
+      while (match(rest, /<[^>]*>/)) {
+        textpart = substr(rest, 1, RSTART - 1)
+        tag = substr(rest, RSTART, RLENGTH)
+        rest = substr(rest, RSTART + RLENGTH)
+        if (!(pre_depth > 0 || code_depth > 0)) out = out textpart
+        out = out tag
+        name = tag
+        closing = (name ~ /^<\//)
+        sub(/^<\/?/, "", name)
+        sub(/[[:space:]>].*$/, "", name)
+        name = tolower(name)
+        if (name == "pre") {
+          if (closing) { if (pre_depth > 0) pre_depth-- } else pre_depth++
+        } else if (name == "code") {
+          if (closing) { if (code_depth > 0) code_depth-- } else code_depth++
+        }
+      }
+      if (!(pre_depth > 0 || code_depth > 0)) out = out rest
+      print out
+    }
+  ' "$1"
+}
+
 pr_explain_validate_report() {
   local report="$1" snapshot_file="$2" runner="$3"
   local repository number pr_url pr_title base_sha head_sha
-  local repository_html pr_url_html pr_title_html expected_css expected_js actual_css actual_js body_html main_html visible_text
+  local repository_html pr_url_html pr_title_html expected_css expected_js actual_css actual_js body_html main_html visible_text report_live
   local expected_gallery provenance_html gallery_report=false
   local count style_count script_count h1_count main_count figure_count caption_count
   local h2_count claim_count main_h2_count main_claim_count
@@ -1100,6 +1142,7 @@ pr_explain_validate_report() {
   make_temp_file body_html
   make_temp_file main_html
   make_temp_file visible_text
+  make_temp_file report_live
   pr_explain_emit_css >"$expected_css"
   pr_explain_emit_js >"$expected_js"
   pr_explain_extract_asset "$report" '<style id="rx-template-css">' '</style>' "$actual_css"
@@ -1154,6 +1197,7 @@ pr_explain_validate_report() {
     pr_explain_validation_error E5 "could not isolate the canonical main landmark"
   fi
   sed -E 's/<[^>]+>//g' "$body_html" | tr -d '\r\n' >"$visible_text"
+  pr_explain_strip_quoted_code "$report" >"$report_live"
 
   while IFS= read -r value; do
     value="${value#<}"
@@ -1180,25 +1224,25 @@ pr_explain_validate_report() {
   cmp -s "$expected_js" "$actual_js" ||
     pr_explain_validation_error E1 "inline script does not match template version 1"
 
-  if grep -qiE '<(link|iframe|frame|img|object|embed|video|audio|source|track|form|base|svg|canvas|math|applet|marquee|blink)([[:space:]>])|<meta[^>]+http-equiv' "$report"; then
+  if grep -qiE '<(link|iframe|frame|img|object|embed|video|audio|source|track|form|base|svg|canvas|math|applet|marquee|blink)([[:space:]>])|<meta[^>]+http-equiv' "$report_live"; then
     pr_explain_validation_error E2 "active or resource-loading markup is forbidden"
   fi
-  if grep -qiE "(^|[[:space:]])(src|srcset|poster|ping|action|formaction|manifest|background|xlink:href)[[:space:]]*=|href[[:space:]]*=[[:space:]]*[\"'](https?:|//|data:|javascript:)" "$report"; then
+  if grep -qiE "(^|[[:space:]])(src|srcset|poster|ping|action|formaction|manifest|background|xlink:href)[[:space:]]*=|href[[:space:]]*=[[:space:]]*[\"'](https?:|//|data:|javascript:)" "$report_live"; then
     pr_explain_validation_error E2 "network-capable URL attributes are forbidden"
   fi
-  if grep -qiE '(^|[[:space:]])style[[:space:]]*=|(^|[[:space:]])on[a-z]+[[:space:]]*=' "$report"; then
+  if grep -qiE '(^|[[:space:]])style[[:space:]]*=|(^|[[:space:]])on[a-z]+[[:space:]]*=' "$report_live"; then
     pr_explain_validation_error E1 "inline styles and event-handler attributes are forbidden"
   fi
   if grep -qE 'aria-(label|labelledby|describedby)=""' "$body_html"; then
     pr_explain_validation_error E5 "authored accessibility names and references cannot be empty"
   fi
-  if grep -qiE '@import|url[[:space:]]*\(|@keyframes|(^|[;{[:space:]])animation[[:space:]]*:|transform[[:space:]]*:[^;}]*rotate|(^|[;{[:space:]])rotate[[:space:]]*:|writing-mode[[:space:]]*:' "$report"; then
+  if grep -qiE '@import|url[[:space:]]*\(|@keyframes|(^|[;{[:space:]])animation[[:space:]]*:|transform[[:space:]]*:[^;}]*rotate|(^|[;{[:space:]])rotate[[:space:]]*:|writing-mode[[:space:]]*:' "$report_live"; then
     pr_explain_validation_error E2 "stylesheet contains loading, autoplay, or rotated connector behavior"
   fi
   if grep -qiE 'fetch[[:space:]]*\(|XMLHttpRequest|WebSocket|EventSource|sendBeacon|import[[:space:]]*\(|localStorage|sessionStorage|indexedDB|document\.cookie|eval[[:space:]]*\(|new[[:space:]]+Function|innerHTML|outerHTML|insertAdjacentHTML|document\.write|window\.open|postMessage|setInterval|navigator\.' "$actual_js"; then
     pr_explain_validation_error E2 "canonical script contains a forbidden network or dynamic-code API"
   fi
-  if grep -qiE 'rx-(arrow|connector)' "$report"; then
+  if grep -qiE 'rx-(arrow|connector)' "$report_live"; then
     pr_explain_validation_error E9 "connectors must be node-owned pseudo-elements, never sibling elements"
   fi
 
