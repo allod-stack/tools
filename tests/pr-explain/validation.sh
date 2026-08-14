@@ -369,4 +369,41 @@ mv "$CASE_DIR/live-style-inside-code-spliced.html" "$SABOTAGE"
 validation_failure "$SABOTAGE" 'style|attribute|HTML|tag|complete' \
   "rejects a live style attribute on a real element nested inside a code block"
 
+# UTF-8 safety: one sabotage per forbidden class, plus a normal-Unicode
+# acceptance case so the check is not merely rejecting all non-ASCII text.
+utf8_sabotage() {
+  local name="$1" bytes="$2" description="$3"
+  local fragment="$CASE_DIR/utf8-$name-fragment.html"
+  printf '<p>Embedded control byte sequence: %b end.</p>\n' "$bytes" > "$fragment"
+  sabotage_copy "utf8-$name"
+  splice_before_main_close "$SABOTAGE" "$fragment" "$CASE_DIR/utf8-$name-spliced.html"
+  mv "$CASE_DIR/utf8-$name-spliced.html" "$SABOTAGE"
+  validation_failure "$SABOTAGE" 'utf-8|control|valid' "$description"
+}
+
+utf8_sabotage c1-control '\xc2\x80' \
+  "rejects an embedded C1 control byte (U+0080)"
+utf8_sabotage bom '\xef\xbb\xbf' \
+  "rejects an embedded byte-order mark"
+utf8_sabotage line-separator '\xe2\x80\xa8' \
+  "rejects an embedded U+2028 line separator"
+utf8_sabotage paragraph-separator '\xe2\x80\xa9' \
+  "rejects an embedded U+2029 paragraph separator"
+utf8_sabotage zero-width-space '\xe2\x80\x8b' \
+  "rejects an embedded U+200B zero-width space"
+utf8_sabotage right-to-left-mark '\xe2\x80\x8f' \
+  "rejects an embedded U+200F right-to-left mark"
+utf8_sabotage bidi-embedding '\xe2\x80\xaa' \
+  "rejects an embedded U+202A left-to-right embedding control"
+utf8_sabotage bidi-isolate '\xe2\x81\xa6' \
+  "rejects an embedded U+2066 left-to-right isolate control"
+
+UNICODE_FRAGMENT="$CASE_DIR/unicode-fragment.html"
+printf '<p>Ordinary Unicode prose renders fine: caf\xc3\xa9, \xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e, an em dash\xe2\x80\x94like this, and an emoji \xf0\x9f\x8e\x89.</p>\n' \
+  > "$UNICODE_FRAGMENT"
+UNICODE_REPORT="$CASE_DIR/unicode-report.html"
+splice_before_main_close "$VALID_REPORT" "$UNICODE_FRAGMENT" "$UNICODE_REPORT"
+capture "$ALLOD" pr _validate-report "$UNICODE_REPORT" "$SNAPSHOT" codex
+assert_success "accepts ordinary Unicode prose (accents, CJK, em dash, emoji)"
+
 finish_tests "PR explanation report validator"
