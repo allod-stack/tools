@@ -34,6 +34,14 @@ sabotage_copy() {
   cp "$VALID_REPORT" "$SABOTAGE"
 }
 
+splice_before_main_close() {
+  local source="$1" fragment="$2" destination="$3"
+  awk -v fragfile="$fragment" '
+    $0 == "</main>" { while ((getline line < fragfile) > 0) print line }
+    { print }
+  ' "$source" > "$destination"
+}
+
 sabotage_copy active-script
 sed -i 's#</main>#<script>alert("active")</script></main>#' "$SABOTAGE"
 validation_failure "$SABOTAGE" 'script|active|template' \
@@ -119,6 +127,43 @@ sabotage_copy entity-secret
 sed -i 's|</main>|<p>AKIA\&#65;BCDEFGHIJKLMNOP</p></main>|' "$SABOTAGE"
 validation_failure "$SABOTAGE" 'entity|secret|character reference' \
   "rejects entity-obfuscated secret-looking content"
+
+sabotage_copy colon-delimited-password
+sed -i 's#</main>#<p>password: correcthorsebatterystaple</p></main>#' "$SABOTAGE"
+validation_failure "$SABOTAGE" 'secret|credential' \
+  "rejects a colon-delimited password value"
+
+sabotage_copy colon-delimited-api-key
+sed -i 's#</main>#<p>api_key: 4f8a9c2e7b1d6053a8f9c2e7b1d6</p></main>#' "$SABOTAGE"
+validation_failure "$SABOTAGE" 'secret|credential' \
+  "rejects a colon-delimited api_key value"
+
+sabotage_copy stripe-style-key
+sed -i 's#</main>#<p>sk_live_4eC39HqLyjWDarjtT1zdp7dc</p></main>#' "$SABOTAGE"
+validation_failure "$SABOTAGE" 'secret|credential' \
+  "rejects a short prefixed secret-key shape"
+
+sabotage_copy jwt-shape
+sed -i 's#</main>#<p>eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c</p></main>#' "$SABOTAGE"
+validation_failure "$SABOTAGE" 'secret|credential' \
+  "rejects a JWT-shaped bearer token"
+
+SECRET_PROSE_FRAGMENT="$CASE_DIR/secret-prose-fragment.html"
+cat > "$SECRET_PROSE_FRAGMENT" <<'HTML'
+<section id="auth-notes" aria-labelledby="auth-notes-h">
+  <h2 id="auth-notes-h">Authentication prose does not read as a credential</h2>
+  <p class="rx-claim">Naming a credential field is not the same as quoting its value.</p>
+  <p>The form asks for a password: it must be at least twelve characters and one number.</p>
+  <p>The client sends an auth token: it is short-lived and rotated automatically by the library.</p>
+  <p>Configuration documents an api_key: the field is present but this report never received one.</p>
+  <p>A bearer token grants access after the user authenticates through the identity provider.</p>
+</section>
+HTML
+SECRET_PROSE_REPORT="$CASE_DIR/secret-prose-report.html"
+splice_before_main_close "$VALID_REPORT" "$SECRET_PROSE_FRAGMENT" "$SECRET_PROSE_REPORT"
+capture "$ALLOD" pr _validate-report "$SECRET_PROSE_REPORT" "$SNAPSHOT" codex
+assert_success \
+  "accepts ordinary prose that names password/token/api_key fields without quoting a contiguous value"
 
 sabotage_copy provenance-sha
 sed -i "0,/$SAME_HEAD_SHA/s//$BASE_SHA/" "$SABOTAGE"
@@ -318,14 +363,6 @@ cat > "$CODEWALK_FRAGMENT" <<'HTML'
   </figure>
 </section>
 HTML
-
-splice_before_main_close() {
-  local source="$1" fragment="$2" destination="$3"
-  awk -v fragfile="$fragment" '
-    $0 == "</main>" { while ((getline line < fragfile) > 0) print line }
-    { print }
-  ' "$source" > "$destination"
-}
 
 ESCAPED_CODEWALK="$CASE_DIR/escaped-codewalk.html"
 splice_before_main_close "$VALID_REPORT" "$CODEWALK_FRAGMENT" "$ESCAPED_CODEWALK"

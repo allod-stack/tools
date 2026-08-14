@@ -136,6 +136,15 @@ mobile-flow, reduced-motion, quiz, diagram, table, or code-whitespace contracts.
 Content heuristics can be reported separately as advisory warnings; they are
 prompts for human review, not substitutes for the mechanical safety checks.
 
+The secret-looking-content check matches a closed set of well-known credential
+shapes (cloud and forge tokens, private-key headers, JWTs, long base64 blobs)
+plus a generic key-name-next-to-a-value heuristic. It is defense-in-depth, not
+a secret scanner: it will not catch every credential shape, and it deliberately
+leaves plain prose that merely *names* a field (`password:` followed by an
+ordinary sentence, not a pasted value) alone rather than risk failing a
+faithful code walk. Treat a pass as "nothing obviously credential-shaped
+leaked," not as a guarantee the report is secret-free.
+
 On success, the private job directory and detached checkout are removed. On a
 runner failure, missing output, or validation failure, the command prints and
 preserves the `.allod-pr-explain.*` job directory beside the destination so you

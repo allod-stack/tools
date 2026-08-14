@@ -1326,14 +1326,16 @@ pr_explain_validate_report() {
   done < <(grep -Eo 'class="[^"]+"' "$report" 2>/dev/null || true)
 
   declare -A seen_ids=()
-  while IFS= read -r value; do
+  while IFS=: read -r line_no value; do
     id="${value#id=\"}"
     id="${id%\"}"
     if [[ -n "${seen_ids[$id]:-}" ]]; then
-      pr_explain_validation_error E3 "duplicate id '$id'"
+      pr_explain_validation_error E3 \
+        "duplicate id '$id' (first used at line ${seen_ids[$id]}, again at line $line_no)"
+    else
+      seen_ids["$id"]="$line_no"
     fi
-    seen_ids["$id"]=1
-  done < <(grep -Eo 'id="[A-Za-z][A-Za-z0-9_.:-]*"' "$report" 2>/dev/null || true)
+  done < <(grep -noE 'id="[A-Za-z][A-Za-z0-9_.:-]*"' "$report" 2>/dev/null || true)
   count=$(pr_explain_count_regex "$report" 'id="[^"]*"')
   [[ "$count" -eq "${#seen_ids[@]}" ]] ||
     pr_explain_validation_error E3 "every id must be non-empty and use the canonical identifier syntax"
@@ -1740,7 +1742,11 @@ pr_explain_validate_report() {
   ' "$provenance_html")
   [[ "$count" -ge 1 ]] || pr_explain_validation_error E18 "provenance limits must name at least one unverified claim"
 
-  if grep -qiE -- "-----BEGIN|BEGIN OPENSSH PRIVATE KEY|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|(^|[^A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}|(password|passwd|secret|token)[[:space:]]*=[[:space:]]*[\"']?[^<\"'[:space:]]{12,}|[A-Za-z0-9+/]{200,}={0,2}" "$report" "$visible_text"; then
+  # Defense-in-depth, not a completeness guarantee: closed-form patterns for
+  # well-known credential shapes plus a generic key-name/delimiter heuristic,
+  # tuned to leave ordinary prose (a key name not immediately glued to a
+  # contiguous value) alone. See docs/pr-explain.md.
+  if grep -qiE -- "-----BEGIN|BEGIN OPENSSH PRIVATE KEY|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|(^|[^A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}|(^|[^A-Za-z0-9])(sk|rk|pk)_(live|test)_[A-Za-z0-9]{16,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}|(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|auth[_-]?token|client[_-]?secret|private[_-]?key)[[:space:]]*[=:][[:space:]]*[\"']?[^<\"'[:space:]]{12,}|[A-Za-z0-9+/]{200,}={0,2}" "$report" "$visible_text"; then
     pr_explain_validation_error E19 "report contains secret-looking material"
   fi
 
