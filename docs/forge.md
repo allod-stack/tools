@@ -103,10 +103,11 @@ breaking consumers:
 
 All projected fields are present and non-null; a missing PR body becomes the
 empty string. The command fails instead of emitting partial JSON when the API
-omits repository identity, an HTTPS clone URL, a ref, or a 40/64-character
-hexadecimal Git object ID. `base.repository` and `head.repository` are
-independent, which is what lets the same contract represent both
-same-repository and fork heads.
+omits repository identity, an HTTPS clone URL without userinfo, query, or
+fragment, a ref, or a 40/64-character hexadecimal Git object ID. Both sides must use the same object
+format, and terminal-facing identity fields cannot contain control characters.
+`base.repository` and `head.repository` are independent, which is what lets the
+same contract represent both same-repository and fork heads.
 
 ## Auth commands
 

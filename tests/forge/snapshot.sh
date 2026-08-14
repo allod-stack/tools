@@ -80,4 +80,24 @@ reset_requests
 run_fail "missing or has malformed snapshot fields" \
   "rejects missing repository clone metadata" pr snapshot 45
 
+reset_requests
+run_fail "missing or has malformed snapshot fields" \
+  "rejects credential-bearing repository clone URLs" pr snapshot 46
+
+reset_requests
+run_fail "missing or has malformed snapshot fields" \
+  "rejects control characters in terminal-facing snapshot text" pr snapshot 47
+
+reset_requests
+run_fail "missing or has malformed snapshot fields" \
+  "rejects mixed Git object formats across PR sides" pr snapshot 48
+
+reset_requests
+run_fail "missing or has malformed snapshot fields" \
+  "rejects query-bearing repository clone URLs" pr snapshot 49
+
+reset_requests
+run_fail "missing or has malformed snapshot fields" \
+  "rejects a fork clone URL whose host and path contradict repository identity" pr snapshot 50
+
 finish_tests "Forge PR snapshot"

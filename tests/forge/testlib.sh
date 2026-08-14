@@ -162,6 +162,21 @@ case "$url" in
   */api/v1/repos/acme/widget/pulls/45)
     printf '%s\n' '{"number":45,"html_url":"https://forge.example/acme/widget/pulls/45","title":"Missing repository metadata","body":"No head clone URL","head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"contributor"},"name":"widget-fork","full_name":"contributor/widget-fork"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}'
     ;;
+  */api/v1/repos/acme/widget/pulls/46)
+    printf '%s\n' '{"number":46,"html_url":"https://forge.example/acme/widget/pulls/46","title":"Credential-bearing clone URL","body":"Unsafe transport metadata","head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"contributor"},"name":"widget-fork","full_name":"contributor/widget-fork","clone_url":"https://token@forge.example/contributor/widget-fork.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}'
+    ;;
+  */api/v1/repos/acme/widget/pulls/47)
+    printf '%s\n' '{"number":47,"html_url":"https://forge.example/acme/widget/pulls/47","title":"Spoof\u000aRunner: claude","body":"Unsafe terminal text","head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"contributor"},"name":"widget-fork","full_name":"contributor/widget-fork","clone_url":"https://forge.example/contributor/widget-fork.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}'
+    ;;
+  */api/v1/repos/acme/widget/pulls/48)
+    printf '%s\n' '{"number":48,"html_url":"https://forge.example/acme/widget/pulls/48","title":"Mixed object formats","body":"Impossible fork metadata","head":{"ref":"topic","sha":"4444444444444444444444444444444444444444444444444444444444444444","repo":{"owner":{"login":"contributor"},"name":"widget-fork","full_name":"contributor/widget-fork","clone_url":"https://forge.example/contributor/widget-fork.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}'
+    ;;
+  */api/v1/repos/acme/widget/pulls/49)
+    printf '%s\n' '{"number":49,"html_url":"https://forge.example/acme/widget/pulls/49","title":"Credential query","body":"Unsafe transport metadata","head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"contributor"},"name":"widget-fork","full_name":"contributor/widget-fork","clone_url":"https://forge.example/contributor/widget-fork.git?token=credential-material"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}'
+    ;;
+  */api/v1/repos/acme/widget/pulls/50)
+    printf '%s\n' '{"number":50,"html_url":"https://forge.example/acme/widget/pulls/50","title":"Misdirected fork","body":"Unsafe repository binding","head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"contributor"},"name":"widget-fork","full_name":"contributor/widget-fork","clone_url":"https://outside.example/unrelated.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}'
+    ;;
   */api/v1/repos/acme/widget/issues/12/comments)
     if [[ "$method" == GET ]]; then
       printf '%s\n' '[{"body":"General note","created_at":"2026-06-02T00:00:00Z","user":{"login":"dave"}}]'

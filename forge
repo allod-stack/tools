@@ -486,32 +486,51 @@ pr_snapshot() {
   if ! snapshot=$(printf '%s\n' "$pr" | jq -e --argjson number "$number" '
     def nonempty_string:
       type == "string" and length > 0;
+    def safe_text:
+      nonempty_string and (test("[[:cntrl:]]") | not);
+    def https_url:
+      safe_text
+      and test("^https://[^/@\\s]+/.+")
+      and (test("^https://[^/]*@") | not)
+      and (test("[?#]") | not);
+    def url_parts:
+      capture("^https://(?<host>[^/@\\s]+)/(?<path>[^?#]+)$");
+    def path_ends($path; $suffix):
+      $path == $suffix or ($path | endswith("/" + $suffix));
     def oid:
       type == "string" and test("^([0-9a-f]{40}|[0-9a-f]{64})$");
     def repository:
-      type == "object"
+      . as $repo
+      | type == "object"
       and (.owner | type == "object")
-      and (.owner.login | nonempty_string)
-      and (.name | nonempty_string)
-      and (.full_name | nonempty_string)
+      and (.owner.login | safe_text and test("^[A-Za-z0-9_.-]+$"))
+      and (.name | safe_text and test("^[A-Za-z0-9_.-]+$"))
+      and (.full_name | safe_text)
       and (.full_name == ((.owner.login) + "/" + .name))
-      and (.clone_url | nonempty_string)
-      and (.clone_url | test("^https://"));
+      and (.clone_url | https_url)
+      and (($repo.clone_url | url_parts) as $url
+        | path_ends($url.path; $repo.owner.login + "/" + $repo.name + ".git"));
     def side:
       type == "object"
-      and (.ref | nonempty_string)
+      and (.ref | safe_text)
       and (.sha | oid)
       and (.repo | repository);
 
     if type == "object"
        and (.number | type == "number")
        and (.number == $number)
-       and (.html_url | nonempty_string)
-       and (.html_url | test("^https://"))
-       and (.title | nonempty_string)
+       and (.html_url | https_url)
+       and (.title | safe_text)
        and ((.body == null) or (.body | type == "string"))
        and (.base | side)
        and (.head | side)
+       and ((.base.sha | length) == (.head.sha | length))
+       and ((.html_url | url_parts) as $web
+         | (.base.repo.clone_url | url_parts) as $base_clone
+         | (.head.repo.clone_url | url_parts) as $head_clone
+         | (($web.host | ascii_downcase) == ($base_clone.host | ascii_downcase))
+         and (($web.host | ascii_downcase) == ($head_clone.host | ascii_downcase))
+         and path_ends($web.path; .base.repo.owner.login + "/" + .base.repo.name + "/pulls/" + ($number | tostring)))
     then {
       schema_version: 1,
       pull_request: {
