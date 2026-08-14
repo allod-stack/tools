@@ -55,10 +55,28 @@ deliberate one-run override. The default `high` effort favors careful repository
 investigation; lower it for a quick iteration or raise it only when the
 installed CLI supports the requested level.
 
-The packaged `allod` command embeds the shared prompt, report template,
-progressive-enhancement script, gallery, and validator. Generation does not
-depend on an `allod/tools` source checkout; `--checkout` always names the
-repository being explained.
+`allod pr explain` is a thin dispatcher: it resolves the `pr-explain/` tool
+directory — from `ALLOD_TOOLS_DIR`, its own script directory, or a
+`$WORK_DIR/allod/tools` checkout, in that order — and hands off to
+`pr-explain/explain`, which embeds the shared prompt, report template,
+progressive-enhancement script, and gallery from that same directory.
+Generation does not depend on an `allod/tools` source checkout beyond that
+resolution; `--checkout` always names the repository being explained.
+
+### Standalone validator
+
+`pr-explain/validate-report` is the same validator `allod pr explain` runs
+before publishing, packaged as a standalone tool:
+
+```sh
+pr-explain/validate-report <report.html> <snapshot.json> <runner>
+```
+
+Use it to check a report file you already have — for example, one you are
+hand-editing during template development — without regenerating it. It prints
+one diagnostic per validation error or warning and exits non-zero on any hard
+error. `allod pr _validate-report` (used by this repository's own tests)
+delegates to the same script.
 
 ## What is disclosed
 

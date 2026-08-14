@@ -1,0 +1,704 @@
+#!/usr/bin/env bash
+# allod pr explain — generate a comprehension-first PR explanation report.
+# Dispatched by the `allod` CLI, which resolves this directory from the Nix
+# store via ALLOD_TOOLS_DIR. See docs/pr-explain.md.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/../lib/workspace.sh"
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/lib.sh"
+
+declare -a TEMP_FILES=()
+PR_EXPLAIN_JOB_DIR=""
+PR_EXPLAIN_PUBLISH_TEMP=""
+
+cleanup_temp_files() {
+  local status=$?
+  local file
+  for file in "${TEMP_FILES[@]}"; do
+    rm -f "$file"
+  done
+
+  if [[ -n "$PR_EXPLAIN_PUBLISH_TEMP" ]]; then
+    rm -f -- "$PR_EXPLAIN_PUBLISH_TEMP"
+  fi
+  if [[ "$status" -ne 0 && -n "$PR_EXPLAIN_JOB_DIR" && -d "$PR_EXPLAIN_JOB_DIR" ]]; then
+    printf 'allod: diagnostics preserved: %s\n' "$PR_EXPLAIN_JOB_DIR" >&2
+  fi
+
+  return "$status"
+}
+trap cleanup_temp_files EXIT
+
+pr_usage() {
+  cat <<'EOF'
+Usage:
+  allod pr explain <number> (--codex | --claude) [-R|--repo <owner/repo>]
+    [--checkout <path>] --output <report.html> [--replace] [--dry-run]
+    [--model <model>] [--effort <low|medium|high|xhigh|max>]
+
+The provider flag is explicit consent to send the pull request's source and
+review context to that installed subscription CLI. Before invoking it, allod
+prints the repository, PR, immutable base/head commits, runner, and output.
+
+The model defaults to the selected CLI's built-in default. Explanation effort
+defaults to high. --dry-run resolves and verifies the snapshot without
+running a provider or writing a report.
+EOF
+}
+
+die() {
+  local code="$1"
+  shift
+  printf 'allod: %s\n' "$*" >&2
+  exit "$code"
+}
+
+require_option_value() {
+  local option="$1"
+  local count="$2"
+  [[ "$count" -ge 2 ]] || die 1 "$option requires a value"
+}
+
+make_temp_file() {
+  local destination="$1" file
+  file=$(mktemp)
+  TEMP_FILES+=("$file")
+  printf -v "$destination" '%s' "$file"
+}
+
+resolve_git_repo() {
+  local input="${1:-$PWD}"
+  local top
+  [[ -d "$input" ]] || die 1 "not a directory: $input"
+  top=$(git -C "$input" rev-parse --show-toplevel 2>/dev/null) ||
+    die 1 "not a git repository: $input"
+  workspace_is_repo_root "$top" ||
+    die 1 "could not resolve git repository root for: $input"
+  printf '%s\n' "$top"
+}
+
+git_remote_identity() {
+  local remote="$1"
+  local host path host_lc
+  local scheme_re='^(https?|ssh|git)://([^/@]+@)?([^/:?#]+)(:[0-9]+)?/(.+)$'
+  local scp_re='^[^/@:]+@([^/:]+):(.+)$'
+
+  [[ -n "$remote" && "$remote" != *$'\n'* ]] || return 1
+
+  if [[ "$remote" =~ $scheme_re ]]; then
+    host="${BASH_REMATCH[3]}"
+    path="${BASH_REMATCH[5]}"
+  elif [[ "$remote" =~ $scp_re ]]; then
+    host="${BASH_REMATCH[1]}"
+    path="${BASH_REMATCH[2]}"
+    [[ "$path" != /* ]] || return 1
+  else
+    return 1
+  fi
+
+  [[ -n "$host" && -n "$path" ]] || return 1
+  [[ "$path" != *['?#']* ]] || return 1
+  path="${path%/}"
+  path="${path%.git}"
+  [[ -n "$path" && "$path" == */* ]] || return 1
+
+  host_lc=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')
+  printf '%s/%s\n' "$host_lc" "$path"
+}
+
+git_remotes_match() {
+  local left="$1" right="$2"
+  local left_identity right_identity
+
+  [[ "$left" == "$right" ]] && return 0
+
+  if left_identity=$(git_remote_identity "$left") && right_identity=$(git_remote_identity "$right"); then
+    [[ "$left_identity" == "$right_identity" ]]
+  else
+    return 1
+  fi
+}
+
+declare -a PR_EXPLAIN_SANITIZED_ENV=(
+  OPENAI_API_KEY
+  OPENAI_BASE_URL
+  OPENAI_API_BASE
+  OPENAI_ORGANIZATION
+  OPENAI_PROJECT
+  CODEX_API_KEY
+  CODEX_OSS_BASE_URL
+  CODEX_URL
+  CODEX_REFRESH_TOKEN_URL_OVERRIDE
+  CODEX_REVOKE_TOKEN_URL_OVERRIDE
+  ANTHROPIC_API_KEY
+  ANTHROPIC_AUTH_TOKEN
+  ANTHROPIC_BASE_URL
+  ANTHROPIC_CUSTOM_HEADERS
+  ANTHROPIC_MODEL
+  ANTHROPIC_DEFAULT_HAIKU_MODEL
+  ANTHROPIC_DEFAULT_SONNET_MODEL
+  ANTHROPIC_DEFAULT_OPUS_MODEL
+  ANTHROPIC_SMALL_FAST_MODEL
+  CLAUDE_CODE_USE_BEDROCK
+  CLAUDE_CODE_USE_VERTEX
+  CLAUDE_CODE_USE_FOUNDRY
+  CLAUDE_CODE_USE_ANTHROPIC_AWS
+  CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD
+  CLAUDE_CODE_USE_GATEWAY
+  CLAUDE_CODE_API_BASE_URL
+  ANTHROPIC_BEDROCK_BASE_URL
+  ANTHROPIC_AWS_API_KEY
+  ANTHROPIC_AWS_BASE_URL
+  AWS_BEARER_TOKEN_BEDROCK
+  AWS_ACCESS_KEY_ID
+  AWS_SECRET_ACCESS_KEY
+  AWS_SESSION_TOKEN
+  AWS_PROFILE
+  AWS_REGION
+  AWS_DEFAULT_REGION
+  ANTHROPIC_VERTEX_BASE_URL
+  ANTHROPIC_VERTEX_PROJECT_ID
+  ANTHROPIC_GOOGLE_CLOUD_BASE_URL
+  ANTHROPIC_GOOGLE_CLOUD_PROJECT
+  ANTHROPIC_GOOGLE_CLOUD_LOCATION
+  GOOGLE_APPLICATION_CREDENTIALS
+  GOOGLE_CLOUD_PROJECT
+  ANTHROPIC_FOUNDRY_API_KEY
+  ANTHROPIC_FOUNDRY_AUTH_TOKEN
+  ANTHROPIC_FOUNDRY_BASE_URL
+  ANTHROPIC_FOUNDRY_RESOURCE
+  AZURE_CLIENT_ID
+  AZURE_CLIENT_SECRET
+  AZURE_TENANT_ID
+  FORGEJO_TOKEN
+  GH_TOKEN
+  GITHUB_TOKEN
+  GITLAB_TOKEN
+)
+
+pr_explain_require_snapshot() {
+  local snapshot="$1" number="$2"
+  jq -e --argjson number "$number" '
+    def safe_text:
+      type == "string" and length > 0 and (test("[[:cntrl:]]") | not);
+    def clone_url:
+      safe_text
+      and test("^https://[^/@\\s]+/.+")
+      and (test("^https://[^/]*@") | not)
+      and (test("[?#]") | not);
+    def url_parts:
+      capture("^https://(?<host>[^/@\\s]+)/(?<path>[^?#]+)$");
+    def path_ends($path; $suffix):
+      $path == $suffix or ($path | endswith("/" + $suffix));
+    def repository:
+      . as $repo
+      | (.owner | safe_text and test("^[A-Za-z0-9_.-]+$"))
+      and (.name | safe_text and test("^[A-Za-z0-9_.-]+$"))
+      and (.full_name | safe_text)
+      and (.full_name == (.owner + "/" + .name))
+      and (.clone_url | clone_url)
+      and (($repo.clone_url | url_parts) as $url
+        | path_ends($url.path; $repo.owner + "/" + $repo.name + ".git"));
+    .schema_version == 1
+    and .pull_request.number == $number
+    and (.pull_request.url | clone_url)
+    and (.pull_request.title | safe_text)
+    and (.pull_request.body | type == "string")
+    and (.base.repository | repository)
+    and (.base.ref | safe_text)
+    and (.base.sha | type == "string" and test("^([0-9a-f]{40}|[0-9a-f]{64})$"))
+    and (.head.repository | repository)
+    and (.head.ref | safe_text)
+    and (.head.sha | type == "string" and test("^([0-9a-f]{40}|[0-9a-f]{64})$"))
+    and ((.base.sha | length) == (.head.sha | length))
+    and ((.pull_request.url | url_parts) as $web
+      | (.base.repository.clone_url | url_parts) as $base_clone
+      | (.head.repository.clone_url | url_parts) as $head_clone
+      | (($web.host | ascii_downcase) == ($base_clone.host | ascii_downcase))
+      and (($web.host | ascii_downcase) == ($head_clone.host | ascii_downcase))
+      and path_ends($web.path; .base.repository.owner + "/" + .base.repository.name + "/pulls/" + ($number | tostring)))
+  ' <<<"$snapshot" >/dev/null 2>&1 ||
+    die 1 "forge returned an invalid PR snapshot"
+}
+
+pr_explain_ref_oid() {
+  local remote="$1" ref="$2" side="$3"
+  local output oid resolved_ref
+
+  git check-ref-format "refs/heads/$ref" >/dev/null 2>&1 ||
+    die 1 "$side ref is not a valid branch ref: $ref"
+
+  set +e
+  output=$(GIT_TERMINAL_PROMPT=0 git ls-remote --exit-code "$remote" "refs/heads/$ref" 2>&1)
+  local status=$?
+  set -e
+  if [[ "$status" -ne 0 ]]; then
+    printf '%s\n' "$output" >&2
+    die 1 "could not resolve $side ref '$ref'"
+  fi
+
+  read -r oid resolved_ref <<<"$output"
+  [[ "$resolved_ref" == "refs/heads/$ref" && "$oid" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] ||
+    die 1 "$side ref '$ref' did not resolve to exactly one commit"
+  [[ "$(printf '%s\n' "$output" | wc -l)" -eq 1 ]] ||
+    die 1 "$side ref '$ref' resolved more than once"
+  printf '%s\n' "$oid"
+}
+
+pr_explain_fetch_ref() {
+  local repo_dir="$1" remote="$2" ref="$3" expected="$4" local_ref="$5" side="$6"
+  local actual
+
+  git check-ref-format "refs/heads/$ref" >/dev/null 2>&1 ||
+    die 1 "$side ref is not a valid branch ref: $ref"
+  if ! GIT_TERMINAL_PROMPT=0 git -C "$repo_dir" fetch --quiet --no-tags "$remote" "refs/heads/$ref"; then
+    die 1 "could not fetch $side ref '$ref'"
+  fi
+  actual=$(git -C "$repo_dir" rev-parse 'FETCH_HEAD^{commit}' 2>/dev/null) ||
+    die 1 "$side ref '$ref' did not resolve to a commit"
+  if [[ "$actual" != "$expected" ]]; then
+    die 1 "$side ref moved: snapshot expected $expected, fetched $actual"
+  fi
+  git -C "$repo_dir" update-ref "$local_ref" "$actual"
+}
+
+pr_explain_print_consent() {
+  local repository="$1" number="$2" url="$3" title="$4" base="$5" head="$6"
+  local runner="$7" model="$8" effort="$9" output="${10}" dry_run="${11}"
+  local model_display="${model:-built-in CLI default}"
+
+  if [[ "$dry_run" == true ]]; then
+    printf 'allod: dry-run; provider will not be invoked and no report will be written\n'
+  else
+    printf 'allod: provider disclosure confirmed by --%s\n' "$runner"
+  fi
+  printf '  repository: %s\n' "$repository"
+  printf '  pull request: #%s — %s\n' "$number" "$title"
+  printf '  URL: %s\n' "$url"
+  printf '  base: %s\n' "$base"
+  printf '  head: %s\n' "$head"
+  printf '  runner: %s subscription CLI\n' "$runner"
+  printf '  model: %s\n' "$model_display"
+  printf '  effort: %s\n' "$effort"
+  printf '  output: %s\n' "$output"
+}
+
+pr_explain_assemble_report() {
+  local body="$1" report="$2" repository="$3" number="$4" title="$5"
+  local repository_html title_html
+  repository_html=$(printf '%s' "$repository" | pr_explain_html_escape)
+  title_html=$(printf '%s' "$title" | tr '\r\n' '  ' | pr_explain_html_escape)
+
+  {
+    printf '<!doctype html>\n'
+    printf '<html lang="en" data-rx-template="1">\n'
+    printf '<head>\n'
+    printf '<meta charset="utf-8">\n'
+    printf '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+    printf '<title>%s PR #%s — %s</title>\n' "$repository_html" "$number" "$title_html"
+    printf '<style id="rx-template-css">\n'
+    pr_explain_emit_css
+    printf '</style>\n'
+    printf '</head>\n'
+    printf '<body>\n'
+    cat "$body"
+    [[ "$(tail -c 1 "$body" 2>/dev/null || true)" == $'\n' ]] || printf '\n'
+    printf '<script id="rx-template-js">\n'
+    pr_explain_emit_js
+    printf '</script>\n'
+    printf '</body>\n'
+    printf '</html>\n'
+  } >"$report"
+}
+
+pr_explain_run_provider() {
+  local runner="$1" model="$2" effort="$3" repo_dir="$4" job_dir="$5" prompt="$6"
+  local body="$7" stdout_log="$8" stderr_log="$9"
+  local variable
+  local -a clean_env=(env)
+  local -a command_args=()
+
+  for variable in "${PR_EXPLAIN_SANITIZED_ENV[@]}"; do
+    clean_env+=(-u "$variable")
+  done
+  while IFS='=' read -r variable _; do
+    case "$variable" in
+      OPENAI_*|ANTHROPIC_*|CODEX_*|CLAUDE_*|AWS_*|AZURE_*|GOOGLE_*|GCP_*|CLOUDSDK_*|VERTEX_*|BEDROCK_*|FOUNDRY_*|FORGEJO_*|GH_TOKEN|GITHUB_TOKEN|GITLAB_TOKEN)
+        case "$runner:$variable" in
+          codex:CODEX_HOME|codex:CODEX_ACCESS_TOKEN|claude:ANTHROPIC_CONFIG_DIR|claude:CLAUDE_CODE_OAUTH_TOKEN|claude:CLAUDE_CODE_OAUTH_REFRESH_TOKEN)
+            ;;
+          *) clean_env+=(-u "$variable") ;;
+        esac
+        ;;
+    esac
+  done < <(env)
+  clean_env+=(
+    "FORGE_TOKEN_FILE=/dev/null"
+    "ALLOD_PR_EXPLAIN_REPORT_BODY=$body"
+    "ALLOD_PR_EXPLAIN_JOB_DIR=$job_dir"
+  )
+
+  case "$runner" in
+    codex)
+      command_args=(
+        codex exec
+        --ephemeral
+        --ignore-user-config
+        --ignore-rules
+        --dangerously-bypass-approvals-and-sandbox
+        -C "$repo_dir"
+        --add-dir "$job_dir"
+        -c 'project_doc_max_bytes=0'
+        -c 'model_provider="openai"'
+        -c "model_reasoning_effort=\"$effort\""
+      )
+      [[ -z "$model" ]] || command_args+=(--model "$model")
+      command_args+=(-)
+      "${clean_env[@]}" "${command_args[@]}" <"$prompt" >"$stdout_log" 2>"$stderr_log"
+      ;;
+    claude)
+      command_args=(
+        claude -p
+        --safe-mode
+        --dangerously-skip-permissions
+        --permission-mode bypassPermissions
+        --no-session-persistence
+        --output-format text
+        --add-dir "$job_dir"
+        --effort "$effort"
+      )
+      [[ -z "$model" ]] || command_args+=(--model "$model")
+      (
+        cd -- "$repo_dir"
+        "${clean_env[@]}" "${command_args[@]}" <"$prompt" >"$stdout_log" 2>"$stderr_log"
+      )
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+pr_explain() {
+  local number="" runner="" repo_arg="" checkout_arg="$PWD" output_arg="" model="" effort="high"
+  local replace=false dry_run=false repo_set=false checkout_set=false output_set=false
+  local model_set=false effort_set=false provider_set=false
+  local checkout output_parent output_name output snapshot snapshot_status
+  local repository pr_url pr_title base_repo base_clone base_ref base_sha
+  local head_repo head_clone head_ref head_sha checkout_origin checkout_identity
+  local base_fetch_url head_fetch_url
+  local actual_base actual_head job_dir repo_dir discussion_status runner_status job_status
+  local body report prompt generated_date adjacent_temp object_format
+  local body_identity snapshot_digest snapshot_digest_after
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --codex|--claude)
+        [[ "$provider_set" == false ]] || die 1 "choose exactly one provider: --codex or --claude"
+        runner="${1#--}"
+        provider_set=true
+        shift
+        ;;
+      -R|--repo)
+        require_option_value "$1" "$#"
+        [[ "$repo_set" == false ]] || die 1 "$1 may be specified only once"
+        repo_arg="$2"
+        repo_set=true
+        shift 2
+        ;;
+      --checkout)
+        require_option_value "$1" "$#"
+        [[ "$checkout_set" == false ]] || die 1 "--checkout may be specified only once"
+        checkout_arg="$2"
+        checkout_set=true
+        shift 2
+        ;;
+      --output)
+        require_option_value "$1" "$#"
+        [[ "$output_set" == false ]] || die 1 "--output may be specified only once"
+        output_arg="$2"
+        output_set=true
+        shift 2
+        ;;
+      --model)
+        require_option_value "$1" "$#"
+        [[ "$model_set" == false ]] || die 1 "--model may be specified only once"
+        model="$2"
+        model_set=true
+        shift 2
+        ;;
+      --effort)
+        require_option_value "$1" "$#"
+        [[ "$effort_set" == false ]] || die 1 "--effort may be specified only once"
+        effort="$2"
+        effort_set=true
+        shift 2
+        ;;
+      --replace)
+        [[ "$replace" == false ]] || die 1 "--replace may be specified only once"
+        replace=true
+        shift
+        ;;
+      --dry-run)
+        [[ "$dry_run" == false ]] || die 1 "--dry-run may be specified only once"
+        dry_run=true
+        shift
+        ;;
+      -h|--help)
+        pr_usage
+        return 0
+        ;;
+      --)
+        shift
+        while [[ $# -gt 0 ]]; do
+          [[ -z "$number" ]] || die 1 "pr explain accepts one PR number"
+          number="$1"
+          shift
+        done
+        ;;
+      -*) die 1 "unknown option for pr explain: $1" ;;
+      *)
+        [[ -z "$number" ]] || die 1 "pr explain accepts one PR number"
+        number="$1"
+        shift
+        ;;
+    esac
+  done
+
+  [[ "$number" =~ ^[1-9][0-9]*$ ]] || die 1 "pr explain requires a positive PR number"
+  [[ "$provider_set" == true ]] || die 1 "pr explain requires exactly one of --codex or --claude"
+  [[ "$output_set" == true && -n "$output_arg" ]] || die 1 "pr explain requires --output <report.html>"
+  case "$effort" in
+    low|medium|high|xhigh|max) ;;
+    *) die 1 "--effort must be one of: low, medium, high, xhigh, max" ;;
+  esac
+  [[ "$model" != *$'\n'* && "$model" != *$'\r'* ]] || die 1 "--model cannot contain a newline"
+  if [[ "$repo_set" == true && ! "$repo_arg" =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]]; then
+    die 1 "--repo must be owner/repo"
+  fi
+
+  output_parent=$(dirname -- "$output_arg")
+  output_name=$(basename -- "$output_arg")
+  [[ "$output_name" != "." && "$output_name" != ".." && "$output_name" != "/" ]] ||
+    die 1 "--output must name a file"
+  [[ -d "$output_parent" ]] || die 1 "output directory does not exist: $output_parent"
+  output_parent=$(cd -- "$output_parent" && pwd -P)
+  output="$output_parent/$output_name"
+  [[ ! -d "$output" ]] || die 1 "output path is a directory: $output"
+  if [[ ( -e "$output" || -L "$output" ) && "$replace" != true ]]; then
+    die 1 "output already exists; pass --replace to overwrite: $output"
+  fi
+
+  checkout=$(resolve_git_repo "$checkout_arg")
+  checkout_origin=$(git -C "$checkout" config --get remote.origin.url 2>/dev/null) ||
+    die 1 "checkout has no origin remote: $checkout"
+  if [[ "$checkout_origin" =~ ^https?://[^/]*@ ]]; then
+    die 1 "checkout origin must not embed credentials in an HTTP(S) URL"
+  fi
+  command -v forge >/dev/null 2>&1 || die 1 "forge is required"
+  command -v jq >/dev/null 2>&1 || die 1 "jq is required"
+  command -v git >/dev/null 2>&1 || die 1 "git is required"
+  command -v "$runner" >/dev/null 2>&1 || die 1 "$runner subscription CLI is not installed"
+
+  set +e
+  if [[ "$repo_set" == true ]]; then
+    snapshot=$(forge -R "$repo_arg" pr snapshot "$number" 2>&1)
+  else
+    snapshot=$(cd -- "$checkout" && forge pr snapshot "$number" 2>&1)
+  fi
+  snapshot_status=$?
+  set -e
+  if [[ "$snapshot_status" -ne 0 ]]; then
+    printf '%s\n' "$snapshot" >&2
+    die 1 "could not resolve PR #$number"
+  fi
+  pr_explain_require_snapshot "$snapshot" "$number"
+
+  repository=$(jq -r '.base.repository.full_name' <<<"$snapshot")
+  pr_url=$(jq -r '.pull_request.url' <<<"$snapshot")
+  pr_title=$(jq -r '.pull_request.title' <<<"$snapshot")
+  base_repo="$repository"
+  base_clone=$(jq -r '.base.repository.clone_url' <<<"$snapshot")
+  base_ref=$(jq -r '.base.ref' <<<"$snapshot")
+  base_sha=$(jq -r '.base.sha' <<<"$snapshot")
+  head_repo=$(jq -r '.head.repository.full_name' <<<"$snapshot")
+  head_clone=$(jq -r '.head.repository.clone_url' <<<"$snapshot")
+  head_ref=$(jq -r '.head.ref' <<<"$snapshot")
+  head_sha=$(jq -r '.head.sha' <<<"$snapshot")
+
+  if [[ "$repo_set" == true && "$repo_arg" != "$base_repo" ]]; then
+    die 1 "snapshot base repository '$base_repo' does not match --repo '$repo_arg'"
+  fi
+  if ! git_remotes_match "$checkout_origin" "$base_clone"; then
+    checkout_identity=$(git_remote_identity "$checkout_origin" 2>/dev/null || printf '%s' '<unrecognized remote URL>')
+    die 1 "wrong checkout: origin $checkout_identity does not match snapshot base repository $base_repo"
+  fi
+
+  base_fetch_url="$checkout_origin"
+  if [[ "$head_repo" == "$base_repo" ]]; then
+    head_fetch_url="$checkout_origin"
+  else
+    head_fetch_url="$head_clone"
+  fi
+
+  if [[ "$dry_run" == true ]]; then
+    actual_base=$(pr_explain_ref_oid "$base_fetch_url" "$base_ref" base)
+    [[ "$actual_base" == "$base_sha" ]] ||
+      die 1 "base ref moved: snapshot expected $base_sha, remote advertises $actual_base"
+    actual_head=$(pr_explain_ref_oid "$head_fetch_url" "$head_ref" head)
+    [[ "$actual_head" == "$head_sha" ]] ||
+      die 1 "head ref moved: snapshot expected $head_sha, remote advertises $actual_head"
+    pr_explain_print_consent "$repository" "$number" "$pr_url" "$pr_title" "$base_sha" "$head_sha" \
+      "$runner" "$model" "$effort" "$output" true
+    return 0
+  fi
+
+  umask 077
+  job_dir=$(mktemp -d -- "$output_parent/.allod-pr-explain.XXXXXXXXXX") ||
+    die 1 "could not create a private job directory beside output"
+  chmod 700 "$job_dir"
+  PR_EXPLAIN_JOB_DIR="$job_dir"
+  repo_dir="$job_dir/repo"
+  object_format=sha1
+  [[ "${#base_sha}" -eq 40 ]] || object_format=sha256
+  if [[ "$object_format" == sha256 ]]; then
+    git init -q --object-format=sha256 -b allod-stage "$repo_dir" ||
+      die 1 "could not initialize detached SHA-256 job repository"
+  else
+    git init -q -b allod-stage "$repo_dir" ||
+      die 1 "could not initialize detached job repository"
+  fi
+  printf '%s\n' "$snapshot" >"$job_dir/snapshot.json"
+
+  pr_explain_fetch_ref "$repo_dir" "$base_fetch_url" "$base_ref" "$base_sha" \
+    refs/allod/pr-explain/base base
+  pr_explain_fetch_ref "$repo_dir" "$head_fetch_url" "$head_ref" "$head_sha" \
+    refs/allod/pr-explain/head head
+  git -C "$repo_dir" checkout -q --detach "$head_sha" || die 1 "could not detach job checkout at head SHA"
+  git -C "$repo_dir" merge-base "$base_sha" "$head_sha" >"$job_dir/merge-base.txt" ||
+    die 1 "base and head do not share reachable history"
+  git -C "$repo_dir" diff --binary --find-renames "$base_sha...$head_sha" >"$job_dir/diff.patch" ||
+    die 1 "could not build the complete PR diff"
+  [[ -s "$job_dir/diff.patch" ]] || die 1 "PR #$number has an empty diff; no report was generated"
+  git -C "$repo_dir" diff --stat "$base_sha...$head_sha" >"$job_dir/diffstat.txt"
+  git -C "$repo_dir" log --format='%H %s' "$base_sha..$head_sha" >"$job_dir/commits.txt"
+
+  set +e
+  forge -R "$repository" pr view "$number" >"$job_dir/discussion.txt" 2>"$job_dir/forge-view.stderr"
+  discussion_status=$?
+  set -e
+  [[ "$discussion_status" -eq 0 ]] || die 1 "could not collect PR discussion and review context"
+
+  pr_explain_emit_gallery >"$job_dir/component-gallery.html"
+  generated_date=$(date -u +%F)
+  body="$job_dir/report-body.html"
+  report="$job_dir/report.html"
+  prompt="$job_dir/prompt.md"
+  jq -n \
+    --arg repository "$repository" \
+    --argjson pull_request "$number" \
+    --arg url "$pr_url" \
+    --arg title "$pr_title" \
+    --arg base_sha "$base_sha" \
+    --arg head_sha "$head_sha" \
+    --arg runner "$runner" \
+    --arg model "${model:-built-in CLI default}" \
+    --arg effort "$effort" \
+    --arg generated "$generated_date" \
+    --arg report_body "$body" \
+    '{repository: $repository, pull_request: $pull_request, url: $url, title: $title,
+      base_sha: $base_sha, head_sha: $head_sha, runner: $runner, model: $model,
+      effort: $effort, generated: $generated, report_body: $report_body}' \
+    >"$job_dir/report-contract.json"
+  pr_explain_emit_prompt >"$prompt"
+  : >"$body"
+  chmod 0600 "$body"
+  body_identity=$(stat -c '%d:%i' "$body") || die 1 "could not record staged report identity"
+  snapshot_digest=$(sha256sum "$job_dir/snapshot.json" | awk '{print $1}') ||
+    die 1 "could not record immutable snapshot checksum"
+
+  pr_explain_print_consent "$repository" "$number" "$pr_url" "$pr_title" "$base_sha" "$head_sha" \
+    "$runner" "$model" "$effort" "$output" false
+
+  set +e
+  pr_explain_run_provider "$runner" "$model" "$effort" "$repo_dir" "$job_dir" "$prompt" \
+    "$body" "$job_dir/runner.stdout" "$job_dir/runner.stderr"
+  runner_status=$?
+  set -e
+  [[ "$runner_status" -eq 0 ]] || die 1 "$runner runner failed with status $runner_status"
+  [[ -s "$body" ]] || die 1 "$runner completed without writing the staged report body"
+  [[ -f "$body" && ! -L "$body" ]] || die 1 "$runner replaced the staged report with a non-regular file"
+  [[ "$(stat -c '%d:%i' "$body")" == "$body_identity" ]] ||
+    die 1 "$runner replaced the staged report instead of populating it in place"
+  snapshot_digest_after=$(sha256sum "$job_dir/snapshot.json" | awk '{print $1}') ||
+    die 1 "$runner removed the immutable PR snapshot"
+  [[ "$snapshot_digest_after" == "$snapshot_digest" ]] ||
+    die 1 "$runner modified the immutable PR snapshot"
+  [[ "$(git -C "$repo_dir" rev-parse 'HEAD^{commit}' 2>/dev/null)" == "$head_sha" ]] ||
+    die 1 "$runner moved the detached job checkout away from the snapshotted head"
+  job_status=$(git -C "$repo_dir" status --porcelain 2>/dev/null) ||
+    die 1 "$runner damaged the detached job checkout"
+  [[ -z "$job_status" ]] ||
+    die 1 "$runner modified the detached job checkout"
+
+  pr_explain_assemble_report "$body" "$report" "$repository" "$number" "$pr_title"
+  adjacent_temp=$(mktemp -- "$output_parent/.${output_name}.XXXXXXXXXX") ||
+    die 1 "could not create atomic output staging file"
+  PR_EXPLAIN_PUBLISH_TEMP="$adjacent_temp"
+  install -m 0600 "$report" "$adjacent_temp" || die 1 "could not stage report beside output"
+  pr_explain_validate_report "$adjacent_temp" "$job_dir/snapshot.json" "$runner" \
+    "$repository" "$number" "$pr_url" "$pr_title" "$base_sha" "$head_sha" ||
+    die 1 "staged report failed validation"
+  if [[ "$replace" != true && ( -e "$output" || -L "$output" ) ]]; then
+    die 1 "output appeared during generation; refusing to overwrite without --replace"
+  fi
+  if [[ "$replace" == true ]]; then
+    mv -fT -- "$adjacent_temp" "$output" || die 1 "could not atomically replace output"
+  else
+    # A hard link is an atomic no-clobber publication because both paths are in
+    # the destination directory. Unlike `mv --no-clobber`, link(2) reports an
+    # output path that appeared after the explicit existence check.
+    ln -- "$adjacent_temp" "$output" ||
+      die 1 "output appeared during generation; refusing to overwrite without --replace"
+    rm -f -- "$adjacent_temp"
+  fi
+  PR_EXPLAIN_PUBLISH_TEMP=""
+
+  case "$job_dir" in
+    "$output_parent"/.allod-pr-explain.*) rm -rf -- "$job_dir" ;;
+    *) die 1 "internal error: refusing to clean unexpected job path $job_dir" ;;
+  esac
+  PR_EXPLAIN_JOB_DIR=""
+  printf 'allod: report written: %s\n' "$output"
+}
+
+pr_main() {
+  local command="${1:-}"
+  [[ $# -gt 0 ]] || {
+    pr_usage >&2
+    exit 1
+  }
+  shift
+
+  case "$command" in
+    explain) pr_explain "$@" ;;
+    _emit-asset)
+      [[ $# -eq 1 ]] || die 1 "internal asset emitter requires css, js, prompt, or gallery"
+      case "$1" in
+        css) pr_explain_emit_css ;;
+        js) pr_explain_emit_js ;;
+        prompt) pr_explain_emit_prompt ;;
+        gallery) pr_explain_emit_gallery ;;
+        *) die 1 "unknown internal PR explanation asset: $1" ;;
+      esac
+      ;;
+    _validate-report)
+      exec bash "$SCRIPT_DIR/validate-report" "$@"
+      ;;
+    -h|--help) pr_usage ;;
+    *) die 1 "unknown pr command: $command" ;;
+  esac
+}
+
+pr_main "$@"

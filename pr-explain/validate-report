@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Standalone validator for a PR explanation report. Usable directly (not only
+# via `allod pr _validate-report`) to check a report file against a PR
+# snapshot without regenerating it. See docs/pr-explain.md.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/lib.sh"
+
+declare -a TEMP_FILES=()
+
+make_temp_file() {
+  local destination="$1" file
+  file=$(mktemp)
+  TEMP_FILES+=("$file")
+  printf -v "$destination" '%s' "$file"
+}
+
+cleanup_temp_files() {
+  local status=$?
+  local file
+  for file in "${TEMP_FILES[@]}"; do
+    rm -f "$file"
+  done
+  return "$status"
+}
+trap cleanup_temp_files EXIT
+
+die() {
+  local code="$1"
+  shift
+  printf 'allod: %s\n' "$*" >&2
+  exit "$code"
+}
+
+usage() {
+  cat <<'EOF'
+Usage:
+  pr-explain/validate-report <report.html> <snapshot.json> <runner>
+  pr-explain/validate-report <report.html> <snapshot.json> <runner> \
+    <repository> <number> <pr-url> <pr-title> <base-sha> <head-sha>
+
+Validates a staged PR explanation report against the canonical template,
+component contracts, and (when given a matching snapshot or explicit
+provenance) the PR's identity. Prints one diagnostic per validation error or
+warning to stderr and exits non-zero if any hard error was found.
+
+The three-argument form reads repository, PR number, URL, title, and
+base/head SHAs from <snapshot.json>. The nine-argument form is what `allod pr
+explain` uses internally, where those values already live in the parent
+shell rather than the runner's writable staging directory.
+EOF
+}
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+esac
+
+[[ $# -eq 3 || $# -eq 9 ]] || {
+  usage >&2
+  die 1 "requires 3 or 9 arguments"
+}
+
+pr_explain_validate_report "$@"

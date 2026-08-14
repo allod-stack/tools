@@ -10,7 +10,10 @@ packaged via `pkgs.writeShellApplication` in `profiles` (dev VMs) and
 ```
 allod                     main CLI (change, patch, pr, pm)
 forge                     Forgejo CLI
-pr-explain/               PR explanation report assets
+pr-explain/               PR explanation report tool (behind `allod pr explain`)
+  explain                 entry point: resolve, run the provider, assemble, publish
+  validate-report          standalone report validator, usable directly
+  lib.sh                  shared asset emission and validation logic
   prompt.md               shared comprehension-first agent prompt
   report.css              responsive component vocabulary
   report.js               optional progressive enhancements
