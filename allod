@@ -80,10 +80,10 @@ read_value() {
 }
 
 make_temp_file() {
-  local file
+  local destination="$1" file
   file=$(mktemp)
   TEMP_FILES+=("$file")
-  printf '%s\n' "$file"
+  printf -v "$destination" '%s' "$file"
 }
 
 resolve_git_repo() {
@@ -588,7 +588,7 @@ change_record() {
   if [[ "$should_commit" == true ]]; then
     [[ "$message_set" == true && -n "$message" ]] ||
       die 1 "change record requires a non-empty commit message"
-    message_tmp=$(make_temp_file)
+    make_temp_file message_tmp
     printf '%s' "$message" > "$message_tmp"
     git -C "$repo" commit -F "$message_tmp"
   fi
@@ -692,7 +692,7 @@ change_submit() {
     die 6 "PR #$existing_pr already exists for '$branch'; use 'forge pr edit' instead"
   fi
 
-  body_tmp=$(make_temp_file)
+  make_temp_file body_tmp
   printf '%s' "$body" > "$body_tmp"
 
   set +e
