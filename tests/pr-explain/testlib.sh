@@ -131,6 +131,17 @@ capture_explain() {
   set -e
 }
 
+# Like capture_explain, but against an arbitrary `allod` binary rather than
+# the fixed $ALLOD — for exercising a different resolved source checkout.
+capture_explain_with() {
+  local allod_bin="$1" checkout="$2"
+  shift 2
+  set +e
+  CAPTURE_OUTPUT=$(cd "$checkout" && "$allod_bin" pr explain "$@" 2>&1)
+  CAPTURE_STATUS=$?
+  set -e
+}
+
 make_commit() {
   local repo="$1" message="$2" content="$3"
   printf '%s\n' "$content" > "$repo/example.txt"
@@ -214,9 +225,24 @@ EOF
 }
 
 install_forge_mock() {
-  cat > "$TEST_TMP/bin/forge" <<'EOF'
+  write_forge_mock_script "$TEST_TMP/bin/forge"
+}
+
+# Shared by install_forge_mock (the default, override-injected mock every
+# other test relies on) and the forge-resolution regression tests, which need
+# a second, independently placed instance of the same well-behaved mock to
+# stand in for "the correct companion forge" beside a fake tools root.
+write_forge_mock_script() {
+  local destination="$1"
+  cat > "$destination" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+
+# Self-identifying: dropped beside whichever copy of this script actually
+# ran, so a test can prove which physical forge — not merely which
+# behavior — was invoked, without threading a distinct marker path through
+# every caller.
+printf 'invoked\n' >> "$(dirname -- "$0")/.invoked"
 
 printf '%s' "${1:-}" >> "$MOCK_FORGE_LOG"
 shift || true
@@ -308,7 +334,41 @@ case " $invocation " in
     ;;
 esac
 EOF
-  chmod +x "$TEST_TMP/bin/forge"
+  chmod +x "$destination"
+}
+
+# A source checkout laid out like the real repository, but with its own
+# controllable `forge` companion instead of a real network-calling one: an
+# `allod`/`lib`/`pr-explain` symlinked straight at this repository's own
+# (unmodified) implementation, so `resolve_pr_explain_dir`'s own-script-
+# directory candidate resolves pr-explain the same way a real `./allod`
+# invocation from a checkout would, with dirname("$fake_checkout/pr-explain")
+# landing on $fake_checkout — exactly where this function puts the mock forge.
+make_fake_source_checkout() {
+  local destination="$1"
+  mkdir -p "$destination"
+  ln -s "$ROOT/allod" "$destination/allod"
+  ln -s "$ROOT/lib" "$destination/lib"
+  ln -s "$ROOT/pr-explain" "$destination/pr-explain"
+  write_forge_mock_script "$destination/forge"
+}
+
+# An old/incompatible forge standing in for a stale installed binary: it
+# accepts no subcommands pr-explain needs (mirroring the observed bug, where
+# an installed forge's usage lacked `pr snapshot`) and records whether it was
+# ever invoked, so a test can prove pr-explain never fell back to PATH.
+install_stale_forge() {
+  local destination="$1" marker="$2"
+  mkdir -p "$(dirname -- "$destination")"
+  cat > "$destination" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'invoked\n' >> '$marker'
+printf 'usage: forge <command> [options]\n' >&2
+printf 'Commands: pr-comment, pr-create, pr-edit\n' >&2
+exit 2
+EOF
+  chmod +x "$destination"
 }
 
 install_runner_mocks() {
@@ -604,3 +664,10 @@ setup_git_fixture
 install_forge_mock
 install_runner_mocks
 export PATH="$TEST_TMP/bin:$PATH"
+# Explicit injection, not PATH precedence: pr-explain prefers the forge
+# shipped beside its resolved allod tools root (here, $ROOT/forge, the real
+# binary) over anything earlier on PATH, so relying on PATH order would miss
+# that a real source checkout's own companion forge shadows a mock the same
+# way it would shadow a stale installed forge. ALLOD_PR_EXPLAIN_FORGE is the
+# narrow override meant for exactly this.
+export ALLOD_PR_EXPLAIN_FORGE="$TEST_TMP/bin/forge"

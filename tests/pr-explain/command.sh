@@ -412,4 +412,71 @@ assert_not_contains "$(cat "$race_output")" "intruder content" \
   "overwrites the file that raced in, since --replace already authorized overwriting whatever is there"
 unset MOCK_RACE_OUTPUT MOCK_RACE_CONTENT
 
+# forge companion resolution: pr-explain must use the `forge` shipped beside
+# the resolved allod tools root over anything installed earlier on PATH, per
+# the exact bug this guards against — a stale PATH `forge` shadowing a source
+# checkout's own compatible companion.
+
+new_case forge-resolution-source-checkout-beats-stale-path
+fake_checkout="$CASE_DIR/tools-root"
+make_fake_source_checkout "$fake_checkout"
+stale_marker="$CASE_DIR/stale-forge-invoked"
+install_stale_forge "$CASE_DIR/stale-path/forge" "$stale_marker"
+
+saved_tools_dir="${ALLOD_TOOLS_DIR:-}"
+saved_forge_override="${ALLOD_PR_EXPLAIN_FORGE:-}"
+saved_path="$PATH"
+unset ALLOD_TOOLS_DIR ALLOD_PR_EXPLAIN_FORGE
+export PATH="$CASE_DIR/stale-path:$PATH"
+capture_explain_with "$fake_checkout/allod" "$TEST_TMP/checkout" 7 --codex -R acme/widget \
+  --output "$CASE_DIR/output/report.html" --dry-run
+export ALLOD_TOOLS_DIR="$saved_tools_dir"
+export ALLOD_PR_EXPLAIN_FORGE="$saved_forge_override"
+export PATH="$saved_path"
+
+assert_success "a source checkout's own ./allod resolves the PR through its own companion forge"
+assert_file_absent "$stale_marker" "never falls back to a stale forge earlier on PATH when the checkout ships its own"
+assert_file_exists "$fake_checkout/.invoked" "uses the forge shipped beside the resolved tools root"
+
+new_case forge-resolution-explicit-override-wins
+fake_checkout="$CASE_DIR/tools-root"
+make_fake_source_checkout "$fake_checkout"
+override_forge="$CASE_DIR/override-forge/forge"
+mkdir -p "$(dirname -- "$override_forge")"
+write_forge_mock_script "$override_forge"
+
+saved_tools_dir="${ALLOD_TOOLS_DIR:-}"
+saved_forge_override="${ALLOD_PR_EXPLAIN_FORGE:-}"
+unset ALLOD_TOOLS_DIR
+export ALLOD_PR_EXPLAIN_FORGE="$override_forge"
+capture_explain_with "$fake_checkout/allod" "$TEST_TMP/checkout" 7 --codex -R acme/widget \
+  --output "$CASE_DIR/output/report.html" --dry-run
+export ALLOD_TOOLS_DIR="$saved_tools_dir"
+export ALLOD_PR_EXPLAIN_FORGE="$saved_forge_override"
+
+assert_success "an explicit ALLOD_PR_EXPLAIN_FORGE override resolves the PR"
+assert_file_exists "$(dirname -- "$override_forge")/.invoked" \
+  "the explicit override is used even though the checkout ships its own compatible forge"
+assert_file_absent "$fake_checkout/.invoked" \
+  "the tools-root companion is not consulted once an explicit override is set"
+
+new_case forge-override-rejects-nonexecutable
+export ALLOD_PR_EXPLAIN_FORGE="$CASE_DIR/not-a-forge"
+printf 'not a script\n' > "$ALLOD_PR_EXPLAIN_FORGE"
+capture_explain "$TEST_TMP/checkout" 7 --codex -R acme/widget --output "$CASE_DIR/output/report.html"
+assert_failure "rejects a non-executable ALLOD_PR_EXPLAIN_FORGE override"
+assert_contains "$CAPTURE_OUTPUT" "ALLOD_PR_EXPLAIN_FORGE must name an executable file" \
+  "names the malformed override clearly"
+assert_no_runner "never invokes a provider with a malformed forge override"
+export ALLOD_PR_EXPLAIN_FORGE="$TEST_TMP/bin/forge"
+
+new_case forge-override-rejects-missing
+export ALLOD_PR_EXPLAIN_FORGE="$CASE_DIR/does-not-exist"
+capture_explain "$TEST_TMP/checkout" 7 --codex -R acme/widget --output "$CASE_DIR/output/report.html"
+assert_failure "rejects an ALLOD_PR_EXPLAIN_FORGE override that does not exist"
+assert_contains "$CAPTURE_OUTPUT" "ALLOD_PR_EXPLAIN_FORGE must name an executable file" \
+  "names the missing override clearly"
+assert_no_runner "never invokes a provider with a missing forge override"
+export ALLOD_PR_EXPLAIN_FORGE="$TEST_TMP/bin/forge"
+
 finish_tests "allod pr explain command"

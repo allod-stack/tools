@@ -390,7 +390,7 @@ pr_explain() {
   local base_fetch_url head_fetch_url
   local actual_base actual_head job_dir repo_dir discussion_status runner_status job_status
   local body report prompt generated_date adjacent_temp object_format
-  local body_identity snapshot_digest snapshot_digest_after
+  local body_identity snapshot_digest snapshot_digest_after forge_bin
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -496,16 +496,16 @@ pr_explain() {
   if [[ "$checkout_origin" =~ ^https?://[^/]*@ ]]; then
     die 1 "checkout origin must not embed credentials in an HTTP(S) URL"
   fi
-  command -v forge >/dev/null 2>&1 || die 1 "forge is required"
   command -v jq >/dev/null 2>&1 || die 1 "jq is required"
   command -v git >/dev/null 2>&1 || die 1 "git is required"
   command -v "$runner" >/dev/null 2>&1 || die 1 "$runner subscription CLI is not installed"
+  forge_bin=$(pr_explain_resolve_forge)
 
   set +e
   if [[ "$repo_set" == true ]]; then
-    snapshot=$(forge -R "$repo_arg" pr snapshot "$number" 2>&1)
+    snapshot=$("$forge_bin" -R "$repo_arg" pr snapshot "$number" 2>&1)
   else
-    snapshot=$(cd -- "$checkout" && forge pr snapshot "$number" 2>&1)
+    snapshot=$(cd -- "$checkout" && "$forge_bin" pr snapshot "$number" 2>&1)
   fi
   snapshot_status=$?
   set -e
@@ -585,7 +585,7 @@ pr_explain() {
   git -C "$repo_dir" log --format='%H %s' "$base_sha..$head_sha" >"$job_dir/commits.txt"
 
   set +e
-  forge -R "$repository" pr view "$number" >"$job_dir/discussion.txt" 2>"$job_dir/forge-view.stderr"
+  "$forge_bin" -R "$repository" pr view "$number" >"$job_dir/discussion.txt" 2>"$job_dir/forge-view.stderr"
   discussion_status=$?
   set -e
   [[ "$discussion_status" -eq 0 ]] || die 1 "could not collect PR discussion and review context"
