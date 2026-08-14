@@ -8,8 +8,13 @@ packaged via `pkgs.writeShellApplication` in `profiles` (dev VMs) and
 ## Layout
 
 ```
-allod                     main CLI (change, patch, pm)
+allod                     main CLI (change, patch, pr, pm)
 forge                     Forgejo CLI
+pr-explain/               PR explanation report assets
+  prompt.md               shared comprehension-first agent prompt
+  report.css              responsive component vocabulary
+  report.js               optional progressive enhancements
+  component-gallery.html  visual reference and regression fixture
 pm/                       PM board tools (schema, renderer, groom prompt)
 workspace/                daily workspace sync and status
   pull-all                pull every repo under ~/work/
@@ -29,6 +34,10 @@ lib/                      shared shell libraries
 - [Workspace tools](workspace/README.md) — `pull-all`, `work-diff`
 - [Flake tools](flake/README.md) — `flake-status`, `flake-update-cascade`
 - [forge](docs/forge.md) — Forgejo CLI
+- [PR explanation reports](docs/pr-explain.md) — generate and iterate on a
+  comprehension-first HTML report
+- [Report components](docs/components.md) — semantic visual vocabulary and
+  authoring contracts
 - [Git hooks](git-hooks/README.md) — `protected-refs-policy`, `setup-tracked-hooks`
 
 ## Shared Library
@@ -130,6 +139,19 @@ flake-status allod-tools
 forge pr list
 forge pr view <number>
 forge pr review-comments <number>
+allod pr explain <number> --codex --output ./pr-explanation.html
+# Read and critique the report; regenerate deliberately after an improvement:
+allod pr explain <number> --codex --output ./pr-explanation.html --replace
 forge pr reply <number> <comment-id> --body "looks good"
 forge pr comment <number> --body "approved"
 ```
+
+Use `--claude` instead of `--codex` to select the other installed subscription
+CLI. The provider flag is explicit consent to disclose the PR inputs to that
+provider; the command prints the repository, immutable commits, and runner
+before invocation. It validates and writes only the requested local report — it
+never comments, commits, pushes, or edits the PR. See
+[PR explanation reports](docs/pr-explain.md) for checkout and fork resolution,
+dry runs, safe replacement, and the report-review loop. Tools that need the
+underlying commit metadata can use the stable, machine-readable
+[`forge pr snapshot`](docs/forge.md#pr-commands) interface.
