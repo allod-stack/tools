@@ -390,7 +390,8 @@ pr_explain() {
   local base_fetch_url head_fetch_url
   local actual_base actual_head job_dir repo_dir discussion_status runner_status job_status
   local body report prompt generated_date adjacent_temp object_format
-  local body_identity snapshot_digest snapshot_digest_after forge_bin
+  local body_capture body_lstat body_fd body_fstat body_resolved
+  local snapshot_digest snapshot_digest_after forge_bin
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -614,7 +615,6 @@ pr_explain() {
   pr_explain_emit_prompt >"$prompt"
   : >"$body"
   chmod 0600 "$body"
-  body_identity=$(stat -c '%d:%i' "$body") || die 1 "could not record staged report identity"
   snapshot_digest=$(sha256sum "$job_dir/snapshot.json" | awk '{print $1}') ||
     die 1 "could not record immutable snapshot checksum"
 
@@ -629,8 +629,28 @@ pr_explain() {
   [[ "$runner_status" -eq 0 ]] || die 1 "$runner runner failed with status $runner_status"
   [[ -s "$body" ]] || die 1 "$runner completed without writing the staged report body"
   [[ -f "$body" && ! -L "$body" ]] || die 1 "$runner replaced the staged report with a non-regular file"
-  [[ "$(stat -c '%d:%i' "$body")" == "$body_identity" ]] ||
-    die 1 "$runner replaced the staged report instead of populating it in place"
+  body_resolved=$(realpath -e -- "$body") || die 1 "could not resolve the staged report body"
+  [[ "$body_resolved" == "$body" ]] ||
+    die 1 "$runner replaced the staged report body with a path outside the job directory"
+
+  # The runner has already exited, and the private 0700 job directory admits no
+  # other writer, but capture defensively rather than trust the path across the
+  # gap between this check and reading the body for assembly and validation: open
+  # the body once, confirm the open fd is the very inode just checked (not one
+  # swapped in during the check), and read the immutable bytes only from that fd.
+  body_lstat=$(stat -c '%d:%i:%F' -- "$body") || die 1 "could not stat the staged report body"
+  exec {body_fd}<"$body" || die 1 "could not open the staged report body"
+  body_fstat=$(stat -L -c '%d:%i:%F' -- "/proc/self/fd/$body_fd") ||
+    die 1 "could not verify the opened staged report body"
+  [[ "$body_fstat" == "$body_lstat" ]] ||
+    die 1 "$runner replaced the staged report body while it was being captured"
+  body_capture="$job_dir/report-body.captured.html"
+  : >"$body_capture"
+  chmod 0600 "$body_capture"
+  cat <&"$body_fd" >"$body_capture" || die 1 "could not capture the staged report body"
+  exec {body_fd}<&-
+  [[ -s "$body_capture" ]] || die 1 "captured staged report body is empty"
+
   snapshot_digest_after=$(sha256sum "$job_dir/snapshot.json" | awk '{print $1}') ||
     die 1 "$runner removed the immutable PR snapshot"
   [[ "$snapshot_digest_after" == "$snapshot_digest" ]] ||
@@ -642,7 +662,7 @@ pr_explain() {
   [[ -z "$job_status" ]] ||
     die 1 "$runner modified the detached job checkout"
 
-  pr_explain_assemble_report "$body" "$report" "$repository" "$number" "$pr_title"
+  pr_explain_assemble_report "$body_capture" "$report" "$repository" "$number" "$pr_title"
   adjacent_temp=$(mktemp -- "$output_parent/.${output_name}.XXXXXXXXXX") ||
     die 1 "could not create atomic output staging file"
   PR_EXPLAIN_PUBLISH_TEMP="$adjacent_temp"

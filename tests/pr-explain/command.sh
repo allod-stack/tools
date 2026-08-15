@@ -350,14 +350,15 @@ assert_contains "$CAPTURE_OUTPUT" "non-regular file" "diagnoses the symlinked bo
 assert_file_absent "$CASE_DIR/output/report.html" "does not publish after a symlinked body"
 assert_file_exists "$(diagnostics_path)/prompt.md" "preserves diagnostics for a symlinked body"
 
-new_case body-inode-replaced
+new_case body-atomic-replace
 write_valid_body codex
 export MOCK_RUNNER_MODE=body-replace
-capture_explain "$TEST_TMP/checkout" 7 --codex -R acme/widget --output "$CASE_DIR/output/report.html"
-assert_failure "fails closed when the runner replaces the staged body file instead of populating it in place"
-assert_contains "$CAPTURE_OUTPUT" "instead of populating it in place" "diagnoses the inode replacement"
-assert_file_absent "$CASE_DIR/output/report.html" "does not publish after an inode-replaced body"
-assert_file_exists "$(diagnostics_path)/prompt.md" "preserves diagnostics for an inode-replaced body"
+atomic_replace_output="$CASE_DIR/output/report.html"
+capture_explain "$TEST_TMP/checkout" 7 --codex -R acme/widget --output "$atomic_replace_output"
+assert_success "accepts a runner that atomically replaces the staged body with a new regular file at the same path"
+assert_file_exists "$atomic_replace_output" "publishes the report after an atomic body replacement"
+assert_contains "$(cat "$atomic_replace_output")" "The change makes the teaching path explicit" \
+  "publishes the atomically replaced body content"
 
 new_case snapshot-tampered
 write_valid_body codex

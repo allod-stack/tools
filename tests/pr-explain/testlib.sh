@@ -449,9 +449,11 @@ case "${MOCK_RUNNER_MODE:-success}" in
       printf 'missing ALLOD_PR_EXPLAIN_REPORT_BODY\n' >&2
       exit 24
     }
-    # mv a distinct, already-allocated inode into place — rm+cp in the same
-    # directory risks the filesystem reusing the freed inode number, which
-    # would make this postcondition check pass by coincidence.
+    # mv a distinct, already-allocated inode into place, simulating a runner
+    # (like Claude Code's Write tool) that stages a temp file and atomically
+    # renames it over the pre-created body instead of editing it in place.
+    # The replacement lands at the same canonical path as a regular file, so
+    # this must be accepted.
     cp "$MOCK_BODY_FILE" "$prefix.replacement.html"
     mv -f "$prefix.replacement.html" "$ALLOD_PR_EXPLAIN_REPORT_BODY"
     ;;
