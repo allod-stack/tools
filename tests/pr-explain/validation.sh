@@ -148,6 +148,17 @@ sed -i 's#</main>#<p>eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3OD
 validation_failure "$SABOTAGE" 'secret|credential' \
   "rejects a JWT-shaped bearer token"
 
+# The secret scan runs over the raw report bytes, not a rendering of them, so
+# quoting a credential-shaped value inside <code> is not an exemption. This is
+# the documented defense-in-depth intent (docs/pr-explain.md): a passage that
+# only *names* a field is allowed, but a pasted value stays blocked no matter
+# what element carries it, including a code sample that would look like a
+# natural, low-suspicion place to paste one.
+sabotage_copy secret-in-code
+sed -i 's#</main>#<p>Example key: <code>AKIAABCDEFGHIJKLMNOP</code></p></main>#' "$SABOTAGE"
+validation_failure "$SABOTAGE" 'E19.*secret-looking' \
+  "blocks a secret-shaped value quoted inside <code>; a code element is not an exemption"
+
 SECRET_PROSE_FRAGMENT="$CASE_DIR/secret-prose-fragment.html"
 cat > "$SECRET_PROSE_FRAGMENT" <<'HTML'
 <section id="auth-notes" aria-labelledby="auth-notes-h">
