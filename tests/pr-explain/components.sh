@@ -23,11 +23,14 @@ emit_and_compare() {
 CSS="$ROOT/pr-explain/report.css"
 JS="$ROOT/pr-explain/report.js"
 PROMPT="$ROOT/pr-explain/prompt.md"
+REPAIR_PROMPT="$ROOT/pr-explain/repair-prompt.md"
 GALLERY="$ROOT/pr-explain/component-gallery.html"
 
 emit_and_compare css "$CSS" "the installed CLI embeds the checked stylesheet byte-for-byte"
 emit_and_compare js "$JS" "the installed CLI embeds the checked enhancement script byte-for-byte"
 emit_and_compare prompt "$PROMPT" "the installed CLI embeds the checked common prompt byte-for-byte"
+emit_and_compare repair-prompt "$REPAIR_PROMPT" \
+  "the installed CLI embeds the checked repair prompt byte-for-byte"
 emit_and_compare gallery "$GALLERY" "the installed CLI embeds the checked component gallery byte-for-byte"
 
 assert_contains "$(cat "$PROMPT")" "information transfer" \
@@ -52,6 +55,31 @@ assert_contains "$(cat "$PROMPT")" "Facts" \
   "the prompt separates facts from interpretation"
 assert_contains "$(cat "$PROMPT")" "not decoration" \
   "the prompt allows pictures and motion only when they reduce cognitive work"
+
+# The three contracts real attended runs actually broke. They are stated once
+# in the vocabulary and again as a final check, because the final check is what
+# a runner re-reads before returning.
+assert_contains "$(cat "$PROMPT")" "Every diagram is in a figure" \
+  "the prompt's final check leads with the figure containment contract"
+assert_contains "$(cat "$PROMPT")" "Heading levels never skip in document order" \
+  "the prompt's final check names heading order as a document-wide property"
+assert_contains "$(cat "$PROMPT")" "bare \`codex\` or \`claude\`" \
+  "the prompt's final check separates the raw runner id from its visible label"
+for repair_rule in "minimum structural correction" "Preserve the semantic content" \
+  "figure.rx-figure" "rx-sequence" "heading levels never skip" "data-runner" \
+  "Do not modify" "non-empty regular file"; do
+  if grep -Fq "$repair_rule" "$REPAIR_PROMPT"; then
+    pass "the repair prompt states: $repair_rule"
+  else
+    fail "the repair prompt states: $repair_rule" "missing from: $REPAIR_PROMPT"
+  fi
+done
+if [[ "$(wc -l < "$REPAIR_PROMPT")" -le 20 ]]; then
+  pass "the repair prompt stays a short, mechanical rule list"
+else
+  fail "the repair prompt stays a short, mechanical rule list" \
+    "lines: $(wc -l < "$REPAIR_PROMPT")"
+fi
 
 assert_contains "$(cat "$CSS")" '.rx-flow > li + li::before' \
   "flow connectors are pseudo-elements owned by the following node"

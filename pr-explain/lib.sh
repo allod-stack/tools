@@ -55,6 +55,7 @@ pr_explain_emit_asset() {
 pr_explain_emit_css() { pr_explain_emit_asset report.css; }
 pr_explain_emit_js() { pr_explain_emit_asset report.js; }
 pr_explain_emit_prompt() { pr_explain_emit_asset prompt.md; }
+pr_explain_emit_repair_prompt() { pr_explain_emit_asset repair-prompt.md; }
 pr_explain_emit_gallery() { pr_explain_emit_asset component-gallery.html; }
 
 pr_explain_html_escape() {

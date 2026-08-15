@@ -15,6 +15,7 @@ pr-explain/               PR explanation report tool (behind `allod pr explain`)
   validate-report          standalone report validator, usable directly
   lib.sh                  shared asset emission and validation logic
   prompt.md               shared comprehension-first agent prompt
+  repair-prompt.md        rules for the single bounded validation repair pass
   report.css              responsive component vocabulary
   report.js               optional progressive enhancements
   component-gallery.html  visual reference and regression fixture

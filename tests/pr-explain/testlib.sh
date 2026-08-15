@@ -378,10 +378,28 @@ set -euo pipefail
 
 runner=$(basename "$0")
 prefix="$MOCK_RUNNER_DIR/$runner"
-printf '%s\0' "$@" > "$prefix.args0"
-env | LC_ALL=C sort > "$prefix.env"
+
+# Count invocations and record every pass separately as well as under the
+# unnumbered prefix, so single-pass assertions keep working while a repair
+# test can compare pass 1 against pass 2.
+calls=$(( $(cat "$prefix.calls" 2>/dev/null || printf '0') + 1 ))
+printf '%s\n' "$calls" > "$prefix.calls"
+pass_prefix="$prefix.$calls"
+
+for target in "$prefix" "$pass_prefix"; do
+  printf '%s\0' "$@" > "$target.args0"
+  env | LC_ALL=C sort > "$target.env"
+  printf '%s\n' "$PWD" > "$target.pwd"
+done
 cat > "$prefix.stdin"
-printf '%s\n' "$PWD" > "$prefix.pwd"
+cp "$prefix.stdin" "$pass_prefix.stdin"
+
+mode="${MOCK_RUNNER_MODE:-success}"
+body_source="${MOCK_BODY_FILE:-}"
+if [[ "$calls" -ge 2 ]]; then
+  mode="${MOCK_RUNNER_MODE_2:-$mode}"
+  body_source="${MOCK_BODY_FILE_2:-$body_source}"
+fi
 
 repo="$PWD"
 job=""
@@ -420,7 +438,7 @@ for project_file in .codex/config.toml AGENTS.md .claude/settings.json CLAUDE.md
   fi
 done
 
-case "${MOCK_RUNNER_MODE:-success}" in
+case "$mode" in
   fail)
     printf '%s runner failed deliberately\n' "$runner" >&2
     exit 23
@@ -433,14 +451,14 @@ case "${MOCK_RUNNER_MODE:-success}" in
       printf 'missing ALLOD_PR_EXPLAIN_REPORT_BODY\n' >&2
       exit 24
     }
-    cp "$MOCK_BODY_FILE" "$ALLOD_PR_EXPLAIN_REPORT_BODY"
+    cp "$body_source" "$ALLOD_PR_EXPLAIN_REPORT_BODY"
     ;;
   body-symlink)
     [[ -n "${ALLOD_PR_EXPLAIN_REPORT_BODY:-}" ]] || {
       printf 'missing ALLOD_PR_EXPLAIN_REPORT_BODY\n' >&2
       exit 24
     }
-    cp "$MOCK_BODY_FILE" "$prefix.symlink-target.html"
+    cp "$body_source" "$prefix.symlink-target.html"
     rm -f "$ALLOD_PR_EXPLAIN_REPORT_BODY"
     ln -s "$prefix.symlink-target.html" "$ALLOD_PR_EXPLAIN_REPORT_BODY"
     ;;
@@ -454,7 +472,7 @@ case "${MOCK_RUNNER_MODE:-success}" in
     # renames it over the pre-created body instead of editing it in place.
     # The replacement lands at the same canonical path as a regular file, so
     # this must be accepted.
-    cp "$MOCK_BODY_FILE" "$prefix.replacement.html"
+    cp "$body_source" "$prefix.replacement.html"
     mv -f "$prefix.replacement.html" "$ALLOD_PR_EXPLAIN_REPORT_BODY"
     ;;
   tamper-snapshot)
@@ -462,7 +480,7 @@ case "${MOCK_RUNNER_MODE:-success}" in
       printf 'missing ALLOD_PR_EXPLAIN_REPORT_BODY\n' >&2
       exit 24
     }
-    cp "$MOCK_BODY_FILE" "$ALLOD_PR_EXPLAIN_REPORT_BODY"
+    cp "$body_source" "$ALLOD_PR_EXPLAIN_REPORT_BODY"
     printf '{"tampered":true}' >> "$job/snapshot.json"
     ;;
   move-head)
@@ -470,7 +488,7 @@ case "${MOCK_RUNNER_MODE:-success}" in
       printf 'missing ALLOD_PR_EXPLAIN_REPORT_BODY\n' >&2
       exit 24
     }
-    cp "$MOCK_BODY_FILE" "$ALLOD_PR_EXPLAIN_REPORT_BODY"
+    cp "$body_source" "$ALLOD_PR_EXPLAIN_REPORT_BODY"
     git -C "$repo" checkout -q --detach "$MOCK_BASE_SHA"
     ;;
   dirty-worktree)
@@ -478,7 +496,7 @@ case "${MOCK_RUNNER_MODE:-success}" in
       printf 'missing ALLOD_PR_EXPLAIN_REPORT_BODY\n' >&2
       exit 24
     }
-    cp "$MOCK_BODY_FILE" "$ALLOD_PR_EXPLAIN_REPORT_BODY"
+    cp "$body_source" "$ALLOD_PR_EXPLAIN_REPORT_BODY"
     printf 'runner tampering\n' >> "$repo/example.txt"
     ;;
   publish-race)
@@ -486,11 +504,11 @@ case "${MOCK_RUNNER_MODE:-success}" in
       printf 'missing ALLOD_PR_EXPLAIN_REPORT_BODY\n' >&2
       exit 24
     }
-    cp "$MOCK_BODY_FILE" "$ALLOD_PR_EXPLAIN_REPORT_BODY"
+    cp "$body_source" "$ALLOD_PR_EXPLAIN_REPORT_BODY"
     printf '%s\n' "${MOCK_RACE_CONTENT:-intruder}" > "$MOCK_RACE_OUTPUT"
     ;;
   *)
-    printf 'unknown runner mode: %s\n' "$MOCK_RUNNER_MODE" >&2
+    printf 'unknown runner mode: %s\n' "$mode" >&2
     exit 25
     ;;
 esac
@@ -507,8 +525,19 @@ new_case() {
   export MOCK_FORGE_LOG="$CASE_DIR/forge.log"
   export MOCK_SCENARIO=same
   export MOCK_RUNNER_MODE=success
+  unset MOCK_RUNNER_MODE_2 MOCK_BODY_FILE_2
   mkdir -p "$MOCK_RUNNER_DIR" "$CASE_DIR/output"
   : > "$MOCK_FORGE_LOG"
+}
+
+runner_call_count() {
+  local runner="$1"
+  cat "$MOCK_RUNNER_DIR/$runner.calls" 2>/dev/null || printf '0\n'
+}
+
+assert_runner_calls() {
+  local runner="$1" expected="$2" description="$3"
+  assert_equal "$(runner_call_count "$runner")" "$expected" "$description"
 }
 
 scenario_head_sha() {
@@ -602,6 +631,32 @@ EOF
 </footer>
 EOF
   } > "$body"
+}
+
+# A body that is otherwise valid but carries one real structural defect the
+# validator names with a stable code — a timeline diagram outside any figure,
+# the same E8 contract a real attended run tripped. $2 is optional extra
+# markup for tests that need a second, attacker-shaped diagnostic. Leaves
+# MOCK_BODY_FILE on the defective body and MOCK_VALID_BODY_FILE on the clean
+# one, so a repair pass can be pointed at the corrected version.
+write_invalid_body() {
+  local runner="$1" extra="${2:-}"
+  write_valid_body "$runner"
+  local valid="$MOCK_BODY_FILE" invalid="$CASE_DIR/invalid-body.html"
+
+  awk -v extra="$extra" '
+    { print }
+    /rx-claim">An immutable snapshot/ {
+      print "    <ol class=\"rx-timeline\">"
+      print "      <li data-state=\"done\"><h3>Snapshot resolved</h3><p class=\"rx-state\">done</p></li>"
+      print "      <li data-state=\"now\"><h3>Report assembled</h3><p class=\"rx-state\">now</p></li>"
+      print "    </ol>"
+      if (extra != "") print extra
+    }
+  ' "$valid" > "$invalid"
+
+  export MOCK_VALID_BODY_FILE="$valid"
+  export MOCK_BODY_FILE="$invalid"
 }
 
 write_snapshot_file() {

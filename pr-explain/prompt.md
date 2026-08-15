@@ -141,4 +141,10 @@ Finally, audit the choices without looking at the keys. Compare option word coun
 
 ## Finish mechanically
 
-Before returning, confirm that the required body file exists and is non-empty; every tag stays on one physical line and follows the lowercase, double-quoted, no-comment, no-self-closing grammar; every internal reference resolves; every figure has a final caption; every sequence has at least two visible steps; no authored content uses `hidden`, `aria-hidden`, or `inert`; code whitespace is exact; the five quiz items and misconception labels are complete; provenance matches the contract; the main explanation works with scripts absent; and no secret-looking or environment-specific material entered the fragment. Do not commit, push, edit the pull request, or write anywhere except the required report-body path.
+Re-read the finished body and check these three first. They are what most often fails:
+
+1. **Every diagram is in a figure.** Each `rx-flow`, `rx-branch`, `rx-lanes`, `rx-codewalk`, `rx-timeline`, and `rx-compare` — including one used as a short aside mid-section — is inside a `figure.rx-figure` whose last direct child is exactly one `figcaption.rx-caption`. Only `rx-sequence` is exempt: it is its own `section`, never a figure.
+2. **Heading levels never skip in document order.** Read the headings top to bottom, ignoring which section they sit in: `h1`, then each later heading at most one level deeper than the heading before it. A `h4` may follow only a `h3` or deeper.
+3. **Provenance carries the id and the label.** `data-runner` is the bare `codex` or `claude`; the visible runner field reads `codex subscription CLI` or `claude subscription CLI`.
+
+Then confirm that the required body file exists and is non-empty; every tag stays on one physical line and follows the lowercase, double-quoted, no-comment, no-self-closing grammar; every internal reference resolves; every sequence has at least two visible steps; no authored content uses `hidden`, `aria-hidden`, or `inert`; code whitespace is exact; the five quiz items and misconception labels are complete; the rest of provenance matches the contract; the main explanation works with scripts absent; and no secret-looking or environment-specific material entered the fragment. Do not commit, push, edit the pull request, or write anywhere except the required report-body path.

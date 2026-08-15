@@ -31,6 +31,7 @@ allod pr explain <number> (--codex | --claude)
   [-R|--repo <owner/repo>] [--checkout <path>]
   --output <report.html> [--replace] [--dry-run]
   [--model <model>] [--effort <low|medium|high|xhigh|max>]
+  [--no-repair]
 ```
 
 The pull-request number, exactly one provider, and `--output` are required,
@@ -47,6 +48,7 @@ including for a dry run.
 | `--dry-run` | Resolve and verify the snapshot and print the disclosure summary, but do not run a provider or write the output. |
 | `--model` | Override the selected CLI's built-in model default for this run. |
 | `--effort` | Override explanation effort. The default is `high`. |
+| `--no-repair` | Fail on the first validation failure instead of spending one repair pass, keeping the run to a single provider call. |
 
 Leaving out `--model` follows the selected CLI's built-in default, so the
 command does not freeze a model name that will become stale. User and project
@@ -157,13 +159,56 @@ ordinary sentence, not a pasted value) alone rather than risk failing a
 faithful code walk. Treat a pass as "nothing obviously credential-shaped
 leaked," not as a guarantee the report is secret-free.
 
+### The bounded repair pass
+
+A report is assembled and validated before it can be published. When that
+validation fails, `allod` prints every diagnostic, prints `validation failed;
+requesting one repair pass`, and hands the diagnostics back to the *same*
+provider for exactly one more call. The repair prompt carries only the
+canonical body path, the validator's diagnostics as quoted data, and the
+immutable authoring rules; it asks for the minimum structural correction that
+clears each diagnostic while preserving the report's meaning. The repair pass
+runs with the same hardened arguments and sanitized environment as the first
+call — no credentials are resent, and the provider cannot be switched — and
+every cage postcondition is re-checked afterward: the staged body is captured
+safely, the immutable snapshot must be unchanged, and the detached job checkout
+must still be clean at the snapshotted head.
+
+The loop is bounded, not adaptive. One run makes **at most two provider calls**:
+
+| Run | Provider calls |
+|---|---|
+| `--dry-run` | 0 |
+| First body validates | 1 |
+| First body fails, repair validates | 2 |
+| First body fails, repaired body fails | 2, then the run fails |
+
+A second validation failure is final. Both passes' diagnostics, prompts, runner
+logs, and captured bodies stay in the preserved job directory, and any previous
+report is left byte-for-byte untouched. Since the provider flag already consents
+to this PR and this provider, the repair pass discloses nothing new — but it does
+cost a second call against your subscription. Pass `--no-repair` when you want
+strict one-call cost control; the run then fails on the first validation failure
+and still preserves the diagnostics.
+
+Repair does not weaken any contract. The repaired report is assembled and
+validated by exactly the same validator, with the same errors blocking
+publication. The repair pass only removes the need for one-shot perfection from
+a long component gallery on an on-demand run.
+
 On success, the private job directory and detached checkout are removed. On a
 runner failure, missing output, or validation failure, the command prints and
 preserves the `.allod-pr-explain.*` job directory beside the destination so you
 can inspect the prompt, runner logs, snapshot, discussion, complete diff, and
-rejected staging file alongside the validator diagnostics. That directory may
-contain the PR's source and review context; treat it as private diagnostic
-material and remove it when the investigation is complete.
+rejected staging file alongside the validator diagnostics. Each pass keeps its
+own artifacts there: `runner.stdout`/`runner.stderr` and
+`report-body.captured.html` for the initial call, and `repair-prompt.md`,
+`runner.repair.stdout`/`runner.repair.stderr`, and
+`report-body.repair.captured.html` for the repair pass, with the
+diagnostics that triggered each in `validation.diagnostics.txt` and
+`validation.repair.diagnostics.txt`. That directory may contain the PR's
+source and review context; treat it as private diagnostic material and remove
+it when the investigation is complete.
 
 `--dry-run` performs no provider run and no report write. It is the quickest way
 to check repository inference, fork resolution, immutable commits, runner

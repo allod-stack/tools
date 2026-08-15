@@ -8,6 +8,9 @@ assert_success "shows PR explain help"
 assert_contains "$CAPTURE_OUTPUT" "--codex" "documents Codex as an explicit consent choice"
 assert_contains "$CAPTURE_OUTPUT" "--claude" "documents Claude as an explicit consent choice"
 assert_contains "$CAPTURE_OUTPUT" "--output" "documents the required output path"
+assert_contains "$CAPTURE_OUTPUT" "--no-repair" "documents the single-call option"
+assert_contains "$CAPTURE_OUTPUT" "at most two provider calls" \
+  "documents the bounded cost of a repair pass"
 
 new_case requires-output
 capture_explain "$TEST_TMP/checkout" 7 --codex -R acme/widget
@@ -320,6 +323,215 @@ assert_equal "$(cat "$atomic_output")" "known-good previous report" \
   "preserves the old report when validation fails"
 assert_contains "$CAPTURE_OUTPUT" "secret" "reports the blocking secret-content validation"
 assert_file_exists "$(diagnostics_path)/report-body.html" "preserves the rejected staging body for diagnosis"
+
+# Bounded repair: the tool spends at most one extra provider call to let the
+# same consented provider fix a body its own validator rejected. The contracts
+# are unchanged — a repaired body is validated exactly as strictly, and every
+# cage postcondition is re-checked after the repair pass.
+
+new_case repair-succeeds
+write_invalid_body codex
+export MOCK_BODY_FILE_2="$MOCK_VALID_BODY_FILE"
+repair_output="$CASE_DIR/output/report.html"
+capture_explain "$TEST_TMP/checkout" 7 --codex -R acme/widget --output "$repair_output"
+assert_success "publishes after one repair pass fixes the rejected body"
+assert_file_exists "$repair_output" "installs the repaired report"
+assert_contains "$CAPTURE_OUTPUT" "validation error [E8" \
+  "shows the validator diagnostics that triggered the repair"
+assert_contains "$CAPTURE_OUTPUT" "validation failed; requesting one repair pass" \
+  "announces the repair pass before spending the second provider call"
+assert_contains "$CAPTURE_OUTPUT" "repair pass accepted" "confirms the repaired report validated"
+assert_contains "$CAPTURE_OUTPUT" "provider calls: at most 2" \
+  "discloses the two-call ceiling before any source is sent"
+assert_runner_calls codex 2 "spends exactly two provider calls when the first body fails"
+assert_not_contains "$(cat "$repair_output")" '<ol class="rx-timeline">' \
+  "publishes the repaired body, not the rejected one"
+
+repair_prompt="$(cat "$MOCK_RUNNER_DIR/codex.2.stdin")"
+assert_contains "$repair_prompt" "E8: every diagram component must be contained by an rx-figure" \
+  "hands the exact validator diagnostics to the repair pass"
+assert_contains "$repair_prompt" "BEGIN VALIDATOR DIAGNOSTICS" \
+  "delimits the diagnostics as quoted data"
+assert_contains "$repair_prompt" "the only file you may change" \
+  "names the canonical body path as the only writable file"
+assert_contains "$repair_prompt" "minimum structural correction" \
+  "asks for the minimum structural correction"
+assert_contains "$repair_prompt" "Preserve the semantic content" \
+  "requires the repair to preserve semantic content"
+assert_not_contains "$repair_prompt" "must-not-leak" \
+  "never resends credentials or provider environment in the repair prompt"
+if cmp -s "$MOCK_RUNNER_DIR/codex.1.stdin" "$MOCK_RUNNER_DIR/codex.2.stdin"; then
+  fail "the repair pass gets its own prompt" "repair prompt is identical to the initial prompt"
+else
+  pass "the repair pass gets its own prompt"
+fi
+
+declare -a repair_pass_one=() repair_pass_two=()
+read_runner_args codex.1 repair_pass_one
+read_runner_args codex.2 repair_pass_two
+assert_equal "${repair_pass_two[*]}" "${repair_pass_one[*]}" \
+  "the repair pass reuses the initial hardened argument vector exactly"
+repair_env_one="$MOCK_RUNNER_DIR/codex.1.env"
+repair_env_two="$MOCK_RUNNER_DIR/codex.2.env"
+for deny_name in "${deny_names[@]}"; do
+  assert_env_absent "$repair_env_two" "$deny_name" "keeps $deny_name out of the repair environment"
+done
+assert_env_value "$repair_env_two" FORGE_TOKEN_FILE /dev/null "blocks Forge token fallback on repair"
+assert_env_value "$repair_env_two" CODEX_HOME "$CODEX_HOME" "keeps the same provider on repair"
+assert_env_absent "$repair_env_two" ANTHROPIC_CONFIG_DIR "cannot switch provider on repair"
+assert_env_value "$repair_env_two" ALLOD_PR_EXPLAIN_REPORT_BODY \
+  "$(sed -n 's/^ALLOD_PR_EXPLAIN_REPORT_BODY=//p' "$repair_env_one")" \
+  "repairs the same staged body path"
+
+new_case repair-diagnostics-are-not-argv
+write_invalid_body claude \
+  '<p><a href="#--dangerously-inject-argv">A link with no target</a></p>'
+export MOCK_BODY_FILE_2="$MOCK_VALID_BODY_FILE"
+capture_explain "$TEST_TMP/checkout" 7 --claude -R acme/widget \
+  --output "$CASE_DIR/output/report.html"
+assert_success "repairs a body whose diagnostics quote option-shaped body content"
+assert_contains "$(cat "$MOCK_RUNNER_DIR/claude.2.stdin")" "--dangerously-inject-argv" \
+  "quotes the option-shaped diagnostic as prompt data"
+declare -a injection_args=()
+read_runner_args claude.2 injection_args
+for injection_arg in "${injection_args[@]}"; do
+  if [[ "$injection_arg" == *"--dangerously-inject-argv"* ]]; then
+    fail "diagnostics cannot reach the runner argument vector" "argument: $injection_arg"
+  fi
+done
+pass "diagnostics cannot reach the runner argument vector"
+
+new_case repair-fails-twice
+write_invalid_body codex
+# A genuinely different second body that still breaks the same contract: the
+# repair pass did work, and the work still does not validate.
+still_invalid="$CASE_DIR/still-invalid-body.html"
+sed 's/Report assembled/Report reassembled/' "$MOCK_BODY_FILE" > "$still_invalid"
+export MOCK_BODY_FILE_2="$still_invalid"
+twice_output="$CASE_DIR/output/report.html"
+printf 'known-good previous report\n' > "$twice_output"
+capture_explain "$TEST_TMP/checkout" 7 --codex -R acme/widget --output "$twice_output" --replace
+assert_failure "fails when the repair pass does not clear validation"
+assert_contains "$CAPTURE_OUTPUT" "failed validation after one repair pass" \
+  "says the bounded repair budget is spent"
+assert_equal "$(cat "$twice_output")" "known-good previous report" \
+  "preserves the old report after a failed repair"
+assert_runner_calls codex 2 "never invokes the provider more than twice"
+twice_job=$(diagnostics_path)
+assert_file_exists "$twice_job/validation.diagnostics.txt" "preserves the first-pass diagnostics"
+assert_file_exists "$twice_job/validation.repair.diagnostics.txt" "preserves the repair-pass diagnostics"
+assert_file_exists "$twice_job/repair-prompt.md" "preserves the repair prompt"
+assert_file_exists "$twice_job/report-body.captured.html" "preserves the first rejected body"
+assert_file_exists "$twice_job/report-body.repair.captured.html" "preserves the repaired body"
+assert_contains "$(cat "$twice_job/validation.repair.diagnostics.txt")" "E8:" \
+  "records the stable diagnostic code that survived the repair"
+
+new_case repair-runner-failure
+write_invalid_body codex
+export MOCK_RUNNER_MODE_2=fail
+capture_explain "$TEST_TMP/checkout" 7 --codex -R acme/widget --output "$CASE_DIR/output/report.html"
+assert_failure "propagates a repair-pass runner failure"
+assert_contains "$CAPTURE_OUTPUT" "repair pass failed with status 23" \
+  "names the failing pass and its status"
+assert_file_absent "$CASE_DIR/output/report.html" "publishes nothing after a failed repair pass"
+failed_repair_job=$(diagnostics_path)
+assert_file_exists "$failed_repair_job/runner.repair.stderr" "keeps the repair runner log separate"
+assert_contains "$(cat "$failed_repair_job/runner.repair.stderr")" "runner failed deliberately" \
+  "records the repair pass's own runner output"
+assert_equal "$(cat "$failed_repair_job/runner.stderr")" "" \
+  "leaves the initial runner log untouched by the repair pass"
+
+new_case repair-runner-no-output
+write_invalid_body codex
+export MOCK_RUNNER_MODE_2=no-output
+capture_explain "$TEST_TMP/checkout" 7 --codex -R acme/widget --output "$CASE_DIR/output/report.html"
+assert_failure "fails when the repair pass writes nothing"
+assert_contains "$CAPTURE_OUTPUT" "repair pass left the staged report body unchanged" \
+  "diagnoses a repair pass that produced no new body"
+assert_file_absent "$CASE_DIR/output/report.html" "publishes nothing after an inert repair pass"
+
+new_case repair-tampers-with-snapshot
+write_invalid_body codex
+export MOCK_BODY_FILE_2="$MOCK_VALID_BODY_FILE"
+export MOCK_RUNNER_MODE_2=tamper-snapshot
+capture_explain "$TEST_TMP/checkout" 7 --codex -R acme/widget --output "$CASE_DIR/output/report.html"
+assert_failure "fails closed when the repair pass modifies the immutable PR snapshot"
+assert_contains "$CAPTURE_OUTPUT" "repair pass modified the immutable PR snapshot" \
+  "attributes the snapshot tampering to the repair pass"
+assert_file_absent "$CASE_DIR/output/report.html" "publishes nothing after repair-pass snapshot tampering"
+
+new_case repair-moves-job-checkout
+write_invalid_body codex
+export MOCK_BODY_FILE_2="$MOCK_VALID_BODY_FILE"
+export MOCK_RUNNER_MODE_2=move-head
+capture_explain "$TEST_TMP/checkout" 7 --codex -R acme/widget --output "$CASE_DIR/output/report.html"
+assert_failure "fails closed when the repair pass moves the detached job checkout"
+assert_contains "$CAPTURE_OUTPUT" "repair pass moved the detached job checkout" \
+  "attributes the moved checkout to the repair pass"
+assert_file_absent "$CASE_DIR/output/report.html" "publishes nothing after a repair-pass checkout move"
+
+new_case repair-dirties-job-checkout
+write_invalid_body codex
+export MOCK_BODY_FILE_2="$MOCK_VALID_BODY_FILE"
+export MOCK_RUNNER_MODE_2=dirty-worktree
+capture_explain "$TEST_TMP/checkout" 7 --codex -R acme/widget --output "$CASE_DIR/output/report.html"
+assert_failure "fails closed when the repair pass leaves the job checkout dirty"
+assert_contains "$CAPTURE_OUTPUT" "repair pass modified the detached job checkout" \
+  "attributes the dirty checkout to the repair pass"
+assert_file_absent "$CASE_DIR/output/report.html" "publishes nothing after a repair-pass worktree change"
+
+new_case repair-symlinks-body
+write_invalid_body codex
+export MOCK_BODY_FILE_2="$MOCK_VALID_BODY_FILE"
+export MOCK_RUNNER_MODE_2=body-symlink
+capture_explain "$TEST_TMP/checkout" 7 --codex -R acme/widget --output "$CASE_DIR/output/report.html"
+assert_failure "fails closed when the repair pass redirects the staged body"
+assert_contains "$CAPTURE_OUTPUT" "repair pass replaced the staged report with a non-regular file" \
+  "attributes the redirected body to the repair pass"
+assert_file_absent "$CASE_DIR/output/report.html" "publishes nothing after a repair-pass body symlink"
+
+new_case no-repair-single-call
+write_invalid_body codex
+export MOCK_BODY_FILE_2="$MOCK_VALID_BODY_FILE"
+no_repair_output="$CASE_DIR/output/report.html"
+printf 'known-good previous report\n' > "$no_repair_output"
+capture_explain "$TEST_TMP/checkout" 7 --codex -R acme/widget \
+  --output "$no_repair_output" --replace --no-repair
+assert_failure "--no-repair fails on the first validation failure"
+assert_contains "$CAPTURE_OUTPUT" "--no-repair kept this run to one provider call" \
+  "explains that no repair pass was attempted"
+assert_contains "$CAPTURE_OUTPUT" "provider calls: 1 (--no-repair)" \
+  "discloses the single-call ceiling up front"
+assert_runner_calls codex 1 "--no-repair spends exactly one provider call"
+assert_equal "$(cat "$no_repair_output")" "known-good previous report" \
+  "--no-repair preserves the old report"
+assert_file_exists "$(diagnostics_path)/validation.diagnostics.txt" \
+  "--no-repair still preserves the validator diagnostics"
+
+new_case no-repair-valid-body
+write_valid_body codex
+no_repair_valid_output="$CASE_DIR/output/report.html"
+capture_explain "$TEST_TMP/checkout" 7 --codex -R acme/widget \
+  --output "$no_repair_valid_output" --no-repair
+assert_success "--no-repair publishes a body that validates the first time"
+assert_runner_calls codex 1 "a passing first body costs one provider call"
+
+new_case no-repair-repeated
+capture_explain "$TEST_TMP/checkout" 7 --codex -R acme/widget \
+  --output "$CASE_DIR/output/report.html" --no-repair --no-repair
+assert_failure "rejects a repeated --no-repair"
+assert_contains "$CAPTURE_OUTPUT" "--no-repair may be specified only once" \
+  "diagnoses the repeated flag"
+assert_no_runner "rejects malformed options before any provider call"
+
+new_case dry-run-repair-disclosure
+write_valid_body codex
+capture_explain "$TEST_TMP/checkout" 7 --codex -R acme/widget \
+  --output "$CASE_DIR/output/report.html" --dry-run
+assert_success "dry-run resolves without a provider call"
+assert_contains "$CAPTURE_OUTPUT" "provider calls: 0 (--dry-run)" \
+  "dry-run discloses that it spends no provider call"
+assert_runner_calls codex 0 "dry-run invokes the provider zero times"
 
 new_case moved-base
 export MOCK_SCENARIO=moved-base
