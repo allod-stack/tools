@@ -100,4 +100,27 @@ reset_requests
 run_fail "missing or has malformed snapshot fields" \
   "rejects a fork clone URL whose host and path contradict repository identity" pr snapshot 50
 
+reset_requests
+output=$(run_capture -R acme/widget pr snapshot 51)
+assert_output_json "$output" '
+  .head.ref == "refs/pull/51/head"
+  and .base.ref == "master"
+' "accepts an AGit full pull-request head ref that names this pull request"
+
+reset_requests
+run_fail "missing or has malformed snapshot fields" \
+  "rejects an explicit head ref naming a different pull request" pr snapshot 52
+
+reset_requests
+run_fail "missing or has malformed snapshot fields" \
+  "rejects an explicit head ref outside the AGit pull-request namespace" pr snapshot 53
+
+reset_requests
+run_fail "missing or has malformed snapshot fields" \
+  "rejects a head ref beginning with a dash" pr snapshot 54
+
+reset_requests
+run_fail "missing or has malformed snapshot fields" \
+  "rejects an AGit-shaped explicit ref on the base side" pr snapshot 55
+
 finish_tests "Forge PR snapshot"

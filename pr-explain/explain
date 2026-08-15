@@ -209,16 +209,43 @@ pr_explain_require_snapshot() {
       and (.clone_url | clone_url)
       and (($repo.clone_url | url_parts) as $url
         | path_ends($url.path; $repo.owner + "/" + $repo.name + ".git"));
+    # An ordinary branch name: no scheme prefix, no refspec/shell-metacharacters,
+    # nothing check-ref-format would reject. Kept independent of git itself so a
+    # malformed ref is diagnosed here rather than as a git argument-injection risk.
+    def ordinary_ref_name:
+      safe_text
+      and (test("[ \t]") | not)
+      and (test("^-") | not)
+      and (test("^refs/") | not)
+      and (test("[:^~?*\\[\\\\]") | not)
+      and (test("(^|/)\\.") | not)
+      and (test("\\.\\.") | not)
+      and (test("@\\{") | not)
+      and (. != "@")
+      and (test("/$") | not)
+      and (test("^/") | not)
+      and (test("//") | not)
+      and (test("\\.lock$") | not);
+    # AGit-created pull requests (e.g. Forgejo) report the head as the forges
+    # own pull namespace instead of a pushed branch. That one explicit ref shape
+    # is allowed for head only, and only when it names this exact pull request.
+    def pull_head_ref($n):
+      test("^refs/pull/[1-9][0-9]*/head$")
+      and ((capture("^refs/pull/(?<n>[0-9]+)/head$").n | tonumber) == $n);
+    def valid_base_ref:
+      ordinary_ref_name;
+    def valid_head_ref($n):
+      ordinary_ref_name or pull_head_ref($n);
     .schema_version == 1
     and .pull_request.number == $number
     and (.pull_request.url | clone_url)
     and (.pull_request.title | safe_text)
     and (.pull_request.body | type == "string")
     and (.base.repository | repository)
-    and (.base.ref | safe_text)
+    and (.base.ref | valid_base_ref)
     and (.base.sha | type == "string" and test("^([0-9a-f]{40}|[0-9a-f]{64})$"))
     and (.head.repository | repository)
-    and (.head.ref | safe_text)
+    and (.head.ref | valid_head_ref($number))
     and (.head.sha | type == "string" and test("^([0-9a-f]{40}|[0-9a-f]{64})$"))
     and ((.base.sha | length) == (.head.sha | length))
     and ((.pull_request.url | url_parts) as $web
@@ -231,15 +258,48 @@ pr_explain_require_snapshot() {
     die 1 "forge returned an invalid PR snapshot"
 }
 
+# Turns a snapshot-reported ref into the exact remote ref to ls-remote/fetch.
+# An ordinary branch name becomes refs/heads/<name>. The only explicit full ref
+# accepted is the Forgejo AGit pull-request namespace refs/pull/<n>/head, for
+# head only, and only when <n> is this exact pull request — AGit-created PRs
+# (issue #138) report the head this way instead of a pushed branch. Every
+# other refs/* value, and anything check-ref-format itself would reject
+# (leading '-', ':', '^', '~', '*', wildcards, whitespace/control bytes,
+# traversal, etc.), is refused here, before any git invocation.
+pr_explain_normalize_ref() {
+  local ref="$1" side="$2" number="$3"
+  local pull_number
+
+  case "$ref" in
+    -*) die 1 "$side ref must not begin with '-': $ref" ;;
+  esac
+  case "$ref" in
+    *[$' \t\n\r']*) die 1 "$side ref must not contain whitespace: $ref" ;;
+  esac
+
+  if [[ "$ref" == refs/* ]]; then
+    if [[ "$side" == head && "$ref" =~ ^refs/pull/([1-9][0-9]*)/head$ ]]; then
+      pull_number="${BASH_REMATCH[1]}"
+      if [[ -n "$number" && "$pull_number" != "$number" ]]; then
+        die 1 "head ref names PR #$pull_number, which does not match snapshot PR #$number: $ref"
+      fi
+      printf '%s\n' "$ref"
+      return 0
+    fi
+    die 1 "$side ref must be an ordinary branch name, not an explicit ref: $ref"
+  fi
+
+  git check-ref-format "refs/heads/$ref" >/dev/null 2>&1 ||
+    die 1 "$side ref is not a valid branch name: $ref"
+  printf 'refs/heads/%s\n' "$ref"
+}
+
 pr_explain_ref_oid() {
   local remote="$1" ref="$2" side="$3"
   local output oid resolved_ref
 
-  git check-ref-format "refs/heads/$ref" >/dev/null 2>&1 ||
-    die 1 "$side ref is not a valid branch ref: $ref"
-
   set +e
-  output=$(GIT_TERMINAL_PROMPT=0 git ls-remote --exit-code "$remote" "refs/heads/$ref" 2>&1)
+  output=$(GIT_TERMINAL_PROMPT=0 git ls-remote --exit-code "$remote" "$ref" 2>&1)
   local status=$?
   set -e
   if [[ "$status" -ne 0 ]]; then
@@ -248,7 +308,7 @@ pr_explain_ref_oid() {
   fi
 
   read -r oid resolved_ref <<<"$output"
-  [[ "$resolved_ref" == "refs/heads/$ref" && "$oid" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] ||
+  [[ "$resolved_ref" == "$ref" && "$oid" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] ||
     die 1 "$side ref '$ref' did not resolve to exactly one commit"
   [[ "$(printf '%s\n' "$output" | wc -l)" -eq 1 ]] ||
     die 1 "$side ref '$ref' resolved more than once"
@@ -259,9 +319,7 @@ pr_explain_fetch_ref() {
   local repo_dir="$1" remote="$2" ref="$3" expected="$4" local_ref="$5" side="$6"
   local actual
 
-  git check-ref-format "refs/heads/$ref" >/dev/null 2>&1 ||
-    die 1 "$side ref is not a valid branch ref: $ref"
-  if ! GIT_TERMINAL_PROMPT=0 git -C "$repo_dir" fetch --quiet --no-tags "$remote" "refs/heads/$ref"; then
+  if ! GIT_TERMINAL_PROMPT=0 git -C "$repo_dir" fetch --quiet --no-tags "$remote" "$ref"; then
     die 1 "could not fetch $side ref '$ref'"
   fi
   actual=$(git -C "$repo_dir" rev-parse 'FETCH_HEAD^{commit}' 2>/dev/null) ||
@@ -654,6 +712,9 @@ pr_explain() {
   head_clone=$(jq -r '.head.repository.clone_url' <<<"$snapshot")
   head_ref=$(jq -r '.head.ref' <<<"$snapshot")
   head_sha=$(jq -r '.head.sha' <<<"$snapshot")
+
+  base_ref=$(pr_explain_normalize_ref "$base_ref" base "$number")
+  head_ref=$(pr_explain_normalize_ref "$head_ref" head "$number")
 
   if [[ "$repo_set" == true && "$repo_arg" != "$base_repo" ]]; then
     die 1 "snapshot base repository '$base_repo' does not match --repo '$repo_arg'"

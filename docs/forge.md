@@ -109,6 +109,14 @@ format, and terminal-facing identity fields cannot contain control characters.
 `base.repository` and `head.repository` are independent, which is what lets the
 same contract represent both same-repository and fork heads.
 
+`base.ref` and `head.ref` must each be an ordinary branch name, with one
+exception: `head.ref` may instead be the exact AGit pull-request ref
+`refs/pull/<n>/head` (where `<n>` is this pull request's number), which
+Forgejo reports for a pull request pushed with `git push -o agit` instead of
+a pushed branch. Any other explicit `refs/*` ref, or a ref git itself would
+reject (a leading `-`, whitespace, `:`, `^`, `~`, `*`, path traversal, and
+so on), fails snapshot validation.
+
 ## Auth commands
 
 ```bash

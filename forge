@@ -512,9 +512,34 @@ pr_snapshot() {
         | path_ends($url.path; $repo.owner.login + "/" + $repo.name + ".git"));
     def side:
       type == "object"
-      and (.ref | safe_text)
       and (.sha | oid)
       and (.repo | repository);
+    # An ordinary branch name: no scheme prefix, no refspec/shell-metacharacters,
+    # nothing check-ref-format would reject.
+    def ordinary_ref_name:
+      safe_text
+      and (test("[ \t]") | not)
+      and (test("^-") | not)
+      and (test("^refs/") | not)
+      and (test("[:^~?*\\[\\\\]") | not)
+      and (test("(^|/)\\.") | not)
+      and (test("\\.\\.") | not)
+      and (test("@\\{") | not)
+      and (. != "@")
+      and (test("/$") | not)
+      and (test("^/") | not)
+      and (test("//") | not)
+      and (test("\\.lock$") | not);
+    # AGit-created pull requests (e.g. Forgejo) report the head as the forges
+    # own pull namespace instead of a pushed branch. That one explicit ref
+    # shape is allowed for head only, and only when it names this pull request.
+    def pull_head_ref($n):
+      test("^refs/pull/[1-9][0-9]*/head$")
+      and ((capture("^refs/pull/(?<n>[0-9]+)/head$").n | tonumber) == $n);
+    def valid_base_ref:
+      ordinary_ref_name;
+    def valid_head_ref($n):
+      ordinary_ref_name or pull_head_ref($n);
 
     if type == "object"
        and (.number | type == "number")
@@ -522,8 +547,8 @@ pr_snapshot() {
        and (.html_url | https_url)
        and (.title | safe_text)
        and ((.body == null) or (.body | type == "string"))
-       and (.base | side)
-       and (.head | side)
+       and (.base | side) and (.base.ref | valid_base_ref)
+       and (.head | side) and (.head.ref | valid_head_ref($number))
        and ((.base.sha | length) == (.head.sha | length))
        and ((.html_url | url_parts) as $web
          | (.base.repo.clone_url | url_parts) as $base_clone

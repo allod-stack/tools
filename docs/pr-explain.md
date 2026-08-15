@@ -124,6 +124,16 @@ and a contributor's fork are resolved through the same interface. For a fork,
 the head commit is fetched from the head repository recorded in the snapshot;
 you do not need a separate checkout of the fork.
 
+Every ref the snapshot reports is normalized into an exact remote ref before
+any git command runs. An ordinary branch name becomes `refs/heads/<name>`.
+The one exception is the head ref of an AGit-created pull request (for
+example, one pushed with `git push -o agit`): Forgejo reports its own pull
+namespace, `refs/pull/<n>/head`, instead of a pushed branch, and that exact
+ref is accepted for head only when `<n>` matches the pull request. Any other
+explicit `refs/*` ref, and anything git's own ref-name rules would reject —
+a leading `-`, whitespace or control bytes, `:`, `^`, `~`, `*`, path
+traversal — is rejected before it ever reaches git.
+
 Before disclosure, `allod` verifies that fetched object IDs equal the snapshot's
 base and head SHAs and refuses a moved ref, a wrong checkout, or an empty diff.
 The provider works in a detached job checkout at the verified head, not in your

@@ -177,6 +177,28 @@ case "$url" in
   */api/v1/repos/acme/widget/pulls/50)
     printf '%s\n' '{"number":50,"html_url":"https://forge.example/acme/widget/pulls/50","title":"Misdirected fork","body":"Unsafe repository binding","head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"contributor"},"name":"widget-fork","full_name":"contributor/widget-fork","clone_url":"https://outside.example/unrelated.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}'
     ;;
+  */api/v1/repos/acme/widget/pulls/51)
+    # An AGit-created pull request (issue #138): Forgejo reports the head as its
+    # own pull namespace instead of a pushed branch.
+    printf '%s\n' '{"number":51,"html_url":"https://forge.example/acme/widget/pulls/51","title":"AGit contribution","body":"Pushed with git push -o agit","head":{"ref":"refs/pull/51/head","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}'
+    ;;
+  */api/v1/repos/acme/widget/pulls/52)
+    # The explicit head ref names a different pull request than this response.
+    printf '%s\n' '{"number":52,"html_url":"https://forge.example/acme/widget/pulls/52","title":"Mismatched AGit ref","body":"Head ref names the wrong PR","head":{"ref":"refs/pull/999/head","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}'
+    ;;
+  */api/v1/repos/acme/widget/pulls/53)
+    # An explicit ref outside the allowed AGit pull-request namespace.
+    printf '%s\n' '{"number":53,"html_url":"https://forge.example/acme/widget/pulls/53","title":"Arbitrary explicit ref","body":"Head ref is an explicit non-pull ref","head":{"ref":"refs/heads/evil","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}'
+    ;;
+  */api/v1/repos/acme/widget/pulls/54)
+    # Dangerous ref syntax: a leading dash that would look like a git option.
+    printf '%s\n' '{"number":54,"html_url":"https://forge.example/acme/widget/pulls/54","title":"Dangerous ref syntax","body":"Head ref begins with a dash","head":{"ref":"-x","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}'
+    ;;
+  */api/v1/repos/acme/widget/pulls/55)
+    # Dangerous ref syntax on the base side: base must stay an ordinary branch,
+    # even though this exact ref shape is allowed for head.
+    printf '%s\n' '{"number":55,"html_url":"https://forge.example/acme/widget/pulls/55","title":"AGit ref on base","body":"Base ref is an explicit pull ref","head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}},"base":{"ref":"refs/pull/55/head","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}'
+    ;;
   */api/v1/repos/acme/widget/issues/12/comments)
     if [[ "$method" == GET ]]; then
       printf '%s\n' '[{"body":"General note","created_at":"2026-06-02T00:00:00Z","user":{"login":"dave"}}]'

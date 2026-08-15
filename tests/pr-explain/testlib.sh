@@ -184,6 +184,15 @@ EOF
   SAME_HEAD_SHA=$(git -C "$base_seed" rev-parse HEAD)
   git -C "$base_seed" push -q origin topic
 
+  # An AGit-created pull request (issue #138): the remote gets only the forge's
+  # own pull namespace ref, never a pushed refs/heads/<name> branch.
+  git -C "$base_seed" checkout -q master
+  git -C "$base_seed" switch -qc agit-topic
+  make_commit "$base_seed" "agit head" $'base line\nagit change'
+  AGIT_HEAD_SHA=$(git -C "$base_seed" rev-parse HEAD)
+  git -C "$base_seed" push -q origin agit-topic:refs/pull/7/head
+
+  git -C "$base_seed" switch -q topic
   git -C "$base_seed" switch -qc moving-topic
   MOVED_OLD_SHA=$(git -C "$base_seed" rev-parse HEAD)
   make_commit "$base_seed" "moved head" $'base line\nsame repository change\nremote moved'
@@ -220,7 +229,7 @@ EOF
   git clone -q https://forge.example/other/project.git "$TEST_TMP/wrong-checkout"
 
   export BASE_SHA SAME_HEAD_SHA FORK_HEAD_SHA MOVED_OLD_SHA MOVED_NEW_SHA
-  export MOVED_BASE_NEW_SHA MOVED_FORK_NEW_SHA
+  export MOVED_BASE_NEW_SHA MOVED_FORK_NEW_SHA AGIT_HEAD_SHA
   export MOCK_BASE_SHA="$BASE_SHA"
 }
 
@@ -297,6 +306,34 @@ case " $invocation " in
         head_owner=acme; head_name=widget; head_full=acme/widget
         head_url=https://forge.example/acme/widget.git
         head_ref=master; head_sha="$BASE_SHA"
+        ;;
+      agit)
+        # An AGit-created pull request (issue #138): the forge reports its own
+        # pull namespace as the head ref instead of a pushed branch.
+        head_owner=acme; head_name=widget; head_full=acme/widget
+        head_url=https://forge.example/acme/widget.git
+        head_ref=refs/pull/7/head; head_sha="$AGIT_HEAD_SHA"
+        ;;
+      agit-mismatch)
+        head_owner=acme; head_name=widget; head_full=acme/widget
+        head_url=https://forge.example/acme/widget.git
+        head_ref=refs/pull/999/head; head_sha="$AGIT_HEAD_SHA"
+        ;;
+      agit-explicit)
+        head_owner=acme; head_name=widget; head_full=acme/widget
+        head_url=https://forge.example/acme/widget.git
+        head_ref=refs/heads/evil; head_sha="$AGIT_HEAD_SHA"
+        ;;
+      agit-dash)
+        head_owner=acme; head_name=widget; head_full=acme/widget
+        head_url=https://forge.example/acme/widget.git
+        head_ref='-x'; head_sha="$AGIT_HEAD_SHA"
+        ;;
+      agit-base)
+        head_owner=acme; head_name=widget; head_full=acme/widget
+        head_url=https://forge.example/acme/widget.git
+        head_ref=topic; head_sha="$SAME_HEAD_SHA"
+        base_ref=refs/pull/7/head
         ;;
       *) printf 'unexpected forge scenario: %s\n' "$MOCK_SCENARIO" >&2; exit 2 ;;
     esac
@@ -546,6 +583,7 @@ scenario_head_sha() {
     fork|query-fork|outside-fork) printf '%s\n' "$FORK_HEAD_SHA" ;;
     moved) printf '%s\n' "$MOVED_OLD_SHA" ;;
     empty) printf '%s\n' "$BASE_SHA" ;;
+    agit) printf '%s\n' "$AGIT_HEAD_SHA" ;;
   esac
 }
 

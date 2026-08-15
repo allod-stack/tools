@@ -661,6 +661,67 @@ assert_no_runner "does not disclose source to a runner after fork head SHA movem
 assert_file_absent "$CASE_DIR/output/report.html" "does not write a report after fork head SHA movement"
 assert_file_exists "$(diagnostics_path)/snapshot.json" "preserves the snapshot for a moved-fork-head diagnosis"
 
+# AGit-created PR ref handling (issue #138): Forgejo reports an AGit head as
+# refs/pull/<n>/head, its own pull namespace, instead of a pushed branch. The
+# fetch logic must resolve and fetch that exact ref rather than blindly
+# prepending refs/heads/, and every other ref shape stays strictly allowlisted.
+
+new_case agit-full-pull-ref-resolves-and-fetches
+export MOCK_SCENARIO=agit
+write_valid_body codex
+agit_output="$CASE_DIR/output/report.html"
+capture_explain "$TEST_TMP/checkout" 7 --codex -R acme/widget --output "$agit_output"
+assert_success "resolves and fetches an AGit-created PR's full refs/pull/<n>/head ref"
+assert_file_exists "$agit_output" "publishes the report for an AGit-created PR"
+assert_equal "$(cat "$MOCK_RUNNER_DIR/codex.head")" "$AGIT_HEAD_SHA" \
+  "fetches and cages the AGit head commit"
+assert_equal "$(cat "$MOCK_RUNNER_DIR/codex.diff")" "changed" \
+  "diffs the AGit head against the base commit"
+
+new_case agit-full-pull-ref-dry-run
+export MOCK_SCENARIO=agit
+write_valid_body codex
+capture_explain "$TEST_TMP/checkout" 7 --codex -R acme/widget \
+  --output "$CASE_DIR/output/report.html" --dry-run
+assert_success "dry-run resolves an AGit full pull-request ref without fetching a branch"
+assert_no_runner "dry-run never invokes the provider for an AGit-created PR"
+
+new_case agit-mismatched-pr-number-rejected
+export MOCK_SCENARIO=agit-mismatch
+capture_explain "$TEST_TMP/checkout" 7 --codex -R acme/widget --output "$CASE_DIR/output/report.html"
+assert_failure "rejects an explicit head ref that names a different pull request"
+assert_contains "$CAPTURE_OUTPUT" "invalid PR snapshot" \
+  "diagnoses the mismatched pull-request ref before any fetch"
+assert_no_runner "does not disclose source to a runner for a mismatched pull ref"
+assert_file_absent "$CASE_DIR/output/report.html" "does not write a report for a mismatched pull ref"
+
+new_case agit-arbitrary-explicit-ref-rejected
+export MOCK_SCENARIO=agit-explicit
+capture_explain "$TEST_TMP/checkout" 7 --codex -R acme/widget --output "$CASE_DIR/output/report.html"
+assert_failure "rejects an explicit ref outside the AGit pull-request namespace"
+assert_contains "$CAPTURE_OUTPUT" "invalid PR snapshot" \
+  "diagnoses the arbitrary explicit ref before any fetch"
+assert_no_runner "does not disclose source to a runner for an arbitrary explicit ref"
+assert_file_absent "$CASE_DIR/output/report.html" "does not write a report for an arbitrary explicit ref"
+
+new_case agit-dangerous-ref-syntax-rejected
+export MOCK_SCENARIO=agit-dash
+capture_explain "$TEST_TMP/checkout" 7 --codex -R acme/widget --output "$CASE_DIR/output/report.html"
+assert_failure "rejects a head ref beginning with a dash before it ever reaches git"
+assert_contains "$CAPTURE_OUTPUT" "invalid PR snapshot" \
+  "diagnoses the dangerous ref syntax before any fetch"
+assert_no_runner "does not disclose source to a runner for a dash-prefixed ref"
+assert_file_absent "$CASE_DIR/output/report.html" "does not write a report for a dash-prefixed ref"
+
+new_case agit-ref-shape-rejected-on-base
+export MOCK_SCENARIO=agit-base
+capture_explain "$TEST_TMP/checkout" 7 --codex -R acme/widget --output "$CASE_DIR/output/report.html"
+assert_failure "rejects the AGit pull-ref shape on the base side, which must stay an ordinary branch"
+assert_contains "$CAPTURE_OUTPUT" "invalid PR snapshot" \
+  "diagnoses the explicit ref on base before any fetch"
+assert_no_runner "does not disclose source to a runner for an AGit-shaped base ref"
+assert_file_absent "$CASE_DIR/output/report.html" "does not write a report for an AGit-shaped base ref"
+
 new_case body-symlink
 write_valid_body codex
 export MOCK_RUNNER_MODE=body-symlink
