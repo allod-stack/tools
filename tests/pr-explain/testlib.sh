@@ -483,6 +483,10 @@ case "$mode" in
   no-output)
     exit 0
     ;;
+  wait-for-signal)
+    printf 'ready\n' > "$prefix.ready"
+    while :; do sleep 1; done
+    ;;
   success)
     [[ -n "${ALLOD_PR_EXPLAIN_REPORT_BODY:-}" ]] || {
       printf 'missing ALLOD_PR_EXPLAIN_REPORT_BODY\n' >&2

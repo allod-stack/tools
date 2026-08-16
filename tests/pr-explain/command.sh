@@ -339,6 +339,44 @@ failed_job=$(diagnostics_path)
 assert_file_exists "$failed_job/prompt.md" "preserves the prompt for runner-failure diagnosis"
 assert_equal "$(stat -c '%a' "$failed_job")" "700" "creates the failure job directory with mode 0700"
 
+for signal_case in INT TERM; do
+  new_case "runner-signal-${signal_case,,}"
+  write_valid_body codex
+  export MOCK_RUNNER_MODE=wait-for-signal
+  signal_output="$CASE_DIR/output/report.html"
+  signal_log="$CASE_DIR/command.log"
+  signal_status="$CASE_DIR/status"
+  setsid bash -c 'cd "$1"; "$2" pr explain 7 --codex -R acme/widget --output "$3"; printf "%s\n" "$?" > "$4"' \
+    _ "$TEST_TMP/checkout" "$ALLOD" "$signal_output" "$signal_status" >"$signal_log" 2>&1 &
+  signal_group_pid=$!
+  for _ in $(seq 1 100); do
+    [[ -f "$MOCK_RUNNER_DIR/codex.ready" ]] && break
+    sleep 0.05
+  done
+  [[ -f "$MOCK_RUNNER_DIR/codex.ready" ]] || fail "the slow runner becomes ready for $signal_case"
+  signal_pid=$(pgrep -s "$signal_group_pid" -f 'pr-explain/explain' | head -1)
+  [[ -n "$signal_pid" ]] || fail "finds the allod process for $signal_case"
+  provider_pid=$(pgrep -P "$signal_pid" | head -1)
+  [[ -n "$provider_pid" ]] || fail "finds the provider process for $signal_case"
+  kill -s "$signal_case" "$signal_pid"
+  sleep 0.1
+  kill -TERM "$provider_pid" 2>/dev/null || true
+  for _ in $(seq 1 100); do
+    [[ -f "$signal_status" ]] && break
+    sleep 0.05
+  done
+  [[ -f "$signal_status" ]] || fail "$signal_case interruption returns control to the harness"
+  CAPTURE_STATUS=$(cat "$signal_status")
+  wait "$signal_group_pid" 2>/dev/null || true
+  CAPTURE_OUTPUT=$(cat "$signal_log")
+  assert_failure "$signal_case interruption exits non-zero"
+  assert_file_absent "$signal_output" "$signal_case interruption publishes no report"
+  assert_contains "$CAPTURE_OUTPUT" "diagnostics preserved" \
+    "$signal_case interruption is diagnosed"
+  assert_file_exists "$(diagnostics_path)/prompt.md" \
+    "$signal_case interruption announces and preserves the private diagnostics"
+done
+
 new_case runner-no-output
 write_valid_body claude
 export MOCK_RUNNER_MODE=no-output

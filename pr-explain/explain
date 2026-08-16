@@ -13,9 +13,22 @@ source "$SCRIPT_DIR/lib.sh"
 declare -a TEMP_FILES=()
 PR_EXPLAIN_JOB_DIR=""
 PR_EXPLAIN_PUBLISH_TEMP=""
+PR_EXPLAIN_SIGNAL_STATUS=0
+
+handle_signal() {
+  local status="$1" signal="$2"
+  PR_EXPLAIN_SIGNAL_STATUS="$status"
+  printf 'allod: interrupted by %s\n' "$signal" >&2
+  if [[ -n "${PR_EXPLAIN_PROVIDER_PID:-}" ]]; then
+    kill -TERM "$PR_EXPLAIN_PROVIDER_PID" 2>/dev/null || true
+  fi
+}
 
 cleanup_temp_files() {
   local status=$?
+  if [[ "$PR_EXPLAIN_SIGNAL_STATUS" -ne 0 ]]; then
+    status="$PR_EXPLAIN_SIGNAL_STATUS"
+  fi
   local file
   for file in "${TEMP_FILES[@]}"; do
     rm -f "$file"
@@ -31,6 +44,8 @@ cleanup_temp_files() {
   return "$status"
 }
 trap cleanup_temp_files EXIT
+trap 'handle_signal 130 SIGINT' INT
+trap 'handle_signal 143 SIGTERM' TERM
 
 pr_usage() {
   cat <<'EOF'
@@ -390,7 +405,7 @@ pr_explain_assemble_report() {
 pr_explain_run_provider() {
   local runner="$1" model="$2" effort="$3" repo_dir="$4" job_dir="$5" prompt="$6"
   local body="$7" stdout_log="$8" stderr_log="$9"
-  local variable
+  local variable provider_status
   local -a clean_env=(env)
   local -a command_args=()
 
@@ -430,7 +445,13 @@ pr_explain_run_provider() {
       )
       [[ -z "$model" ]] || command_args+=(--model "$model")
       command_args+=(-)
-      "${clean_env[@]}" "${command_args[@]}" <"$prompt" >"$stdout_log" 2>"$stderr_log"
+      "${clean_env[@]}" "${command_args[@]}" <"$prompt" >"$stdout_log" 2>"$stderr_log" &
+      PR_EXPLAIN_PROVIDER_PID=$!
+      set +e
+      wait "$PR_EXPLAIN_PROVIDER_PID"
+      provider_status=$?
+      PR_EXPLAIN_PROVIDER_PID=""
+      return "$provider_status"
       ;;
     claude)
       command_args=(
@@ -444,10 +465,15 @@ pr_explain_run_provider() {
         --effort "$effort"
       )
       [[ -z "$model" ]] || command_args+=(--model "$model")
-      (
-        cd -- "$repo_dir"
-        "${clean_env[@]}" "${command_args[@]}" <"$prompt" >"$stdout_log" 2>"$stderr_log"
-      )
+      pushd -- "$repo_dir" >/dev/null
+      "${clean_env[@]}" "${command_args[@]}" <"$prompt" >"$stdout_log" 2>"$stderr_log" &
+      PR_EXPLAIN_PROVIDER_PID=$!
+      set +e
+      wait "$PR_EXPLAIN_PROVIDER_PID"
+      provider_status=$?
+      PR_EXPLAIN_PROVIDER_PID=""
+      popd >/dev/null
+      return "$provider_status"
       ;;
     *) return 1 ;;
   esac
@@ -516,6 +542,9 @@ pr_explain_run_pass() {
     "$body" "$stdout_log" "$stderr_log"
   status=$?
   set -e
+  if [[ "$PR_EXPLAIN_SIGNAL_STATUS" -ne 0 ]]; then
+    exit "$PR_EXPLAIN_SIGNAL_STATUS"
+  fi
   [[ "$status" -eq 0 ]] || die 1 "$subject failed with status $status"
   pr_explain_capture_run_result "$subject" "$body" "$capture" "$repo_dir" "$job_dir" \
     "$head_sha" "$snapshot_digest"
