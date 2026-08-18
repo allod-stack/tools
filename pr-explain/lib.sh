@@ -55,6 +55,8 @@ pr_explain_emit_asset() {
 pr_explain_emit_css() { pr_explain_emit_asset report.css; }
 pr_explain_emit_js() { pr_explain_emit_asset report.js; }
 pr_explain_emit_prompt() { pr_explain_emit_asset prompt.md; }
+pr_explain_emit_triage_prompt() { pr_explain_emit_asset triage-prompt.md; }
+pr_explain_emit_slop_prompt() { pr_explain_emit_asset slop-prompt.md; }
 pr_explain_emit_repair_prompt() { pr_explain_emit_asset repair-prompt.md; }
 pr_explain_emit_gallery() { pr_explain_emit_asset component-gallery.html; }
 
@@ -257,12 +259,14 @@ pr_explain_component_tags_are_semantic() {
       expected["rx-masthead"] = "header"
       expected["rx-eyebrow"] = "p"
       expected["rx-lede"] = "p"
+      expected["rx-cost"] = "p"
       expected["rx-summary"] = "section"
       expected["rx-decision"] = "p"
       expected["rx-summary-cards"] = "ul"
       expected["rx-card"] = "li"
       expected["rx-toc"] = "nav"
       expected["rx-claim"] = "p"
+      expected["rx-objectives"] = "ol"
       expected["rx-figure"] = "figure"
       expected["rx-caption"] = "figcaption"
       expected["rx-flow"] = "ol"
@@ -951,8 +955,533 @@ pr_explain_quizzes_are_well_formed() {
       if (feedback_open) feedback_text = feedback_text " " rest
       if (summary_open) summary_text = summary_text " " rest
     }
-    END { if (item || seen != 5) bad = 1; exit bad ? 1 : 0 }
+    END { if (item || seen < 3 || seen > 7) bad = 1; exit bad ? 1 : 0 }
   ' "$1"
+}
+
+pr_explain_check_reading_cost() {
+  local body="$1" value total in_masthead after_lede text_ok
+  value=$(awk '
+    function has_class(tag, wanted,    value) {
+      value = tag
+      if (value !~ / class="[^"]*"/) return 0
+      sub(/^.* class="/, "", value)
+      sub(/".*$/, "", value)
+      return index(" " value " ", " " wanted " ") != 0
+    }
+    {
+      rest = $0
+      while (match(rest, /<[^>]*>/)) {
+        text = substr(rest, 1, RSTART - 1)
+        if (cost_open) content = content " " text
+        tag = substr(rest, RSTART, RLENGTH)
+        rest = substr(rest, RSTART + RLENGTH)
+        closing = (tag ~ /^<\//)
+        name = tag
+        sub(/^<\/?/, "", name)
+        sub(/[[:space:]>].*$/, "", name)
+        if (!closing) {
+          parent_depth = depth
+          depth++
+          if (name == "header" && has_class(tag, "rx-masthead")) {
+            masthead = 1
+            masthead_depth = depth
+            lede_seen = 0
+          } else if (masthead && parent_depth == masthead_depth && has_class(tag, "rx-lede")) {
+            lede_seen = 1
+          }
+          if (has_class(tag, "rx-cost")) {
+            total++
+            if (masthead && parent_depth == masthead_depth) {
+              in_masthead++
+              if (lede_seen) after_lede++
+              cost_open = 1
+              cost_depth = depth
+              content = ""
+            }
+          }
+        } else {
+          if (cost_open && name == "p" && depth == cost_depth) {
+            stripped = content
+            gsub(/[[:space:]]+/, "", stripped)
+            if (stripped != "" && index(tolower(content), "minute")) text_ok++
+            cost_open = 0
+          }
+          if (masthead && name == "header" && depth == masthead_depth) masthead = 0
+          depth--
+        }
+      }
+      if (cost_open) content = content " " rest
+    }
+    END { print (total + 0) ":" (in_masthead + 0) ":" (after_lede + 0) ":" (text_ok + 0) }
+  ' "$body")
+  IFS=: read -r total in_masthead after_lede text_ok <<<"$value"
+  if [[ "$in_masthead" -ne 1 ]]; then
+    pr_explain_validation_error E21 "masthead must directly contain exactly one p.rx-cost reading-cost line"
+  else
+    [[ "$after_lede" -eq 1 ]] ||
+      pr_explain_validation_error E21 "p.rx-cost must come after p.rx-lede inside the masthead"
+    [[ "$text_ok" -eq 1 ]] ||
+      pr_explain_validation_error E21 "p.rx-cost must state the reading cost in non-empty text containing the word 'minute'"
+  fi
+  [[ "$total" -eq "$in_masthead" ]] ||
+    pr_explain_validation_error E21 "p.rx-cost is allowed only inside the masthead"
+}
+
+pr_explain_check_layers() {
+  local body="$1" kind label value
+  while IFS=$'\t' read -r kind label value; do
+    case "$kind" in
+      missing)
+        pr_explain_validation_error E22 "main section '$label' is missing its data-layer attribute" ;;
+      badvalue)
+        pr_explain_validation_error E22 "main section '$label' has unknown data-layer '$value'; use concept, mechanism, or receipts" ;;
+      order)
+        pr_explain_validation_error E22 "main section '$label' ($value) breaks the non-decreasing concept, mechanism, receipts layer order" ;;
+      misplaced)
+        pr_explain_validation_error E22 "data-layer on '$label' is allowed only on direct section children of main" ;;
+      summary)
+        [[ "$value" -ge 1 ]] ||
+          pr_explain_validation_error E22 "main must contain at least one data-layer=\"concept\" section" ;;
+    esac
+  done < <(awk '
+    function attr(tag, key,    text) {
+      text = tag
+      if (text !~ (" " key "=\"")) return ""
+      sub("^.* " key "=\"", "", text)
+      sub(/".*$/, "", text)
+      return text
+    }
+    BEGIN { rank["concept"] = 1; rank["mechanism"] = 2; rank["receipts"] = 3 }
+    {
+      rest = $0
+      while (match(rest, /<[^>]*>/)) {
+        tag = substr(rest, RSTART, RLENGTH)
+        rest = substr(rest, RSTART + RLENGTH)
+        closing = (tag ~ /^<\//)
+        name = tag
+        sub(/^<\/?/, "", name)
+        sub(/[[:space:]>].*$/, "", name)
+        if (!closing) {
+          parent_depth = depth
+          depth++
+          if (name == "main") {
+            main = 1
+            main_depth = depth
+          } else if (main && name == "section" && parent_depth == main_depth) {
+            sections++
+            id = attr(tag, "id")
+            label = (id == "" ? "main section " sections : "#" id)
+            if (tag !~ / data-layer="/) {
+              print "missing\t" label
+            } else {
+              value = attr(tag, "data-layer")
+              if (!(value in rank)) {
+                print "badvalue\t" label "\t" value
+              } else {
+                if (rank[value] < prev) print "order\t" label "\t" value
+                else prev = rank[value]
+                if (value == "concept") concepts++
+              }
+            }
+          } else if (tag ~ / data-layer="/) {
+            print "misplaced\t" name
+          }
+        } else {
+          if (main && name == "main" && depth == main_depth) main = 0
+          depth--
+        }
+      }
+    }
+    END { print "summary\t" (sections + 0) "\t" (concepts + 0) }
+  ' "$body")
+}
+
+pr_explain_check_objectives_block() {
+  local body="$1" kind a b
+  local first="" layer="" inside=0 outside=0
+  local -a ids=() texts=()
+  while IFS=$'\t' read -r kind a b; do
+    case "$kind" in
+      first) first="$a" ;;
+      layer) layer="$a" ;;
+      lists) inside="$a" outside="$b" ;;
+      item) ids+=("$a") texts+=("$b") ;;
+    esac
+  done < <(awk '
+    function has_class(tag, wanted,    value) {
+      value = tag
+      if (value !~ / class="[^"]*"/) return 0
+      sub(/^.* class="/, "", value)
+      sub(/".*$/, "", value)
+      return index(" " value " ", " " wanted " ") != 0
+    }
+    function attr(tag, key,    text) {
+      text = tag
+      if (text !~ (" " key "=\"")) return ""
+      sub("^.* " key "=\"", "", text)
+      sub(/".*$/, "", text)
+      return text
+    }
+    {
+      rest = $0
+      while (match(rest, /<[^>]*>/)) {
+        text = substr(rest, 1, RSTART - 1)
+        if (li_open) content = content " " text
+        tag = substr(rest, RSTART, RLENGTH)
+        rest = substr(rest, RSTART + RLENGTH)
+        closing = (tag ~ /^<\//)
+        name = tag
+        sub(/^<\/?/, "", name)
+        sub(/[[:space:]>].*$/, "", name)
+        if (!closing) {
+          parent_depth = depth
+          depth++
+          if (name == "main") {
+            main = 1
+            main_depth = depth
+          } else if (main && name == "section" && parent_depth == main_depth) {
+            sections++
+            id = attr(tag, "id")
+            if (sections == 1) {
+              print "first\t" (id == "" ? "(unnamed)" : id)
+              print "layer\t" attr(tag, "data-layer")
+            }
+            if (id == "objectives" && !objsec_depth) {
+              objsec = 1
+              objsec_depth = depth
+            }
+          }
+          if (has_class(tag, "rx-objectives")) {
+            if (objsec) {
+              inside++
+              if (inside == 1) {
+                list = 1
+                list_depth = depth
+              }
+            } else outside++
+          } else if (list && name == "li" && parent_depth == list_depth) {
+            li_open = 1
+            li_depth = depth
+            li_id = attr(tag, "id")
+            content = ""
+          }
+        } else {
+          if (li_open && name == "li" && depth == li_depth) {
+            gsub(/[[:space:]]+/, "", content)
+            print "item\t" (li_id == "" ? "(missing)" : li_id) "\t" (content == "" ? 0 : 1)
+            li_open = 0
+          }
+          if (list && name == "ol" && depth == list_depth) list = 0
+          if (objsec && name == "section" && depth == objsec_depth) objsec = 0
+          if (main && name == "main" && depth == main_depth) main = 0
+          depth--
+        }
+      }
+      if (li_open) content = content " " rest
+    }
+    END {
+      if (sections == 0) print "first\tnone"
+      print "lists\t" (inside + 0) "\t" (outside + 0)
+    }
+  ' "$body")
+  if [[ -z "$first" || "$first" == none ]]; then
+    pr_explain_validation_error E23 "main must open with a section id=\"objectives\""
+  elif [[ "$first" != objectives ]]; then
+    pr_explain_validation_error E23 "first main section must be '#objectives' (found '#$first')"
+  else
+    [[ "$layer" == concept ]] ||
+      pr_explain_validation_error E23 "'#objectives' must declare data-layer=\"concept\""
+    [[ "$inside" -eq 1 ]] ||
+      pr_explain_validation_error E23 "'#objectives' must contain exactly one ol.rx-objectives"
+  fi
+  [[ "$outside" -eq 0 ]] ||
+    pr_explain_validation_error E23 "ol.rx-objectives is allowed only inside '#objectives'"
+  local count="${#ids[@]}" i id previous_id="" previous_number=0 number
+  if [[ "$inside" -eq 1 ]] && [[ "$count" -lt 1 || "$count" -gt 7 ]]; then
+    pr_explain_validation_error E23 "objectives list must contain between one and seven objectives (found $count)"
+  fi
+  for ((i = 0; i < count; i++)); do
+    id="${ids[$i]}"
+    if [[ ! "$id" =~ ^obj-[0-9]+$ ]]; then
+      pr_explain_validation_error E23 "objective id '$id' must match obj-N"
+    else
+      number="${id#obj-}"
+      if [[ -n "$previous_id" && "$number" -le "$previous_number" ]]; then
+        pr_explain_validation_error E23 "objective ids must be unique and ascending ('$id' follows '$previous_id')"
+      fi
+      previous_id="$id"
+      previous_number="$number"
+    fi
+    [[ "${texts[$i]}" -eq 1 ]] ||
+      pr_explain_validation_error E23 "objective '$id' must contain visible text"
+  done
+}
+
+pr_explain_check_objective_coverage() {
+  local body="$1" line kind owner label value ref_id
+  local -a lines=() objective_order=()
+  declare -A known=() claimed_by_section=() claimed_by_quiz=()
+  while IFS= read -r line; do
+    lines+=("$line")
+  done < <(awk '
+    function has_class(tag, wanted,    value) {
+      value = tag
+      if (value !~ / class="[^"]*"/) return 0
+      sub(/^.* class="/, "", value)
+      sub(/".*$/, "", value)
+      return index(" " value " ", " " wanted " ") != 0
+    }
+    function attr(tag, key,    text) {
+      text = tag
+      if (text !~ (" " key "=\"")) return ""
+      sub("^.* " key "=\"", "", text)
+      sub(/".*$/, "", text)
+      return text
+    }
+    {
+      rest = $0
+      while (match(rest, /<[^>]*>/)) {
+        tag = substr(rest, RSTART, RLENGTH)
+        rest = substr(rest, RSTART + RLENGTH)
+        closing = (tag ~ /^<\//)
+        name = tag
+        sub(/^<\/?/, "", name)
+        sub(/[[:space:]>].*$/, "", name)
+        if (!closing) {
+          parent_depth = depth
+          depth++
+          if (name == "main") {
+            main = 1
+            main_depth = depth
+          } else if (main && name == "section" && parent_depth == main_depth) {
+            sections++
+            id = attr(tag, "id")
+            label = (id == "" ? "main section " sections : "#" id)
+            if (id == "objectives" && !objsec_depth) {
+              objsec = 1
+              objsec_depth = depth
+            }
+            if (tag ~ / data-objective="/) print "ref\tsection\t" label "\t" attr(tag, "data-objective")
+            else if (id != "objectives") print "untagged\tsection\t" label
+          } else if (name == "figure" && has_class(tag, "rx-figure")) {
+            figures++
+            id = attr(tag, "id")
+            label = (id == "" ? "rx-figure " figures : "#" id)
+            if (tag ~ / data-objective="/) print "ref\tfigure\t" label "\t" attr(tag, "data-objective")
+            else print "untagged\tfigure\t" label
+          } else if (has_class(tag, "rx-quiz-item")) {
+            quizzes++
+            id = attr(tag, "id")
+            label = (id == "" ? "quiz item " quizzes : "#" id)
+            if (tag ~ / data-objective="/) print "ref\tquiz\t" label "\t" attr(tag, "data-objective")
+          } else if (tag ~ / data-objective="/) {
+            print "misplaced\t" name
+          }
+          if (objsec && has_class(tag, "rx-objectives") && !list_done) {
+            list = 1
+            list_depth = depth
+          } else if (list && name == "li" && parent_depth == list_depth) {
+            id = attr(tag, "id")
+            if (id != "") print "objective\t" id
+          }
+        } else {
+          if (list && name == "ol" && depth == list_depth) {
+            list = 0
+            list_done = 1
+          }
+          if (objsec && name == "section" && depth == objsec_depth) objsec = 0
+          if (main && name == "main" && depth == main_depth) main = 0
+          depth--
+        }
+      }
+    }
+  ' "$body")
+  for line in "${lines[@]}"; do
+    IFS=$'\t' read -r kind owner label value <<<"$line"
+    if [[ "$kind" == objective ]]; then
+      known["$owner"]=1
+      objective_order+=("$owner")
+    fi
+  done
+  for line in "${lines[@]}"; do
+    IFS=$'\t' read -r kind owner label value <<<"$line"
+    case "$kind" in
+      misplaced)
+        pr_explain_validation_error E24 "data-objective on '$owner' is allowed only on main sections, rx-figure figures, and quiz items" ;;
+      untagged)
+        pr_explain_validation_error E24 "$owner '$label' must declare the objectives it serves with data-objective" ;;
+      ref)
+        if [[ -z "${value//[[:space:]]/}" ]]; then
+          pr_explain_validation_error E24 "data-objective on $owner '$label' must name at least one objective id"
+          continue
+        fi
+        for ref_id in $value; do
+          if [[ -n "${known[$ref_id]:-}" ]]; then
+            case "$owner" in
+              section) claimed_by_section["$ref_id"]=1 ;;
+              quiz) claimed_by_quiz["$ref_id"]=1 ;;
+            esac
+          else
+            pr_explain_validation_error E24 "data-objective on $owner '$label' names unknown objective '$ref_id'"
+          fi
+        done
+        ;;
+    esac
+  done
+  for ref_id in "${objective_order[@]}"; do
+    [[ -n "${claimed_by_section[$ref_id]:-}" ]] ||
+      pr_explain_validation_error E24 "objective '$ref_id' is not claimed by any main section"
+    [[ -n "${claimed_by_quiz[$ref_id]:-}" ]] ||
+      pr_explain_validation_error E24 "objective '$ref_id' is not tested by any quiz item"
+  done
+}
+
+pr_explain_check_quiz_v2() {
+  local body="$1" kind qid concept objective position letter
+  declare -A correct_positions=()
+  while IFS=$'\t' read -r kind qid concept objective position; do
+    case "$kind" in
+      misplaced)
+        pr_explain_validation_error E10 "data-concept on '$qid' is allowed only on article.rx-quiz-item" ;;
+      item)
+        [[ "$concept" == present ]] ||
+          pr_explain_validation_error E10 "quiz item '$qid' must declare a non-empty data-concept"
+        if [[ "$objective" == "-" || "$objective" != "${objective//[[:space:]]/}" || -z "${objective//[[:space:]]/}" ]]; then
+          pr_explain_validation_error E10 "quiz item '$qid' must declare data-objective naming exactly one objective id"
+        fi
+        case "$position" in
+          1) letter=A ;;
+          2) letter=B ;;
+          3) letter=C ;;
+          4) letter=D ;;
+          *) letter="" ;;
+        esac
+        [[ -z "$letter" ]] || correct_positions["$letter"]=$(( ${correct_positions[$letter]:-0} + 1 ))
+        ;;
+    esac
+  done < <(awk '
+    function has_class(tag, wanted,    value) {
+      value = tag
+      if (value !~ / class="[^"]*"/) return 0
+      sub(/^.* class="/, "", value)
+      sub(/".*$/, "", value)
+      return index(" " value " ", " " wanted " ") != 0
+    }
+    function attr(tag, key,    text) {
+      text = tag
+      if (text !~ (" " key "=\"")) return ""
+      sub("^.* " key "=\"", "", text)
+      sub(/".*$/, "", text)
+      return text
+    }
+    {
+      rest = $0
+      while (match(rest, /<[^>]*>/)) {
+        tag = substr(rest, RSTART, RLENGTH)
+        rest = substr(rest, RSTART + RLENGTH)
+        closing = (tag ~ /^<\//)
+        name = tag
+        sub(/^<\/?/, "", name)
+        sub(/[[:space:]>].*$/, "", name)
+        if (!closing) {
+          depth++
+          quiz_item = has_class(tag, "rx-quiz-item")
+          if (tag ~ / data-concept="/ && !quiz_item) print "misplaced\t" name
+          if (quiz_item) {
+            item = 1
+            item_depth = depth
+            items++
+            id = attr(tag, "id")
+            qid = (id == "" ? "quiz item " items : "#" id)
+            concept = attr(tag, "data-concept")
+            has_objective = (tag ~ / data-objective="/)
+            objective = attr(tag, "data-objective")
+            choice = 0
+            correct = 0
+          } else if (item && has_class(tag, "rx-choice")) {
+            choice++
+            if (tag ~ / data-correct="true"/ && !correct) correct = choice
+          }
+        } else {
+          if (item && name == "article" && depth == item_depth) {
+            print "item\t" qid "\t" (concept == "" ? "-" : "present") "\t" \
+              (has_objective ? (objective == "" ? "" : objective) : "-") "\t" correct
+            item = 0
+          }
+          depth--
+        }
+      }
+    }
+  ' "$body")
+  for letter in A B C D; do
+    [[ "${correct_positions[$letter]:-0}" -le 2 ]] ||
+      pr_explain_validation_error E10 "answer position $letter is correct more than twice across the quiz items"
+  done
+}
+
+# Visible prose for the slop linter: the body with quoted code dropped, every
+# tag (and so every attribute value) removed, and the five allowed entities
+# plus typographic apostrophes decoded, so word-boundary matches see the same
+# words a reader sees and code identifiers cannot false-positive.
+pr_explain_visible_prose() {
+  pr_explain_strip_quoted_code "$1" | awk '
+    {
+      rest = $0
+      out = ""
+      while (match(rest, /<[^>]*>/)) {
+        out = out substr(rest, 1, RSTART - 1) " "
+        rest = substr(rest, RSTART + RLENGTH)
+      }
+      out = out rest
+      gsub(/&lt;/, "<", out)
+      gsub(/&gt;/, ">", out)
+      gsub(/&quot;/, "\"", out)
+      gsub(/&apos;/, "\047", out)
+      gsub("\342\200\231", "\047", out)
+      gsub(/&amp;/, "\\&", out)
+      print out
+    }
+  '
+}
+
+pr_explain_check_slop() {
+  local prose="$1" term count words hedges trigram
+  local -a banned=(
+    delve delves delving tapestry testament seamless seamlessly
+    utilize utilizes utilizing leverages leveraging
+    "worth noting" "it is important to note" "in today's" "plays a vital role"
+    "rich landscape" "crucial role"
+  )
+  for term in "${banned[@]}"; do
+    count=$(pr_explain_count_regex "$prose" "\\b$term\\b")
+    [[ "$count" -eq 0 ]] ||
+      pr_explain_validation_error E25 "visible prose uses banned vocabulary '$term' ($count occurrence(s))"
+  done
+  while IFS=$'\t' read -r count trigram; do
+    [[ -n "$trigram" ]] || continue
+    pr_explain_validation_error E25 "the sentence opening '$trigram' repeats $count times; vary the claim structure"
+  done < <(awk '
+    { text = text " " $0 }
+    END {
+      n = split(text, sentences, /[.!?]+/)
+      for (i = 1; i <= n; i++) {
+        s = tolower(sentences[i])
+        gsub("[^a-z0-9\047-]", " ", s)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
+        k = split(s, w, /[[:space:]]+/)
+        if (k >= 3) counts[w[1] " " w[2] " " w[3]]++
+      }
+      for (key in counts) if (counts[key] >= 4) print counts[key] "\t" key
+    }
+  ' "$prose")
+  hedges=$(pr_explain_count_regex "$prose" '\b(may|might|could|perhaps|arguably|likely)\b')
+  words=$(wc -w <"$prose")
+  words="${words//[[:space:]]/}"
+  if [[ "$words" -gt 0 ]] && (( hedges * 500 > words * 4 )); then
+    pr_explain_validation_warning W13 \
+      "visible prose hedges $hedges times in $words words (over 4 per 500); commit to what the evidence supports"
+  fi
 }
 
 pr_explain_lanes_are_well_formed() {
@@ -1133,7 +1662,7 @@ pr_explain_validate_report() {
   local details_count disclosure_count summary_count stat_group_count stat_count card_count
   local tabindex_count preview_scroll_count
   local class_value class_name id ref value role state field
-  local generated_date
+  local generated_date slop_prose
 
   PR_EXPLAIN_VALIDATION_ERRORS=()
   PR_EXPLAIN_VALIDATION_WARNINGS=()
@@ -1335,8 +1864,8 @@ pr_explain_validate_report() {
 
   declare -A allowed_classes=()
   for class_name in \
-    rx-skip rx-masthead rx-eyebrow rx-lede rx-summary rx-decision rx-summary-cards rx-card \
-    rx-toc rx-claim rx-figure rx-caption rx-flow rx-branch rx-branch-test rx-branch-arms \
+    rx-skip rx-masthead rx-eyebrow rx-lede rx-cost rx-summary rx-decision rx-summary-cards rx-card \
+    rx-toc rx-claim rx-objectives rx-figure rx-caption rx-flow rx-branch rx-branch-test rx-branch-arms \
     rx-branch-arm rx-arm-label rx-lanes rx-lane rx-lane-label rx-sequence rx-seq-steps \
     rx-seq-step rx-seq-title rx-seq-controls rx-seq-status rx-codewalk rx-scroll rx-code \
     rx-hl rx-elide rx-notes rx-note rx-callout rx-callout-label rx-compare rx-mark \
@@ -1409,6 +1938,7 @@ pr_explain_validate_report() {
     pr_explain_validation_error E17 "operator routing summary must contain exactly five cards"
   pr_explain_summary_is_well_formed "$body_html" ||
     pr_explain_validation_error E17 "operator summary must directly own one heading, decision, and five-card routing list"
+  pr_explain_check_reading_cost "$body_html"
 
   h2_count=$(pr_explain_count_regex "$report" '<h2([[:space:]>])')
   claim_count=$(pr_explain_count_regex "$report" '<p class="rx-claim">')
@@ -1429,6 +1959,10 @@ pr_explain_validate_report() {
      ' "$main_html"; then
     pr_explain_validation_error E7 "each main h2 must be immediately followed by exactly one rx-claim"
   fi
+
+  pr_explain_check_layers "$body_html"
+  pr_explain_check_objectives_block "$body_html"
+  pr_explain_check_objective_coverage "$body_html"
 
   figure_count=$(pr_explain_count_regex "$report" '<figure class="rx-figure')
   caption_count=$(pr_explain_count_regex "$report" '<figcaption class="rx-caption">')
@@ -1634,18 +2168,22 @@ pr_explain_validate_report() {
   correct_count=$(pr_explain_count_regex "$report" '<details class="rx-choice"[^>]*data-correct="true"')
   false_count=$(pr_explain_count_regex "$report" '<details class="rx-choice"[^>]*data-correct="false"')
   misconception_count=$(pr_explain_count_regex "$report" '<details class="rx-choice"[^>]*data-misconception="[^"]+"')
-  [[ "$quiz_count" -eq 5 ]] || pr_explain_validation_error E10 "quiz must contain exactly five items"
-  [[ "$choice_count" -eq 20 ]] || pr_explain_validation_error E10 "each quiz item must contain four choices"
-  [[ "$correct_count" -eq 5 ]] || pr_explain_validation_error E10 "each quiz item must contain exactly one correct choice"
-  [[ "$false_count" -eq 15 && "$misconception_count" -eq 15 ]] ||
+  [[ "$quiz_count" -ge 3 && "$quiz_count" -le 7 ]] ||
+    pr_explain_validation_error E10 "report must contain between three and seven quiz items (found $quiz_count)"
+  [[ "$choice_count" -eq $((quiz_count * 4)) ]] ||
+    pr_explain_validation_error E10 "each quiz item must contain four choices"
+  [[ "$correct_count" -eq "$quiz_count" ]] ||
+    pr_explain_validation_error E10 "each quiz item must contain exactly one correct choice"
+  [[ "$false_count" -eq $((quiz_count * 3)) && "$misconception_count" -eq $((quiz_count * 3)) ]] ||
     pr_explain_validation_error E10 "every incorrect choice needs a misconception label"
   pr_explain_quizzes_are_well_formed "$body_html" ||
     pr_explain_validation_error E10 "each quiz item needs one heading, four grouped choices, one key, three misconception distractors, feedback, and one live result"
+  pr_explain_check_quiz_v2 "$body_html"
   if grep -qiE '<(button|input|select)([[:space:]>])' "$report"; then
     pr_explain_validation_error E10 "authored controls are forbidden; no-JS details carry interaction"
   fi
   count=$(pr_explain_count_regex "$report" '<summary>')
-  [[ "$count" -ge 20 ]] || pr_explain_validation_error E10 "quiz choices need visible summary text"
+  [[ "$count" -ge "$choice_count" ]] || pr_explain_validation_error E10 "quiz choices need visible summary text"
   details_count=$(pr_explain_count_regex "$body_html" '<details([[:space:]>])')
   disclosure_count=$(pr_explain_count_regex "$body_html" '<details class="rx-(more|predict)"')
   summary_count=$(pr_explain_count_regex "$body_html" '<summary>')
@@ -1786,6 +2324,10 @@ pr_explain_validate_report() {
   if grep -qiE -- "-----BEGIN|BEGIN OPENSSH PRIVATE KEY|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|(^|[^A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}|(^|[^A-Za-z0-9])(sk|rk|pk)_(live|test)_[A-Za-z0-9]{16,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}|(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|auth[_-]?token|client[_-]?secret|private[_-]?key)[[:space:]]*[=:][[:space:]]*[\"']?[^<\"'[:space:]]{12,}|[A-Za-z0-9+/]{200,}={0,2}" "$report" "$visible_text"; then
     pr_explain_validation_error E19 "report contains secret-looking material"
   fi
+
+  make_temp_file slop_prose
+  pr_explain_visible_prose "$body_html" >"$slop_prose"
+  pr_explain_check_slop "$slop_prose"
 
   [[ "$figure_count" -ge 1 ]] ||
     pr_explain_validation_warning W1 "report contains no dual-coded figure; confirm prose alone is clearest"

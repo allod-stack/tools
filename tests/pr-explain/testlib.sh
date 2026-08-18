@@ -417,8 +417,8 @@ runner=$(basename "$0")
 prefix="$MOCK_RUNNER_DIR/$runner"
 
 # Count invocations and record every pass separately as well as under the
-# unnumbered prefix, so single-pass assertions keep working while a repair
-# test can compare pass 1 against pass 2.
+# unnumbered prefix, so last-pass assertions keep working while a multi-pass
+# test can compare any pass against any other.
 calls=$(( $(cat "$prefix.calls" 2>/dev/null || printf '0') + 1 ))
 printf '%s\n' "$calls" > "$prefix.calls"
 pass_prefix="$prefix.$calls"
@@ -431,12 +431,21 @@ done
 cat > "$prefix.stdin"
 cp "$prefix.stdin" "$pass_prefix.stdin"
 
-mode="${MOCK_RUNNER_MODE:-success}"
-body_source="${MOCK_BODY_FILE:-}"
-if [[ "$calls" -ge 2 ]]; then
-  mode="${MOCK_RUNNER_MODE_2:-$mode}"
-  body_source="${MOCK_BODY_FILE_2:-$body_source}"
+# Per-pass control: MOCK_RUNNER_MODE_<n>, MOCK_BODY_FILE_<n>, and
+# MOCK_TRIAGE_FILE_<n> override the unnumbered variables for pass <n>; the
+# unnumbered variables are the defaults for every pass. With nothing set at
+# all, pass 1 behaves as a well-behaved triage pass (writes the shared valid
+# T2 judgment and leaves the body alone) and every later pass writes the
+# staged body — the v2 pipeline's happy path.
+mode_var="MOCK_RUNNER_MODE_$calls"
+mode="${!mode_var:-${MOCK_RUNNER_MODE:-}}"
+if [[ -z "$mode" ]]; then
+  if [[ "$calls" -eq 1 ]]; then mode=triage; else mode=success; fi
 fi
+body_var="MOCK_BODY_FILE_$calls"
+body_source="${!body_var:-${MOCK_BODY_FILE:-}}"
+triage_var="MOCK_TRIAGE_FILE_$calls"
+triage_source="${!triage_var:-${MOCK_TRIAGE_FILE:-${MOCK_TRIAGE_T2:-}}}"
 
 repo="$PWD"
 job=""
@@ -475,6 +484,27 @@ for project_file in .codex/config.toml AGENTS.md .claude/settings.json CLAUDE.md
   fi
 done
 
+# Record the triage judgment as this pass received it, so a test can prove
+# what a later pass (author, slop, repair) actually saw — including an
+# operator-forced tier rewritten between triage and author.
+if [[ -n "${ALLOD_PR_EXPLAIN_TRIAGE:-}" && -f "$ALLOD_PR_EXPLAIN_TRIAGE" ]]; then
+  cp "$ALLOD_PR_EXPLAIN_TRIAGE" "$pass_prefix.triage-in"
+fi
+
+require_body_env() {
+  [[ -n "${ALLOD_PR_EXPLAIN_REPORT_BODY:-}" ]] || {
+    printf 'missing ALLOD_PR_EXPLAIN_REPORT_BODY\n' >&2
+    exit 24
+  }
+}
+
+require_triage_env() {
+  [[ -n "${ALLOD_PR_EXPLAIN_TRIAGE:-}" && -n "$triage_source" ]] || {
+    printf 'missing ALLOD_PR_EXPLAIN_TRIAGE or triage fixture\n' >&2
+    exit 26
+  }
+}
+
 case "$mode" in
   fail)
     printf '%s runner failed deliberately\n' "$runner" >&2
@@ -487,27 +517,39 @@ case "$mode" in
     printf 'ready\n' > "$prefix.ready"
     while :; do sleep 1; done
     ;;
+  triage)
+    require_triage_env
+    cp "$triage_source" "$ALLOD_PR_EXPLAIN_TRIAGE"
+    ;;
+  triage-writes-body)
+    require_triage_env
+    require_body_env
+    cp "$triage_source" "$ALLOD_PR_EXPLAIN_TRIAGE"
+    printf '<p>rogue body written during triage</p>\n' > "$ALLOD_PR_EXPLAIN_REPORT_BODY"
+    ;;
+  triage-symlink)
+    require_triage_env
+    cp "$triage_source" "$prefix.triage-target.json"
+    rm -f "$ALLOD_PR_EXPLAIN_TRIAGE"
+    ln -s "$prefix.triage-target.json" "$ALLOD_PR_EXPLAIN_TRIAGE"
+    ;;
+  triage-tamper-snapshot)
+    require_triage_env
+    cp "$triage_source" "$ALLOD_PR_EXPLAIN_TRIAGE"
+    printf '{"tampered":true}' >> "$job/snapshot.json"
+    ;;
   success)
-    [[ -n "${ALLOD_PR_EXPLAIN_REPORT_BODY:-}" ]] || {
-      printf 'missing ALLOD_PR_EXPLAIN_REPORT_BODY\n' >&2
-      exit 24
-    }
+    require_body_env
     cp "$body_source" "$ALLOD_PR_EXPLAIN_REPORT_BODY"
     ;;
   body-symlink)
-    [[ -n "${ALLOD_PR_EXPLAIN_REPORT_BODY:-}" ]] || {
-      printf 'missing ALLOD_PR_EXPLAIN_REPORT_BODY\n' >&2
-      exit 24
-    }
+    require_body_env
     cp "$body_source" "$prefix.symlink-target.html"
     rm -f "$ALLOD_PR_EXPLAIN_REPORT_BODY"
     ln -s "$prefix.symlink-target.html" "$ALLOD_PR_EXPLAIN_REPORT_BODY"
     ;;
   body-replace)
-    [[ -n "${ALLOD_PR_EXPLAIN_REPORT_BODY:-}" ]] || {
-      printf 'missing ALLOD_PR_EXPLAIN_REPORT_BODY\n' >&2
-      exit 24
-    }
+    require_body_env
     # mv a distinct, already-allocated inode into place, simulating a runner
     # (like Claude Code's Write tool) that stages a temp file and atomically
     # renames it over the pre-created body instead of editing it in place.
@@ -517,34 +559,22 @@ case "$mode" in
     mv -f "$prefix.replacement.html" "$ALLOD_PR_EXPLAIN_REPORT_BODY"
     ;;
   tamper-snapshot)
-    [[ -n "${ALLOD_PR_EXPLAIN_REPORT_BODY:-}" ]] || {
-      printf 'missing ALLOD_PR_EXPLAIN_REPORT_BODY\n' >&2
-      exit 24
-    }
+    require_body_env
     cp "$body_source" "$ALLOD_PR_EXPLAIN_REPORT_BODY"
     printf '{"tampered":true}' >> "$job/snapshot.json"
     ;;
   move-head)
-    [[ -n "${ALLOD_PR_EXPLAIN_REPORT_BODY:-}" ]] || {
-      printf 'missing ALLOD_PR_EXPLAIN_REPORT_BODY\n' >&2
-      exit 24
-    }
+    require_body_env
     cp "$body_source" "$ALLOD_PR_EXPLAIN_REPORT_BODY"
     git -C "$repo" checkout -q --detach "$MOCK_BASE_SHA"
     ;;
   dirty-worktree)
-    [[ -n "${ALLOD_PR_EXPLAIN_REPORT_BODY:-}" ]] || {
-      printf 'missing ALLOD_PR_EXPLAIN_REPORT_BODY\n' >&2
-      exit 24
-    }
+    require_body_env
     cp "$body_source" "$ALLOD_PR_EXPLAIN_REPORT_BODY"
     printf 'runner tampering\n' >> "$repo/example.txt"
     ;;
   publish-race)
-    [[ -n "${ALLOD_PR_EXPLAIN_REPORT_BODY:-}" ]] || {
-      printf 'missing ALLOD_PR_EXPLAIN_REPORT_BODY\n' >&2
-      exit 24
-    }
+    require_body_env
     cp "$body_source" "$ALLOD_PR_EXPLAIN_REPORT_BODY"
     printf '%s\n' "${MOCK_RACE_CONTENT:-intruder}" > "$MOCK_RACE_OUTPUT"
     ;;
@@ -559,14 +589,115 @@ EOF
   ln -s pr-explain-runner "$TEST_TMP/bin/claude"
 }
 
+# Schema-exact triage judgment fixtures, one per tier the tests exercise,
+# plus the two shapes the pr_explain_validate_triage gate must refuse. The T2
+# fixture's objective ids (obj-1..obj-3) line up with the ones the valid body
+# fixture claims, mirroring a coherent triage-then-author run.
+write_triage_fixtures() {
+  local dir="$TEST_TMP/triage"
+  mkdir -p "$dir"
+
+  cat > "$dir/t2.json" <<'EOF'
+{
+  "tier": "T2",
+  "tier_reason": "The change rewires run behavior enough that the diff alone misleads a reviewer.",
+  "decision_risk": "medium",
+  "budget": {"reading_minutes": 8, "max_sections": 5},
+  "concepts": [
+    {"slug": "snapshot-immutability", "name": "Snapshot immutability", "status": "background", "gap": false},
+    {"slug": "staged-report-boundary", "name": "Staged report boundary", "status": "modified", "gap": false}
+  ],
+  "questions": ["Who can move the head ref between snapshot and fetch?"],
+  "objectives": [
+    {"id": "obj-1", "verb": "predict", "statement": "After reading, the reader can predict which snapshot changes stop a run before any disclosure."},
+    {"id": "obj-2", "verb": "decide", "statement": "After reading, the reader can decide whether the staged report earned publication."},
+    {"id": "obj-3", "verb": "trace", "statement": "After reading, the reader can trace every provenance field back to the immutable snapshot."}
+  ]
+}
+EOF
+
+  cat > "$dir/t1.json" <<'EOF'
+{
+  "tier": "T1",
+  "tier_reason": "A renamed flag with a compatibility shim needs one screen, not a full explainer.",
+  "decision_risk": "low",
+  "budget": {"reading_minutes": 3, "max_sections": 2},
+  "concepts": [
+    {"slug": "flag-rename", "name": "Flag rename", "status": "modified", "gap": false}
+  ],
+  "questions": ["Does the old flag keep working during the deprecation window?"],
+  "objectives": [
+    {"id": "obj-1", "verb": "decide", "statement": "After reading, the reader can decide whether the shim covers every existing caller."}
+  ]
+}
+EOF
+
+  cat > "$dir/t0.json" <<'EOF'
+{
+  "tier": "T0",
+  "tier_reason": "The pull request body already explains this version bump completely.",
+  "decision_risk": "low",
+  "budget": {"reading_minutes": 1, "max_sections": 1},
+  "concepts": [],
+  "questions": [],
+  "objectives": []
+}
+EOF
+
+  # T0 with high decision risk is forbidden by the schema gate: a high-risk
+  # change never gets to decline its own explanation.
+  cat > "$dir/t0-high-risk.json" <<'EOF'
+{
+  "tier": "T0",
+  "tier_reason": "The auth change is tiny so the pull request body suffices.",
+  "decision_risk": "high",
+  "budget": {"reading_minutes": 1, "max_sections": 1},
+  "concepts": [],
+  "questions": [],
+  "objectives": []
+}
+EOF
+
+  # Parses as JSON but violates the closed key set (an extra key) and the
+  # objective id shape, so the schema gate must refuse it.
+  cat > "$dir/bad-schema.json" <<'EOF'
+{
+  "tier": "T2",
+  "tier_reason": "A schema-violating judgment must never steer the author pass.",
+  "decision_risk": "medium",
+  "budget": {"reading_minutes": 8, "max_sections": 5},
+  "concepts": [],
+  "questions": [],
+  "objectives": [
+    {"id": "goal-one", "verb": "predict", "statement": "An objective id outside obj-N must be refused."},
+    {"id": "obj-2", "verb": "decide", "statement": "The reader can decide."},
+    {"id": "obj-3", "verb": "trace", "statement": "The reader can trace."}
+  ],
+  "notes": "no extra keys are allowed"
+}
+EOF
+
+  printf 'this is not a JSON judgment at all\n' > "$dir/invalid.json"
+
+  export MOCK_TRIAGE_T2="$dir/t2.json"
+  export MOCK_TRIAGE_T1="$dir/t1.json"
+  export MOCK_TRIAGE_T0="$dir/t0.json"
+  export MOCK_TRIAGE_T0_HIGH_RISK="$dir/t0-high-risk.json"
+  export MOCK_TRIAGE_BAD_SCHEMA="$dir/bad-schema.json"
+  export MOCK_TRIAGE_INVALID="$dir/invalid.json"
+}
+
 new_case() {
-  local name="$1"
+  local name="$1" pass_number
   export CASE_DIR="$TEST_TMP/cases/$name"
   export MOCK_RUNNER_DIR="$CASE_DIR/runner"
   export MOCK_FORGE_LOG="$CASE_DIR/forge.log"
   export MOCK_SCENARIO=same
-  export MOCK_RUNNER_MODE=success
-  unset MOCK_RUNNER_MODE_2 MOCK_BODY_FILE_2
+  unset MOCK_RUNNER_MODE MOCK_BODY_FILE MOCK_TRIAGE_FILE MOCK_VALID_BODY_FILE
+  for pass_number in 1 2 3 4; do
+    unset "MOCK_RUNNER_MODE_$pass_number" "MOCK_BODY_FILE_$pass_number" \
+      "MOCK_TRIAGE_FILE_$pass_number"
+  done
   mkdir -p "$MOCK_RUNNER_DIR" "$CASE_DIR/output"
   : > "$MOCK_FORGE_LOG"
 }
@@ -614,6 +745,7 @@ write_valid_body() {
   <p class="rx-eyebrow">acme/widget · pull request #7</p>
   <h1>The change makes the teaching path explicit</h1>
   <p class="rx-lede">The report explains what changes and what remains outside the evidence boundary.</p>
+  <p class="rx-cost">Summary: 1 minute. Concepts: 3 minutes. Full mechanism and quiz: 8 minutes.</p>
 </header>
 <section class="rx-summary" aria-labelledby="rx-summary-h">
   <h2 id="rx-summary-h">If you read nothing else</h2>
@@ -626,35 +758,79 @@ write_valid_body() {
     <li class="rx-card" data-q="how-to-reject"><h3>How to reject or roll back</h3><p>Reject the pull request or revert its commit.</p></li>
   </ul>
 </section>
-<nav class="rx-toc" aria-label="Contents"><ol><li><a href="#background">Background</a></li><li><a href="#quiz">Quiz</a></li></ol></nav>
+<nav class="rx-toc" aria-label="Contents"><ol><li><a href="#objectives">Objectives</a></li><li><a href="#background">Background</a></li><li><a href="#quiz">Quiz</a></li></ol></nav>
 <main id="rx-main">
-  <section id="background" aria-labelledby="background-h">
+  <section id="objectives" aria-labelledby="objectives-h" data-layer="concept">
+    <h2 id="objectives-h">What you can do after reading</h2>
+    <p class="rx-claim">Objectives bound the report: every later section and quiz item names the objective it serves.</p>
+    <ol class="rx-objectives">
+      <li id="obj-1">After reading you can predict which snapshot changes stop a run before any disclosure.</li>
+      <li id="obj-2">You can decide whether the staged report earned publication from its recorded evidence.</li>
+      <li id="obj-3">You can trace every provenance field back to the immutable snapshot.</li>
+    </ol>
+  </section>
+  <section id="background" aria-labelledby="background-h" data-layer="concept" data-objective="obj-1 obj-3">
     <h2 id="background-h">Background</h2>
     <p class="rx-claim">An immutable snapshot makes every later claim traceable.</p>
     <p>The complete diff and surrounding code supply the evidence for this explanation.</p>
   </section>
-  <section id="quiz" aria-labelledby="quiz-h">
+  <section id="quiz" aria-labelledby="quiz-h" data-layer="receipts" data-objective="obj-1 obj-2 obj-3">
     <h2 id="quiz-h">Check yourself</h2>
     <p class="rx-claim">These questions test application rather than surface recall.</p>
-EOF
-    local q
-    for q in 1 2 3 4 5; do
-      cat <<EOF
-    <article class="rx-quiz-item" id="q$q">
-      <h3>When the recorded head differs from the fetched head, what should the operator do?</h3>
+    <article class="rx-quiz-item" id="q1" data-concept="snapshot-immutability" data-objective="obj-1">
+      <h3>1. When the recorded head differs from the fetched head, what should the operator do?</h3>
       <ul class="rx-choices">
-        <li><details class="rx-choice" name="q$q" data-correct="true"><summary>A. Stop before invoking the selected report runner</summary><p>Correct because the immutable input no longer names the fetched revision.</p></details></li>
-        <li><details class="rx-choice" name="q$q" data-correct="false" data-misconception="assumes a moving branch is immutable"><summary>B. Continue with whichever branch revision arrived most recently</summary><p>Not quite because that silently changes the evidence under review.</p></details></li>
-        <li><details class="rx-choice" name="q$q" data-correct="false" data-misconception="confuses overwrite consent with source consent"><summary>C. Continue only when the output replacement flag is present</summary><p>Not quite because replacement consent cannot authorize different source code.</p></details></li>
-        <li><details class="rx-choice" name="q$q" data-correct="false" data-misconception="assumes local object presence proves remote identity"><summary>D. Continue whenever the old commit still exists locally</summary><p>Not quite because object presence does not prove the branch stayed fixed.</p></details></li>
+        <li><details class="rx-choice" name="q1" data-correct="true"><summary>A. Stop before invoking the selected report runner</summary><p>Correct because the immutable input no longer names the fetched revision.</p></details></li>
+        <li><details class="rx-choice" name="q1" data-correct="false" data-misconception="assumes a moving branch is immutable"><summary>B. Continue with whichever branch revision arrived most recently</summary><p>Not quite. Continuing would silently change the evidence under review.</p></details></li>
+        <li><details class="rx-choice" name="q1" data-correct="false" data-misconception="confuses overwrite consent with source consent"><summary>C. Continue only when the output replacement flag is present</summary><p>Not quite. Replacement consent cannot authorize sending different source code anywhere.</p></details></li>
+        <li><details class="rx-choice" name="q1" data-correct="false" data-misconception="assumes local object presence proves remote identity"><summary>D. Continue whenever the old commit still exists locally</summary><p>Not quite. Object presence proves nothing about where the branch now points.</p></details></li>
       </ul>
       <p class="rx-quiz-result" aria-live="polite"></p>
     </article>
-EOF
-    done
-    cat <<EOF
+    <article class="rx-quiz-item" id="q2" data-concept="staged-report-boundary" data-objective="obj-2">
+      <h3>2. A runner exits successfully but the staged body is a symlink. What happens next?</h3>
+      <ul class="rx-choices">
+        <li><details class="rx-choice" name="q2" data-correct="false" data-misconception="trusts exit status over the capture checks"><summary>A. The run publishes because the runner reported success</summary><p>Not quite. Exit status alone says nothing about what the pass left behind.</p></details></li>
+        <li><details class="rx-choice" name="q2" data-correct="true"><summary>B. The run stops because the staged body must stay a regular file</summary><p>Correct. A redirected body would let captured bytes escape the private job directory.</p></details></li>
+        <li><details class="rx-choice" name="q2" data-correct="false" data-misconception="expects the validator to repair a transport problem"><summary>C. The validator rewrites the link into a regular file</summary><p>Not quite. Validation reads content and never repairs how the bytes arrived.</p></details></li>
+        <li><details class="rx-choice" name="q2" data-correct="false" data-misconception="assumes the repair pass handles capture failures"><summary>D. The repair pass gets one chance to replace the link</summary><p>Not quite. Repair exists for validation failures, never for a broken capture contract.</p></details></li>
+      </ul>
+      <p class="rx-quiz-result" aria-live="polite"></p>
+    </article>
+    <article class="rx-quiz-item" id="q3" data-concept="snapshot-immutability" data-objective="obj-3">
+      <h3>3. Which record lets a reader trace the report back to exact commits?</h3>
+      <ul class="rx-choices">
+        <li><details class="rx-choice" name="q3" data-correct="false" data-misconception="treats prose as provenance"><summary>A. The narrative summary at the top of the report</summary><p>Not quite. Prose summarizes the change and cannot anchor it to object identifiers.</p></details></li>
+        <li><details class="rx-choice" name="q3" data-correct="false" data-misconception="confuses the diffstat with identity"><summary>B. The diffstat line naming files and counts</summary><p>Not quite. File counts describe shape and never name the compared revisions.</p></details></li>
+        <li><details class="rx-choice" name="q3" data-correct="true"><summary>C. The provenance list carrying the base and head commit identifiers</summary><p>Correct. Those fields repeat the snapshot values that every claim was built against.</p></details></li>
+        <li><details class="rx-choice" name="q3" data-correct="false" data-misconception="assumes a title uniquely names a revision"><summary>D. The pull request title in the masthead</summary><p>Not quite. Titles change freely while the underlying commits stay fixed.</p></details></li>
+      </ul>
+      <p class="rx-quiz-result" aria-live="polite"></p>
+    </article>
+    <article class="rx-quiz-item" id="q4" data-concept="staged-report-boundary" data-objective="obj-1">
+      <h3>4. A pass appends a line to the snapshot before exiting. What does the tool do?</h3>
+      <ul class="rx-choices">
+        <li><details class="rx-choice" name="q4" data-correct="false" data-misconception="expects a warning instead of a stop"><summary>A. It warns the operator and keeps the modified snapshot</summary><p>Not quite. A tampered snapshot invalidates every downstream claim, so warning is insufficient.</p></details></li>
+        <li><details class="rx-choice" name="q4" data-correct="false" data-misconception="assumes only the body is checked after a pass"><summary>B. It ignores job files other than the report body</summary><p>Not quite. The cage re-checks the snapshot digest and the checkout after every pass.</p></details></li>
+        <li><details class="rx-choice" name="q4" data-correct="false" data-misconception="trusts a later pass to restore the file"><summary>C. It asks the next pass to restore the original bytes</summary><p>Not quite. No later pass is trusted to undo damage to immutable inputs.</p></details></li>
+        <li><details class="rx-choice" name="q4" data-correct="true"><summary>D. It stops the run and preserves the job directory for diagnosis</summary><p>Correct. The digest comparison fails closed and the private directory keeps the evidence.</p></details></li>
+      </ul>
+      <p class="rx-quiz-result" aria-live="polite"></p>
+    </article>
+    <article class="rx-quiz-item" id="q5" data-concept="staged-report-boundary" data-objective="obj-2">
+      <h3>5. What earns the staged report its move to the operator-named output path?</h3>
+      <ul class="rx-choices">
+        <li><details class="rx-choice" name="q5" data-correct="true"><summary>A. Passing the mechanical validator against the recorded snapshot</summary><p>Correct. Publication follows validation, and the validator compares the report against snapshot facts.</p></details></li>
+        <li><details class="rx-choice" name="q5" data-correct="false" data-misconception="treats size as a quality signal"><summary>B. Being smaller than the body the author pass wrote</summary><p>Not quite. The size rule constrains the slop pass and never justifies publication.</p></details></li>
+        <li><details class="rx-choice" name="q5" data-correct="false" data-misconception="assumes consent covers content quality"><summary>C. The operator consent that started the run</summary><p>Not quite. Consent authorizes disclosure to a provider, never the finished artifact.</p></details></li>
+        <li><details class="rx-choice" name="q5" data-correct="false" data-misconception="expects the provider to certify its own work"><summary>D. The provider declaring the report complete</summary><p>Not quite. Provider claims about the report carry no weight in the cage.</p></details></li>
+      </ul>
+      <p class="rx-quiz-result" aria-live="polite"></p>
+    </article>
   </section>
 </main>
+EOF
+    cat <<EOF
 <footer class="rx-footer">
   <dl class="rx-provenance" data-repository="acme/widget" data-pr="7" data-pr-url="https://forge.example/acme/widget/pulls/7" data-base-sha="$BASE_SHA" data-head-sha="$head" data-runner="$runner">
     <dt data-field="repo">Repository</dt><dd>acme/widget</dd>
@@ -762,6 +938,7 @@ assert_env_value() {
 setup_git_fixture
 install_forge_mock
 install_runner_mocks
+write_triage_fixtures
 export PATH="$TEST_TMP/bin:$PATH"
 # Explicit injection, not PATH precedence: pr-explain prefers the forge
 # shipped beside its resolved allod tools root (here, $ROOT/forge, the real

@@ -52,22 +52,32 @@ pr_usage() {
 Usage:
   allod pr explain <number> (--codex | --claude) [-R|--repo <owner/repo>]
     [--checkout <path>] --output <report.html> [--replace] [--dry-run]
-    [--model <model>] [--effort <low|medium|high|xhigh|max>] [--no-repair]
+    [--model <model>] [--effort <low|medium|high|xhigh|max>]
+    [--force-tier <T1|T2|T3>] [--no-slop] [--no-repair]
 
 The provider flag is explicit consent to send the pull request's source and
 review context to that installed subscription CLI. Before invoking it, allod
 prints the repository, PR, immutable base/head commits, runner, output, and
 how many provider calls the run may make.
 
+A run opens with a triage pass: the provider assesses the change and writes a
+structured complexity judgment (tier, reading budget, concepts, learning
+objectives) that shapes the report. A T0 tier means the pull request body
+already suffices; the run prints that judgment and generates nothing.
+--force-tier replaces the tier judgment in either direction and is recorded
+in the judgment itself.
+
+After the author pass writes the report body, a deletion-only slop pass
+tightens its prose; --no-slop skips it. When the assembled report fails
+validation, allod sends the validator's diagnostics back to the same provider
+for exactly one repair pass. A full run therefore costs at most four provider
+calls (triage, author, slop, repair); --no-slop and --no-repair each remove
+one, and --no-repair fails the run on the first validation failure.
+Validation itself is identical either way.
+
 The model defaults to the selected CLI's built-in default. Explanation effort
 defaults to high. --dry-run resolves and verifies the snapshot without
 running a provider or writing a report.
-
-When the assembled report fails validation, allod sends the validator's
-diagnostics back to the same provider for exactly one repair pass, so a run
-costs at most two provider calls. --no-repair keeps a run to a single call
-and fails on the first validation failure. Validation itself is identical
-either way.
 EOF
 }
 
@@ -348,19 +358,26 @@ pr_explain_fetch_ref() {
 pr_explain_print_consent() {
   local repository="$1" number="$2" url="$3" title="$4" base="$5" head="$6"
   local runner="$7" model="$8" effort="$9" output="${10}" dry_run="${11}" repair="${12}"
+  local slop="${13}" force_tier="${14}"
   local model_display="${model:-built-in CLI default}"
-  local calls_display
+  local calls_display passes max_calls
 
   if [[ "$dry_run" == true ]]; then
     printf 'allod: dry-run; provider will not be invoked and no report will be written\n'
     calls_display='0 (--dry-run)'
   else
     printf 'allod: provider disclosure confirmed by --%s\n' "$runner"
-    if [[ "$repair" == true ]]; then
-      calls_display='at most 2 (one repair pass if validation fails)'
-    else
-      calls_display='1 (--no-repair)'
+    max_calls=2
+    passes='triage, author'
+    if [[ "$slop" == true ]]; then
+      max_calls=$((max_calls + 1))
+      passes+=', slop'
     fi
+    if [[ "$repair" == true ]]; then
+      max_calls=$((max_calls + 1))
+      passes+=', one repair pass if validation fails'
+    fi
+    calls_display="at most $max_calls ($passes)"
   fi
   printf '  repository: %s\n' "$repository"
   printf '  pull request: #%s — %s\n' "$number" "$title"
@@ -372,6 +389,7 @@ pr_explain_print_consent() {
   printf '  effort: %s\n' "$effort"
   printf '  output: %s\n' "$output"
   printf '  provider calls: %s\n' "$calls_display"
+  [[ -z "$force_tier" ]] || printf '  forced tier: %s (--force-tier)\n' "$force_tier"
 }
 
 pr_explain_assemble_report() {
@@ -427,6 +445,7 @@ pr_explain_run_provider() {
     "FORGE_TOKEN_FILE=/dev/null"
     "ALLOD_PR_EXPLAIN_REPORT_BODY=$body"
     "ALLOD_PR_EXPLAIN_JOB_DIR=$job_dir"
+    "ALLOD_PR_EXPLAIN_TRIAGE=$job_dir/triage.json"
   )
 
   case "$runner" in
@@ -550,6 +569,81 @@ pr_explain_run_pass() {
     "$head_sha" "$snapshot_digest"
 }
 
+# The triage judgment is provider output, so it is held to a fixed schema
+# before anything reads a value out of it: exact keys, closed enums, bounded
+# integers, and objective ids that downstream objective tags can resolve.
+pr_explain_validate_triage() {
+  local triage="$1"
+  jq -e '
+    (type == "object")
+    and ((keys | sort) == ["budget","concepts","decision_risk","objectives","questions","tier","tier_reason"])
+    and (.tier | type == "string" and IN("T0","T1","T2","T3"))
+    and (.tier_reason | type == "string" and length > 0)
+    and (.decision_risk | type == "string" and IN("low","medium","high"))
+    and (((.tier == "T0") and (.decision_risk == "high")) | not)
+    and (.budget | type == "object" and ((keys | sort) == ["max_sections","reading_minutes"]))
+    and (.budget.reading_minutes | type == "number" and . == floor and . >= 1 and . <= 60)
+    and (.budget.max_sections | type == "number" and . == floor and . >= 1 and . <= 12)
+    and (.concepts | type == "array" and all(.[];
+      type == "object" and ((keys | sort) == ["gap","name","slug","status"])
+      and (.slug | type == "string" and test("^[a-z0-9]+(-[a-z0-9]+)*$"))
+      and (.name | type == "string" and length > 0)
+      and (.status | type == "string" and IN("new","modified","background"))
+      and (.gap | type == "boolean")))
+    and (.questions | type == "array" and all(.[]; type == "string" and length > 0))
+    and (.objectives | type == "array" and length <= 7 and all(.[];
+      type == "object" and ((keys | sort) == ["id","statement","verb"])
+      and (.id | type == "string" and test("^obj-[0-9]+$"))
+      and (.verb | type == "string" and IN("predict","decide","diagnose","explain","trace"))
+      and (.statement | type == "string" and length > 0)))
+    and ((.objectives | map(.id)) == (.objectives | map(.id) | unique))
+    and (if .tier == "T0" then true
+         elif .tier == "T1" then ((.objectives | length) >= 1 and (.objectives | length) <= 3)
+         else (.objectives | length) >= 3 end)
+  ' "$triage" >/dev/null 2>&1
+}
+
+# The triage pass writes the structured complexity judgment instead of the
+# report body, so its cage postconditions differ from a body pass: the
+# judgment must appear as a regular file at its canonical job path and pass
+# the schema gate, the staged report body must still be empty, and the
+# snapshot and detached checkout must be untouched.
+pr_explain_run_triage_pass() {
+  local subject="$1" runner="$2" model="$3" effort="$4" repo_dir="$5" job_dir="$6"
+  local prompt="$7" body="$8" stdout_log="$9" stderr_log="${10}" triage="${11}"
+  local head_sha="${12}" snapshot_digest="${13}"
+  local status triage_resolved digest_after job_status
+
+  set +e
+  pr_explain_run_provider "$runner" "$model" "$effort" "$repo_dir" "$job_dir" "$prompt" \
+    "$body" "$stdout_log" "$stderr_log"
+  status=$?
+  set -e
+  if [[ "$PR_EXPLAIN_SIGNAL_STATUS" -ne 0 ]]; then
+    exit "$PR_EXPLAIN_SIGNAL_STATUS"
+  fi
+  [[ "$status" -eq 0 ]] || die 1 "$subject failed with status $status"
+
+  [[ -s "$triage" ]] || die 1 "$subject completed without writing the triage judgment"
+  [[ -f "$triage" && ! -L "$triage" ]] ||
+    die 1 "$subject replaced the triage judgment with a non-regular file"
+  triage_resolved=$(realpath -e -- "$triage") || die 1 "could not resolve the triage judgment"
+  [[ "$triage_resolved" == "$triage" ]] ||
+    die 1 "$subject moved the triage judgment outside the job directory"
+  [[ ! -s "$body" ]] || die 1 "$subject wrote the report body during triage"
+  pr_explain_validate_triage "$triage" ||
+    die 1 "$subject wrote a triage judgment that fails the schema gate"
+  digest_after=$(sha256sum "$job_dir/snapshot.json" | awk '{print $1}') ||
+    die 1 "$subject removed the immutable PR snapshot"
+  [[ "$digest_after" == "$snapshot_digest" ]] ||
+    die 1 "$subject modified the immutable PR snapshot"
+  [[ "$(git -C "$repo_dir" rev-parse 'HEAD^{commit}' 2>/dev/null)" == "$head_sha" ]] ||
+    die 1 "$subject moved the detached job checkout away from the snapshotted head"
+  job_status=$(git -C "$repo_dir" status --porcelain 2>/dev/null) ||
+    die 1 "$subject damaged the detached job checkout"
+  [[ -z "$job_status" ]] || die 1 "$subject modified the detached job checkout"
+}
+
 # Render the validator's structured diagnostics as prompt-safe data: one stable
 # `CODE: message` line per error, with control bytes and backticks neutralized
 # and both the line length and the list bounded. Some diagnostics quote
@@ -589,9 +683,23 @@ pr_explain_write_repair_prompt() {
   chmod 0600 "$destination"
 }
 
+pr_explain_write_slop_prompt() {
+  local destination="$1" body="$2"
+  {
+    printf '# Tighten the staged report body\n\n'
+    printf 'The report body below was accepted from the author pass. Rewrite that same\n'
+    printf 'file in place; the snapshot, the diff, and the checkout have not changed.\n\n'
+    printf 'Canonical body path, the only file you may change:\n\n'
+    printf '    %s\n\n' "$body"
+    pr_explain_emit_slop_prompt
+  } >"$destination"
+  chmod 0600 "$destination"
+}
+
 pr_explain() {
   local number="" runner="" repo_arg="" checkout_arg="$PWD" output_arg="" model="" effort="high"
-  local replace=false dry_run=false repair=true repo_set=false checkout_set=false output_set=false
+  local replace=false dry_run=false repair=true slop=true force_tier=""
+  local repo_set=false checkout_set=false output_set=false
   local model_set=false effort_set=false provider_set=false
   local checkout output_parent output_name output snapshot snapshot_status
   local repository pr_url pr_title base_repo base_clone base_ref base_sha
@@ -599,7 +707,8 @@ pr_explain() {
   local base_fetch_url head_fetch_url
   local actual_base actual_head job_dir repo_dir discussion_status object_format
   local body report prompt generated_date adjacent_temp
-  local body_capture repair_capture
+  local body_capture repair_capture slop_capture assembly_source
+  local triage triage_prompt tier tier_reason forced_triage slop_size author_size
   local snapshot_digest forge_bin
 
   while [[ $# -gt 0 ]]; do
@@ -660,6 +769,17 @@ pr_explain() {
         repair=false
         shift
         ;;
+      --no-slop)
+        [[ "$slop" == true ]] || die 1 "--no-slop may be specified only once"
+        slop=false
+        shift
+        ;;
+      --force-tier)
+        require_option_value "$1" "$#"
+        [[ -z "$force_tier" ]] || die 1 "--force-tier may be specified only once"
+        force_tier="$2"
+        shift 2
+        ;;
       -h|--help)
         pr_usage
         return 0
@@ -687,6 +807,10 @@ pr_explain() {
   case "$effort" in
     low|medium|high|xhigh|max) ;;
     *) die 1 "--effort must be one of: low, medium, high, xhigh, max" ;;
+  esac
+  case "$force_tier" in
+    ""|T1|T2|T3) ;;
+    *) die 1 "--force-tier must be one of: T1, T2, T3" ;;
   esac
   [[ "$model" != *$'\n'* && "$model" != *$'\r'* ]] || die 1 "--model cannot contain a newline"
   if [[ "$repo_set" == true && ! "$repo_arg" =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]]; then
@@ -768,7 +892,7 @@ pr_explain() {
     [[ "$actual_head" == "$head_sha" ]] ||
       die 1 "head ref moved: snapshot expected $head_sha, remote advertises $actual_head"
     pr_explain_print_consent "$repository" "$number" "$pr_url" "$pr_title" "$base_sha" "$head_sha" \
-      "$runner" "$model" "$effort" "$output" true "$repair"
+      "$runner" "$model" "$effort" "$output" true "$repair" "$slop" "$force_tier"
     return 0
   fi
 
@@ -830,13 +954,41 @@ pr_explain() {
       effort: $effort, generated: $generated, report_body: $report_body}' \
     >"$job_dir/report-contract.json"
   pr_explain_emit_prompt >"$prompt"
+  triage="$job_dir/triage.json"
+  triage_prompt="$job_dir/triage-prompt.md"
+  pr_explain_emit_triage_prompt >"$triage_prompt"
   : >"$body"
   chmod 0600 "$body"
   snapshot_digest=$(sha256sum "$job_dir/snapshot.json" | awk '{print $1}') ||
     die 1 "could not record immutable snapshot checksum"
 
   pr_explain_print_consent "$repository" "$number" "$pr_url" "$pr_title" "$base_sha" "$head_sha" \
-    "$runner" "$model" "$effort" "$output" false "$repair"
+    "$runner" "$model" "$effort" "$output" false "$repair" "$slop" "$force_tier"
+
+  pr_explain_run_triage_pass "$runner runner triage pass" "$runner" "$model" "$effort" \
+    "$repo_dir" "$job_dir" "$triage_prompt" "$body" "$job_dir/runner.triage.stdout" \
+    "$job_dir/runner.triage.stderr" "$triage" "$head_sha" "$snapshot_digest"
+  tier=$(jq -r '.tier' "$triage")
+  tier_reason=$(jq -r '.tier_reason' "$triage")
+  if [[ "$tier" == "T0" && -z "$force_tier" ]]; then
+    printf 'allod: triage tier T0: %s\n' "$tier_reason"
+    printf 'allod: no report generated; the pull request body suffices (--force-tier overrides)\n'
+    case "$job_dir" in
+      "$output_parent"/.allod-pr-explain.*) rm -rf -- "$job_dir" ;;
+      *) die 1 "internal error: refusing to clean unexpected job path $job_dir" ;;
+    esac
+    PR_EXPLAIN_JOB_DIR=""
+    return 0
+  fi
+  if [[ -n "$force_tier" && "$force_tier" != "$tier" ]]; then
+    printf 'allod: triage tier %s overridden to %s by --force-tier\n' "$tier" "$force_tier"
+    forced_triage=$(jq --arg tier "$force_tier" \
+      '.tier = $tier | .tier_reason += " [tier forced by operator]"' "$triage") ||
+      die 1 "could not apply --force-tier to the triage judgment"
+    printf '%s\n' "$forced_triage" >"$triage"
+  else
+    printf 'allod: triage tier %s: %s\n' "$tier" "$tier_reason"
+  fi
 
   body_capture="$job_dir/report-body.captured.html"
   repair_capture="$job_dir/report-body.repair.captured.html"
@@ -844,7 +996,21 @@ pr_explain() {
     "$prompt" "$body" "$job_dir/runner.stdout" "$job_dir/runner.stderr" \
     "$body_capture" "$head_sha" "$snapshot_digest"
 
-  pr_explain_assemble_report "$body_capture" "$report" "$repository" "$number" "$pr_title"
+  assembly_source="$body_capture"
+  if [[ "$slop" == true ]]; then
+    slop_capture="$job_dir/report-body.slop.captured.html"
+    pr_explain_write_slop_prompt "$job_dir/slop-prompt.md" "$body"
+    pr_explain_run_pass "$runner runner slop pass" "$runner" "$model" "$effort" "$repo_dir" \
+      "$job_dir" "$job_dir/slop-prompt.md" "$body" "$job_dir/runner.slop.stdout" \
+      "$job_dir/runner.slop.stderr" "$slop_capture" "$head_sha" "$snapshot_digest"
+    slop_size=$(stat -c %s -- "$slop_capture") || die 1 "could not size the slop pass capture"
+    author_size=$(stat -c %s -- "$body_capture") || die 1 "could not size the author pass capture"
+    [[ "$slop_size" -le "$author_size" ]] ||
+      die 1 "$runner runner slop pass grew the report body; a slop pass may only cut"
+    assembly_source="$slop_capture"
+  fi
+
+  pr_explain_assemble_report "$assembly_source" "$report" "$repository" "$number" "$pr_title"
   adjacent_temp=$(mktemp -- "$output_parent/.${output_name}.XXXXXXXXXX") ||
     die 1 "could not create atomic output staging file"
   PR_EXPLAIN_PUBLISH_TEMP="$adjacent_temp"
@@ -853,7 +1019,7 @@ pr_explain() {
     "$repository" "$number" "$pr_url" "$pr_title" "$base_sha" "$head_sha"; then
     pr_explain_write_diagnostics "$job_dir/validation.diagnostics.txt"
     [[ "$repair" == true ]] ||
-      die 1 "staged report failed validation; --no-repair kept this run to one provider call"
+      die 1 "staged report failed validation; --no-repair declined the bounded repair pass"
 
     # Bounded at exactly one retry, against the same explicitly consented
     # provider: the diagnostics go back as data on stdin, the run keeps the
@@ -916,11 +1082,13 @@ pr_main() {
     explain) pr_explain "$@" ;;
     _emit-asset)
       [[ $# -eq 1 ]] ||
-        die 1 "internal asset emitter requires css, js, prompt, repair-prompt, or gallery"
+        die 1 "internal asset emitter requires css, js, prompt, triage-prompt, slop-prompt, repair-prompt, or gallery"
       case "$1" in
         css) pr_explain_emit_css ;;
         js) pr_explain_emit_js ;;
         prompt) pr_explain_emit_prompt ;;
+        triage-prompt) pr_explain_emit_triage_prompt ;;
+        slop-prompt) pr_explain_emit_slop_prompt ;;
         repair-prompt) pr_explain_emit_repair_prompt ;;
         gallery) pr_explain_emit_gallery ;;
         *) die 1 "unknown internal PR explanation asset: $1" ;;

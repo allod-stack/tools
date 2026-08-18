@@ -3,9 +3,10 @@
 `allod pr explain` turns one immutable pull-request snapshot into a validated,
 self-contained HTML teaching report. Use it when a normal diff is not enough to
 understand a change: choose the subscription provider explicitly, review the
-identity and commit summary printed by the command, then inspect the report. The
-command only reads the PR and repositories; it never edits the PR, commits,
-pushes, or deploys anything.
+identity and commit summary printed by the command, then inspect the report. A
+triage pass first judges how much explanation the change deserves, so a trivial
+change is declined rather than padded. The command only reads the PR and
+repositories; it never edits the PR, commits, pushes, or deploys anything.
 
 ## Generate a report
 
@@ -31,7 +32,7 @@ allod pr explain <number> (--codex | --claude)
   [-R|--repo <owner/repo>] [--checkout <path>]
   --output <report.html> [--replace] [--dry-run]
   [--model <model>] [--effort <low|medium|high|xhigh|max>]
-  [--no-repair]
+  [--force-tier <T1|T2|T3>] [--no-slop] [--no-repair]
 ```
 
 The pull-request number, exactly one provider, and `--output` are required,
@@ -48,7 +49,9 @@ including for a dry run.
 | `--dry-run` | Resolve and verify the snapshot and print the disclosure summary, but do not run a provider or write the output. |
 | `--model` | Override the selected CLI's built-in model default for this run. |
 | `--effort` | Override explanation effort. The default is `high`. |
-| `--no-repair` | Fail on the first validation failure instead of spending one repair pass, keeping the run to a single provider call. |
+| `--force-tier` | Generate at the named tier even when triage judged the change differently, including overriding a `T0` decline. |
+| `--no-slop` | Skip the deletion-only tightening pass, saving one provider call. |
+| `--no-repair` | Fail on the first validation failure instead of spending one repair pass, trimming the run's maximum provider calls by one. |
 
 Leaving out `--model` follows the selected CLI's built-in default, so the
 command does not freeze a model name that will become stale. User and project
@@ -57,10 +60,68 @@ deliberate one-run override. The default `high` effort favors careful repository
 investigation; lower it for a quick iteration or raise it only when the
 installed CLI supports the requested level.
 
+## Triage and the four passes
+
+Generation is a pipeline of provider passes, all against the same consented
+subscription CLI, at most four per run:
+
+1. **Triage** (`pr-explain/triage-prompt.md`) reads the job files and the
+   checkout and writes `triage.json` into the private job directory: a tier, a
+   decision-risk level, a reading budget, the concepts the change touches, the
+   developer questions it raises, and the learning objectives a report must
+   serve.
+2. **T0 short-circuit** — when triage answers tier `T0` and no `--force-tier`
+   was given, the command prints the tier judgment and its reason, generates
+   nothing, and exits 0.
+3. **Author** (`pr-explain/prompt.md`) writes the report body, honoring the
+   triage tier, budget, and objectives.
+4. **Slop** (`pr-explain/slop-prompt.md`) tightens the staged body by deletion
+   only: it may cut sentences, list items, and whole elements and tighten
+   wording, but it cannot add content or change code, provenance, quiz
+   correctness data, or objective ids. Skip it with `--no-slop`.
+5. **Validation and one bounded repair pass**, unchanged: the same validator,
+   with the same errors blocking publication.
+
+Tiers grade how much explanation the change deserves:
+
+| Tier | Meaning |
+|---|---|
+| `T0` | The PR body's own summary suffices; the tool declines to generate. |
+| `T1` | One-screen brief: one concept section, a minimal quiz, a full read of at most 4 minutes. |
+| `T2` | Full explainer. |
+| `T3` | Full explainer plus background sections for the prerequisite gaps triage found. |
+
+`decision_risk` is independent of size: a 5-line auth change can be `T1` with
+`high` risk, and `high` risk forbids a `T0` decline. `--force-tier <T1|T2|T3>`
+overrides the triage tier, including a `T0` decline you disagree with.
+
+### triage.json
+
+The triage verdict is written to the private job directory (the path is handed
+to the provider in `ALLOD_PR_EXPLAIN_TRIAGE`) and has exactly these keys:
+
+```json
+{
+  "tier": "T0" | "T1" | "T2" | "T3",
+  "tier_reason": "one plain sentence",
+  "decision_risk": "low" | "medium" | "high",
+  "budget": { "reading_minutes": <int 1..60>, "max_sections": <int 1..12> },
+  "concepts": [ { "slug": "kebab-case", "name": "...", "status": "new"|"modified"|"background", "gap": true|false } ],
+  "questions": [ "developer questions this change raises" ],
+  "objectives": [ { "id": "obj-1", "verb": "predict"|"decide"|"diagnose"|"explain"|"trace", "statement": "After reading, the reader can ..." } ]
+}
+```
+
+Objectives are verb-first capability claims tied to the merge decision — 3–7
+for `T2` and `T3`, 1–3 for `T1`. The report's objectives block must carry the
+same ids in the same order, and every objective must be claimed by at least one
+section and tested by at least one quiz item; the vocabulary that enforces this
+is described in [Report components](components.md).
+
 `allod pr explain` is a thin dispatcher: it resolves the `pr-explain/` tool
 directory — from `ALLOD_TOOLS_DIR`, its own script directory, or a
 `$WORK_DIR/allod/tools` checkout, in that order — and hands off to
-`pr-explain/explain`, which embeds the shared prompt, report template,
+`pr-explain/explain`, which embeds the shared prompts, report template,
 progressive-enhancement script, and gallery from that same directory.
 Generation does not depend on an `allod/tools` source checkout beyond that
 resolution; `--checkout` always names the repository being explained.
@@ -98,8 +159,9 @@ The provider flag is the consent boundary. Before running a provider, the
 command prints the repository and PR number, immutable base and head commits,
 selected runner, and destination. Choosing `--codex` or `--claude` explicitly
 means the PR title, body, review context, complete diff, and relevant source can
-be sent to that provider's installed subscription CLI. There is no API-key,
-Pi, nullsink, or direct provider-API mode.
+be sent to that provider's installed subscription CLI, in at most four calls per
+run — triage, author, slop, and repair — and the printed consent text states
+that maximum. There is no API-key, Pi, nullsink, or direct provider-API mode.
 
 The provider runs inside the development VM cage. Provider API credentials and
 routing overrides, cloud-provider credentials and routing switches, and Forge
@@ -157,8 +219,13 @@ network-capable markup, external resources, modified template CSS or JavaScript,
 secret-looking content, provenance that does not match the snapshot, malformed
 or dangling anchors, an incomplete document shell, and broken accessibility,
 mobile-flow, reduced-motion, quiz, diagram, table, or code-whitespace contracts.
-Content heuristics can be reported separately as advisory warnings; they are
-prompts for human review, not substitutes for the mechanical safety checks.
+The v2 shape adds its own hard errors: a missing reading-cost line, a missing or
+out-of-order layer or objectives block, an objective no section or quiz item
+claims, an out-of-range quiz count or unbalanced answer letters, banned AI-slop
+vocabulary, and a sentence-opening pattern repeated four or more times. Content
+heuristics — hedge density among them — can be reported separately as advisory
+warnings; they are prompts for human review, not substitutes for the mechanical
+safety checks.
 
 The secret-looking-content check matches a closed set of well-known credential
 shapes (cloud and forge tokens, private-key headers, JWTs, long base64 blobs)
@@ -184,21 +251,23 @@ every cage postcondition is re-checked afterward: the staged body is captured
 safely, the immutable snapshot must be unchanged, and the detached job checkout
 must still be clean at the snapshotted head.
 
-The loop is bounded, not adaptive. One run makes **at most two provider calls**:
+The loop is bounded, not adaptive. One run makes **at most four provider
+calls** — triage, author, slop, and repair:
 
 | Run | Provider calls |
 |---|---|
 | `--dry-run` | 0 |
-| First body validates | 1 |
-| First body fails, repair validates | 2 |
-| First body fails, repaired body fails | 2, then the run fails |
+| Triage answers `T0`, no `--force-tier` | 1 |
+| Body validates | 3 (2 with `--no-slop`) |
+| Body fails, repair validates | 4 (3 with `--no-slop`) |
+| Body fails, repaired body fails | 4, then the run fails |
 
 A second validation failure is final. Both passes' diagnostics, prompts, runner
 logs, and captured bodies stay in the preserved job directory, and any previous
 report is left byte-for-byte untouched. Since the provider flag already consents
 to this PR and this provider, the repair pass discloses nothing new — but it does
-cost a second call against your subscription. Pass `--no-repair` when you want
-strict one-call cost control; the run then fails on the first validation failure
+cost one more call against your subscription. Pass `--no-repair` when you want
+strict cost control; the run then fails on the first validation failure
 and still preserves the diagnostics.
 
 Repair does not weaken any contract. The repaired report is assembled and
@@ -209,10 +278,11 @@ a long component gallery on an on-demand run.
 On success, the private job directory and detached checkout are removed. On a
 runner failure, missing output, or validation failure, the command prints and
 preserves the `.allod-pr-explain.*` job directory beside the destination so you
-can inspect the prompt, runner logs, snapshot, discussion, complete diff, and
-rejected staging file alongside the validator diagnostics. Each pass keeps its
-own artifacts there: `runner.stdout`/`runner.stderr` and
-`report-body.captured.html` for the initial call, and `repair-prompt.md`,
+can inspect the prompts, runner logs, snapshot, discussion, complete diff,
+triage verdict, and rejected staging file alongside the validator diagnostics.
+Each pass keeps its own artifacts there: the triage verdict in `triage.json`,
+`runner.stdout`/`runner.stderr` and `report-body.captured.html` for the
+authoring call, the tightened body captured after the slop pass, and `repair-prompt.md`,
 `runner.repair.stdout`/`runner.repair.stderr`, and
 `report-body.repair.captured.html` for the repair pass, with the
 diagnostics that triggered each in `validation.diagnostics.txt` and

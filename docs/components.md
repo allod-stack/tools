@@ -15,12 +15,12 @@ The fragment uses a deliberately small authoring grammar so the shell can valida
 
 ## Start with the reader's route
 
-Every report opens with a masthead and an operator summary. The summary answers five fixed questions: what merging changes now, what exists afterward, what the evidence proves, what remains unproven, and how to reject or roll back. It is followed by an authored table of contents and one long `main` landmark.
+Every report opens with a masthead and an operator summary. The masthead ends with a reading-cost line, `p.rx-cost`, that prices the stopping points in plain words — "Summary: 1 minute. Concepts: 4 minutes. Full mechanism: 12 minutes." — and must be non-empty and contain the word "minute". The summary is the decision layer: it answers five fixed questions — what merging changes now, what exists afterward, what the evidence proves, what remains unproven, and how to reject or roll back. It is followed by an authored table of contents and one long `main` landmark.
 
 Each main section starts with a heading and `p.rx-claim`. That paragraph states the point before the section asks the reader to inspect evidence. Narrative paragraphs need no class and stay at a readable measure; figures can use the full report column.
 
 ```html
-<section id="behavior" aria-labelledby="behavior-h">
+<section id="behavior" aria-labelledby="behavior-h" data-layer="concept" data-objective="obj-1">
   <h2 id="behavior-h">The new gate runs before work begins</h2>
   <p class="rx-claim">A failed precondition now ends the request before any durable state exists.</p>
   <p>Begin with a concrete trace, then generalize from it.</p>
@@ -28,6 +28,26 @@ Each main section starts with a heading and `p.rx-claim`. That paragraph states 
 ```
 
 The template is a vocabulary, not a diagram checklist. Use a component only when deleting it would remove information or force the reader to hold more state in working memory. Reusing one diagram family several times is usually easier to learn than showing every available component once.
+
+## Layers and objectives
+
+The first section inside `main` is the objectives block: `section#objectives` with `data-layer="concept"`, an `h2`, one `p.rx-claim`, and an `ol.rx-objectives` whose `li#obj-N` items restate the triage objectives in reader-facing plain English, with the same ids in the same order.
+
+```html
+<section id="objectives" aria-labelledby="objectives-h" data-layer="concept">
+  <h2 id="objectives-h">What you can do after reading</h2>
+  <p class="rx-claim">Every section and quiz item below serves one of these objectives.</p>
+  <ol class="rx-objectives">
+    <li id="obj-1">After reading you can predict which requests the new gate rejects.</li>
+    <li id="obj-2">You can trace a rejected request to the exact check that stopped it.</li>
+    <li id="obj-3">You can decide whether the migration is safe to run twice.</li>
+  </ol>
+</section>
+```
+
+Every direct `section` child of `main` carries `data-layer` with value `concept`, `mechanism`, or `receipts`, and document order is non-decreasing in that layer order, with at least one concept section. The reader must be able to stop at the end of any layer and be correct at that resolution: concept sections build the mental model, mechanism sections show how the code achieves it, and receipts sections hold exhaustive detail — exact commands, edge-case tables — often behind `details.rx-more`.
+
+Every direct `section` child of `main` except `#objectives`, and every `figure.rx-figure`, carries `data-objective` naming one or more objective ids, space-separated; the attribute belongs nowhere else. Every listed id must exist in the objectives block, and every objective must be claimed by at least one section and tested by at least one quiz item. Content that serves no objective is a defect: the deletion-only slop pass removes it.
 
 ## Figures and captions
 
@@ -161,7 +181,7 @@ Callouts have a closed role vocabulary: `definition`, `intuition`, `misconceptio
 
 Use callouts sparingly. If everything is emphasized, the reader receives no signal about priority.
 
-`details.rx-more` holds skippable depth. `details.rx-predict` asks the reader to commit to a prediction before revealing the result. Every summary must describe what opening it reveals. A `dfn.rx-term[id]` can define a term once; later `a.rx-termref` links return to it.
+`details.rx-more` holds skippable depth. `details.rx-predict` asks the reader to commit to a prediction before revealing the result; in concept and mechanism sections the author places one immediately before each important reveal. Every summary must describe what opening it reveals. A `dfn.rx-term[id]` can define a term once; later `a.rx-termref` links return to it.
 
 All native disclosure remains usable without JavaScript. Print CSS and a print enhancement expand closed details so hidden screen state does not become missing paper content.
 
@@ -173,10 +193,10 @@ A `table.rx-compare` keeps native table layout at every width. Put it in `div.rx
 
 ## Quiz
 
-The final quiz contains exactly five items with four choices each. Each choice is a native `details.rx-choice`, so selecting it can reveal instructional feedback when scripts are disabled.
+A report contains three to seven quiz items with four choices each. An item may sit at the end of any `main` section, right after the teaching it tests, or in a final quiz section; either way it is a direct child of its section. Every item names the triage concept it tests in `data-concept` and exactly one objective id in `data-objective`. Each choice is a native `details.rx-choice`, so selecting it can reveal instructional feedback when scripts are disabled.
 
 ```html
-<article class="rx-quiz-item" id="q1">
+<article class="rx-quiz-item" id="q1" data-concept="snapshot-verification" data-objective="obj-1">
   <h3>What happens when the fetched commit differs from the snapshot?</h3>
   <ul class="rx-choices">
     <li><details class="rx-choice" name="q1" data-correct="false" data-misconception="treats movement as a warning">
@@ -204,7 +224,7 @@ Every item has one correct choice. Every incorrect choice names the specific mis
 
 After the first enhanced selection, the chosen disclosure remains operable so its feedback can be collapsed and reopened. Unselected choices receive disabled semantics and leave the tab order, while the polite result region announces both the result and that the answer is locked. With scripts disabled, all four native disclosures and every explanation remain available.
 
-The prompt owns the question-writing discipline: quiz last, application before recall, answer and rationale before distractors, balanced option shape, A–D once across the first four keys, and a runtime-randomized fifth key.
+The prompt owns the question-writing discipline: quiz last, application before recall, answer and rationale before distractors, balanced option shape, and correct positions spread so that no answer letter is correct more than twice across all items.
 
 ## Provenance
 

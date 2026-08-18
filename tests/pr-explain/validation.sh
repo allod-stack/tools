@@ -161,7 +161,7 @@ validation_failure "$SABOTAGE" 'E19.*secret-looking' \
 
 SECRET_PROSE_FRAGMENT="$CASE_DIR/secret-prose-fragment.html"
 cat > "$SECRET_PROSE_FRAGMENT" <<'HTML'
-<section id="auth-notes" aria-labelledby="auth-notes-h">
+<section id="auth-notes" aria-labelledby="auth-notes-h" data-layer="receipts" data-objective="obj-2">
   <h2 id="auth-notes-h">Authentication prose does not read as a credential</h2>
   <p class="rx-claim">Naming a credential field is not the same as quoting its value.</p>
   <p>The form asks for a password: it must be at least twelve characters and one number.</p>
@@ -358,10 +358,10 @@ validation_failure "$SABOTAGE" 'script|template|fetch|network' \
 # CSS-behavior heuristics would otherwise mistake for live report content.
 CODEWALK_FRAGMENT="$CASE_DIR/codewalk-fragment.html"
 cat > "$CODEWALK_FRAGMENT" <<'HTML'
-<section id="frontend-diff" aria-labelledby="frontend-diff-h">
+<section id="frontend-diff" aria-labelledby="frontend-diff-h" data-layer="receipts" data-objective="obj-2 obj-3">
   <h2 id="frontend-diff-h">The frontend diff moved presentation into the stylesheet</h2>
   <p class="rx-claim">Quoting the removed markup and CSS verbatim shows exactly what the change deleted.</p>
-  <figure class="rx-figure rx-codewalk" id="cw-diff">
+  <figure class="rx-figure rx-codewalk" id="cw-diff" data-objective="obj-3">
     <div class="rx-scroll" role="region" tabindex="0" aria-label="Removed inline presentation">
       <pre class="rx-code" data-lang="html"><code>&lt;button style="color:red" onclick="handleClick()"&gt;Send&lt;/button&gt;
 <mark class="rx-hl" id="cw-diff-h1">.rx-old { background: url(sprite.png); transform: rotate(45deg); }</mark>
@@ -385,7 +385,7 @@ assert_success \
 # same dangerous substring outside a code element must still fail.
 LIVE_FRAGMENT="$CASE_DIR/live-fragment.html"
 cat > "$LIVE_FRAGMENT" <<'HTML'
-<section id="prose-leak" aria-labelledby="prose-leak-h">
+<section id="prose-leak" aria-labelledby="prose-leak-h" data-layer="receipts" data-objective="obj-2">
   <h2 id="prose-leak-h">A prose leak is not a code quotation</h2>
   <p class="rx-claim">Prose describing behavior is not the same as quoting exact removed code.</p>
   <p>The removed rule used url(https://outside.example/track.gif) to load a tracking pixel.</p>
@@ -401,7 +401,7 @@ validation_failure "$SABOTAGE" 'style|css|import|template|network|resource' \
 # on a real element — not quoted text — and must still fail.
 NESTED_LIVE_FRAGMENT="$CASE_DIR/nested-live-fragment.html"
 cat > "$NESTED_LIVE_FRAGMENT" <<'HTML'
-<figure class="rx-figure rx-codewalk" id="cw-evil">
+<figure class="rx-figure rx-codewalk" id="cw-evil" data-objective="obj-1">
   <div class="rx-scroll" role="region" tabindex="0" aria-label="Evil nested style">
     <pre class="rx-code" data-lang="html"><code><mark class="rx-hl" id="cw-evil-h1" style="color:red">live text</mark></code></pre>
   </div>
@@ -453,5 +453,244 @@ UNICODE_REPORT="$CASE_DIR/unicode-report.html"
 splice_before_main_close "$VALID_REPORT" "$UNICODE_FRAGMENT" "$UNICODE_REPORT"
 capture "$ALLOD" pr _validate-report "$UNICODE_REPORT" "$SNAPSHOT" codex
 assert_success "accepts ordinary Unicode prose (accents, CJK, em dash, emoji)"
+
+# v2 grammar: reading-cost line (E21), layers (E22), objectives block (E23),
+# objective coverage (E24), quiz v2 additions (E10), and the slop linter
+# (E25 errors, W13 warning). Each probe breaks exactly one new contract in an
+# otherwise valid report.
+
+# One structurally complete quiz item for count/balance sabotage: the given
+# answer letter is correct, everything else satisfies the item grammar, and
+# the prose is parametrized by item number so appended copies cannot trip the
+# repeated-trigram detector on their own.
+write_extra_quiz_item_fragment() {
+  local fragment="$1" n="$2" correct_letter="$3"
+  local letter attrs
+  {
+    printf '<article class="rx-quiz-item" id="q%s" data-concept="staged-report-boundary" data-objective="obj-1">\n' "$n"
+    printf '<h3>%s. Which appended question number %s keeps the retrieval shape lawful?</h3>\n' "$n" "$n"
+    printf '<ul class="rx-choices">\n'
+    for letter in A B C D; do
+      if [[ "$letter" == "$correct_letter" ]]; then
+        attrs='data-correct="true"'
+        printf '<li><details class="rx-choice" name="q%s" %s><summary>%s. Synthetic key %s for appended item %s</summary><p>Correct. Appended item %s keeps its explanation specific to this synthetic retrieval question.</p></details></li>\n' \
+          "$n" "$attrs" "$letter" "$letter" "$n" "$n"
+      else
+        attrs="data-correct=\"false\" data-misconception=\"distractor $letter of item $n\""
+        printf '<li><details class="rx-choice" name="q%s" %s><summary>%s. Synthetic distractor %s for appended item %s</summary><p>Not quite. Distractor %s of item %s exists only to keep the quiz shape lawful.</p></details></li>\n' \
+          "$n" "$attrs" "$letter" "$letter" "$n" "$letter" "$n"
+      fi
+    done
+    printf '</ul>\n'
+    printf '<p class="rx-quiz-result" aria-live="polite"></p>\n'
+    printf '</article>\n'
+  } > "$fragment"
+}
+
+# Drop one quiz item (article open tag through its closing tag) from a report.
+remove_quiz_item() {
+  local file="$1" quiz_id="$2"
+  local trimmed="$file.trimmed"
+  awk -v id="id=\"$quiz_id\"" '
+    index($0, "<article class=\"rx-quiz-item\"") && index($0, id) { skip = 1 }
+    skip { if (index($0, "</article>")) skip = 0; next }
+    { print }
+  ' "$file" > "$trimmed"
+  mv "$trimmed" "$file"
+}
+
+sabotage_copy cost-missing
+sed -i '/<p class="rx-cost">/d' "$SABOTAGE"
+validation_failure "$SABOTAGE" 'rx-cost|reading-cost' \
+  "rejects a masthead with no reading-cost line (E21)"
+
+sabotage_copy cost-before-lede
+sed -i 's#<p class="rx-lede">#<p class="rx-cost">Summary: 1 minute.</p>\n<p class="rx-lede">#' "$SABOTAGE"
+sed -i '/Full mechanism and quiz: 8 minutes/d' "$SABOTAGE"
+validation_failure "$SABOTAGE" 'rx-cost.*after|after p.rx-lede' \
+  "rejects a reading-cost line placed before the lede (E21)"
+
+sabotage_copy cost-outside-masthead
+sed -i 's#<p>The complete diff and surrounding code supply the evidence for this explanation.</p>#&\n    <p class="rx-cost">Concepts: 3 minutes.</p>#' "$SABOTAGE"
+validation_failure "$SABOTAGE" 'only inside the masthead' \
+  "rejects a second reading-cost line outside the masthead (E21)"
+
+sabotage_copy cost-without-minutes
+sed -i 's#Summary: 1 minute. Concepts: 3 minutes. Full mechanism and quiz: 8 minutes.#Summary: fast. Concepts: quick. Full mechanism: brisk.#' "$SABOTAGE"
+validation_failure "$SABOTAGE" "minute" \
+  "rejects a reading-cost line that never states minutes (E21)"
+
+sabotage_copy layer-missing
+sed -i 's# data-layer="concept" data-objective="obj-1 obj-3"# data-objective="obj-1 obj-3"#' "$SABOTAGE"
+validation_failure "$SABOTAGE" 'missing its data-layer' \
+  "rejects a main section with no data-layer (E22)"
+
+sabotage_copy layer-unknown
+sed -i 's#data-layer="concept" data-objective="obj-1 obj-3"#data-layer="overview" data-objective="obj-1 obj-3"#' "$SABOTAGE"
+validation_failure "$SABOTAGE" 'unknown data-layer' \
+  "rejects an unknown data-layer value (E22)"
+
+sabotage_copy layer-order
+sed -i 's#data-layer="concept" data-objective="obj-1 obj-3"#data-layer="receipts" data-objective="obj-1 obj-3"#' "$SABOTAGE"
+sed -i 's#data-layer="receipts" data-objective="obj-1 obj-2 obj-3"#data-layer="mechanism" data-objective="obj-1 obj-2 obj-3"#' "$SABOTAGE"
+validation_failure "$SABOTAGE" 'non-decreasing' \
+  "rejects layers out of concept, mechanism, receipts order (E22)"
+
+sabotage_copy layer-no-concept
+sed -i 's#data-layer="concept"#data-layer="mechanism"#g' "$SABOTAGE"
+validation_failure "$SABOTAGE" 'at least one|concept' \
+  "rejects a main with no concept-layer section (E22)"
+
+LAYER_MISPLACED_FRAGMENT="$CASE_DIR/layer-misplaced-fragment.html"
+printf '<p data-layer="concept">A stray layered paragraph outside any section.</p>\n' \
+  > "$LAYER_MISPLACED_FRAGMENT"
+sabotage_copy layer-misplaced
+splice_before_main_close "$SABOTAGE" "$LAYER_MISPLACED_FRAGMENT" "$CASE_DIR/layer-misplaced-spliced.html"
+mv "$CASE_DIR/layer-misplaced-spliced.html" "$SABOTAGE"
+validation_failure "$SABOTAGE" 'direct section children' \
+  "rejects data-layer on anything but a direct main section (E22)"
+
+sabotage_copy objectives-section-missing
+sed -i 's#<section id="objectives" aria-labelledby="objectives-h" data-layer="concept">#<section id="goals" aria-labelledby="objectives-h" data-layer="concept">#' "$SABOTAGE"
+validation_failure "$SABOTAGE" 'objectives' \
+  "rejects a main that does not open with the #objectives section (E23)"
+
+sabotage_copy objective-bad-id
+sed -i 's#<li id="obj-2">#<li id="objective-2">#' "$SABOTAGE"
+validation_failure "$SABOTAGE" 'obj-N' \
+  "rejects an objective id outside the obj-N shape (E23)"
+
+sabotage_copy objective-ids-out-of-order
+sed -i 's#<li id="obj-1">#<li id="obj-9">#' "$SABOTAGE"
+validation_failure "$SABOTAGE" 'unique and ascending' \
+  "rejects objective ids out of ascending order (E23)"
+
+sabotage_copy objectives-duplicate-list
+sed -i 's#<li id="obj-3">You can trace every provenance field back to the immutable snapshot.</li>#&</ol><ol class="rx-objectives">#' "$SABOTAGE"
+validation_failure "$SABOTAGE" 'exactly one ol.rx-objectives' \
+  "rejects a second rx-objectives list inside #objectives (E23)"
+
+STRAY_OBJECTIVES_FRAGMENT="$CASE_DIR/stray-objectives-fragment.html"
+printf '<ol class="rx-objectives"><li id="obj-8">A stray objectives list entry outside the block.</li></ol>\n' \
+  > "$STRAY_OBJECTIVES_FRAGMENT"
+sabotage_copy objectives-list-outside-block
+splice_before_main_close "$SABOTAGE" "$STRAY_OBJECTIVES_FRAGMENT" "$CASE_DIR/stray-objectives-spliced.html"
+mv "$CASE_DIR/stray-objectives-spliced.html" "$SABOTAGE"
+validation_failure "$SABOTAGE" "allowed only inside '#objectives'|rx-objectives" \
+  "rejects an rx-objectives list outside #objectives (E23)"
+
+sabotage_copy objective-ref-unknown
+sed -i 's#data-objective="obj-1 obj-3"#data-objective="obj-1 obj-9"#' "$SABOTAGE"
+validation_failure "$SABOTAGE" 'unknown objective' \
+  "rejects a data-objective naming an id the block never declares (E24)"
+
+sabotage_copy section-without-objective
+sed -i 's# data-objective="obj-1 obj-3"##' "$SABOTAGE"
+validation_failure "$SABOTAGE" 'must declare the objectives it serves' \
+  "rejects a main section with no data-objective (E24)"
+
+UNTAGGED_FIGURE_FRAGMENT="$CASE_DIR/untagged-figure-fragment.html"
+cat > "$UNTAGGED_FIGURE_FRAGMENT" <<'HTML'
+<figure class="rx-figure"><p>A quiet supporting exhibit with no declared objective.</p><figcaption class="rx-caption">This figure omits the objective tag it owes the checker.</figcaption></figure>
+HTML
+sabotage_copy figure-without-objective
+splice_before_main_close "$SABOTAGE" "$UNTAGGED_FIGURE_FRAGMENT" "$CASE_DIR/figure-without-objective-spliced.html"
+mv "$CASE_DIR/figure-without-objective-spliced.html" "$SABOTAGE"
+validation_failure "$SABOTAGE" 'figure.*data-objective|declare the objectives' \
+  "rejects an rx-figure with no data-objective (E24)"
+
+sabotage_copy objective-without-section-claim
+sed -i 's#<li id="obj-3">You can trace every provenance field back to the immutable snapshot.</li>#&\n      <li id="obj-4">You can audit the coverage checker from its own reports.</li>#' "$SABOTAGE"
+sed -i 's#id="q5" data-concept="staged-report-boundary" data-objective="obj-2"#id="q5" data-concept="staged-report-boundary" data-objective="obj-4"#' "$SABOTAGE"
+validation_failure "$SABOTAGE" 'not claimed by any main section' \
+  "rejects an objective no section claims (E24)"
+
+sabotage_copy objective-without-quiz-claim
+sed -i 's#<li id="obj-3">You can trace every provenance field back to the immutable snapshot.</li>#&\n      <li id="obj-4">You can audit the coverage checker from its own reports.</li>#' "$SABOTAGE"
+sed -i 's#data-objective="obj-1 obj-3"#data-objective="obj-1 obj-3 obj-4"#' "$SABOTAGE"
+validation_failure "$SABOTAGE" 'not tested by any quiz item' \
+  "rejects an objective no quiz item tests (E24)"
+
+sabotage_copy quiz-missing-concept
+sed -i 's# id="q1" data-concept="snapshot-immutability"# id="q1"#' "$SABOTAGE"
+validation_failure "$SABOTAGE" 'data-concept' \
+  "rejects a quiz item with no data-concept (E10)"
+
+sabotage_copy quiz-multi-objective
+sed -i 's#id="q1" data-concept="snapshot-immutability" data-objective="obj-1"#id="q1" data-concept="snapshot-immutability" data-objective="obj-1 obj-2"#' "$SABOTAGE"
+validation_failure "$SABOTAGE" 'exactly one objective id' \
+  "rejects a quiz item claiming more than one objective (E10)"
+
+EXTRA_QUIZ_FRAGMENT="$CASE_DIR/extra-quiz-item-6.html"
+write_extra_quiz_item_fragment "$EXTRA_QUIZ_FRAGMENT" 6 A
+sabotage_copy quiz-letter-thrice
+splice_before_main_close "$SABOTAGE" "$EXTRA_QUIZ_FRAGMENT" "$CASE_DIR/quiz-letter-thrice-spliced.html"
+mv "$CASE_DIR/quiz-letter-thrice-spliced.html" "$SABOTAGE"
+validation_failure "$SABOTAGE" 'answer position A.*more than twice' \
+  "rejects one answer letter correct three times across the quiz (E10)"
+
+sabotage_copy quiz-two-items
+remove_quiz_item "$SABOTAGE" q3
+remove_quiz_item "$SABOTAGE" q4
+remove_quiz_item "$SABOTAGE" q5
+validation_failure "$SABOTAGE" 'between three and seven' \
+  "rejects a report with only two quiz items (E10)"
+
+sabotage_copy quiz-eight-items
+for extra_item_n in 6 7 8; do
+  case "$extra_item_n" in
+    6) extra_item_letter=B ;;
+    7) extra_item_letter=C ;;
+    8) extra_item_letter=D ;;
+  esac
+  write_extra_quiz_item_fragment "$CASE_DIR/extra-quiz-item-$extra_item_n.html" \
+    "$extra_item_n" "$extra_item_letter"
+  splice_before_main_close "$SABOTAGE" "$CASE_DIR/extra-quiz-item-$extra_item_n.html" \
+    "$CASE_DIR/quiz-eight-items-spliced.html"
+  mv "$CASE_DIR/quiz-eight-items-spliced.html" "$SABOTAGE"
+done
+validation_failure "$SABOTAGE" 'between three and seven' \
+  "rejects a report with eight quiz items (E10)"
+
+BANNED_PROSE_FRAGMENT="$CASE_DIR/banned-prose-fragment.html"
+printf '<p>These helpers utilize the shared cache aggressively.</p>\n' > "$BANNED_PROSE_FRAGMENT"
+sabotage_copy slop-banned-vocabulary
+splice_before_main_close "$SABOTAGE" "$BANNED_PROSE_FRAGMENT" "$CASE_DIR/slop-banned-spliced.html"
+mv "$CASE_DIR/slop-banned-spliced.html" "$SABOTAGE"
+validation_failure "$SABOTAGE" 'banned vocabulary' \
+  "rejects AI-slop vocabulary in visible prose (E25)"
+
+# The same banned word quoted inside <code> is evidence, not prose, and the
+# linter strips quoted code before matching — it must not fire.
+BANNED_CODE_FRAGMENT="$CASE_DIR/banned-code-fragment.html"
+printf '<p>The linter once flagged <code>utilize</code> inside quoted identifiers.</p>\n' \
+  > "$BANNED_CODE_FRAGMENT"
+BANNED_CODE_REPORT="$CASE_DIR/banned-code-report.html"
+splice_before_main_close "$VALID_REPORT" "$BANNED_CODE_FRAGMENT" "$BANNED_CODE_REPORT"
+capture "$ALLOD" pr _validate-report "$BANNED_CODE_REPORT" "$SNAPSHOT" codex
+assert_success "accepts a banned word quoted inside a code element; the slop linter reads prose only"
+
+TRIGRAM_FRAGMENT="$CASE_DIR/trigram-fragment.html"
+printf '<p>The cache holds every entry. The cache holds one shard. The cache holds stale rows. The cache holds warm keys.</p>\n' \
+  > "$TRIGRAM_FRAGMENT"
+sabotage_copy slop-repeated-trigram
+splice_before_main_close "$SABOTAGE" "$TRIGRAM_FRAGMENT" "$CASE_DIR/slop-trigram-spliced.html"
+mv "$CASE_DIR/slop-trigram-spliced.html" "$SABOTAGE"
+validation_failure "$SABOTAGE" 'sentence opening.*repeats' \
+  "rejects the same sentence-opening trigram repeated four times (E25)"
+
+# Hedge density is a warning, not an error: the report still validates, and
+# W13 names the density in the diagnostic stream.
+HEDGE_FRAGMENT="$CASE_DIR/hedge-fragment.html"
+printf '<p>This paragraph hedges on purpose for the density check. The retry may stall. The cache might drift. The lock could starve. Perhaps the queue wraps. The clock is arguably wrong. The index will likely rot. The mirror may lag. The probe might misfire. The scan could skip. The write may block. The read might tear. The sync could stall.</p>\n' \
+  > "$HEDGE_FRAGMENT"
+HEDGE_REPORT="$CASE_DIR/hedge-report.html"
+splice_before_main_close "$VALID_REPORT" "$HEDGE_FRAGMENT" "$HEDGE_REPORT"
+capture "$ALLOD" pr _validate-report "$HEDGE_REPORT" "$SNAPSHOT" codex
+assert_success "hedge-dense prose still validates; density is advisory"
+assert_contains "$CAPTURE_OUTPUT" "W13" \
+  "warns with W13 when hedges exceed four per five hundred words"
+assert_contains "$CAPTURE_OUTPUT" "commit to what the evidence supports" \
+  "the hedge warning tells the author what to do instead"
 
 finish_tests "PR explanation report validator"
