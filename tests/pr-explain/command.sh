@@ -369,7 +369,13 @@ for signal_case in INT TERM; do
   signal_output="$CASE_DIR/output/report.html"
   signal_log="$CASE_DIR/command.log"
   signal_status="$CASE_DIR/status"
-  setsid bash -c 'cd "$1"; "$2" pr explain 7 --codex -R acme/widget --output "$3"; printf "%s\n" "$?" > "$4"' \
+  # Launch with default signal dispositions. A plain backgrounded launch
+  # inherits SIGINT ignored (the POSIX background rule), bash cannot trap a
+  # signal that was ignored at entry, and the interruption under test then
+  # never happens: an attended live probe caught this case passing vacuously,
+  # with the harness itself killing the provider the trap is supposed to kill.
+  setsid env --default-signal=SIGINT,SIGQUIT bash -c \
+    'cd "$1"; "$2" pr explain 7 --codex -R acme/widget --output "$3"; printf "%s\n" "$?" > "$4"' \
     _ "$TEST_TMP/checkout" "$ALLOD" "$signal_output" "$signal_status" >"$signal_log" 2>&1 &
   signal_group_pid=$!
   for _ in $(seq 1 100); do
@@ -382,17 +388,32 @@ for signal_case in INT TERM; do
   provider_pid=$(pgrep -P "$signal_pid" | head -1)
   [[ -n "$provider_pid" ]] || fail "finds the provider process for $signal_case"
   kill -s "$signal_case" "$signal_pid"
-  sleep 0.1
-  kill -TERM "$provider_pid" 2>/dev/null || true
   for _ in $(seq 1 100); do
     [[ -f "$signal_status" ]] && break
     sleep 0.05
   done
   [[ -f "$signal_status" ]] || fail "$signal_case interruption returns control to the harness"
+  for _ in $(seq 1 100); do
+    kill -0 "$provider_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  if kill -0 "$provider_pid" 2>/dev/null; then
+    kill -TERM "$provider_pid" 2>/dev/null || true
+    fail "$signal_case interruption terminates the provider process"
+  else
+    pass "$signal_case interruption terminates the provider process"
+  fi
   CAPTURE_STATUS=$(cat "$signal_status")
   wait "$signal_group_pid" 2>/dev/null || true
   CAPTURE_OUTPUT=$(cat "$signal_log")
-  assert_failure "$signal_case interruption exits non-zero"
+  case "$signal_case" in
+    INT) expected_signal_status=130 ;;
+    TERM) expected_signal_status=143 ;;
+  esac
+  assert_equal "$CAPTURE_STATUS" "$expected_signal_status" \
+    "$signal_case interruption exits with status $expected_signal_status"
+  assert_contains "$CAPTURE_OUTPUT" "interrupted by SIG$signal_case" \
+    "$signal_case interruption names the signal in its diagnosis"
   assert_file_absent "$signal_output" "$signal_case interruption publishes no report"
   assert_contains "$CAPTURE_OUTPUT" "diagnostics preserved" \
     "$signal_case interruption is diagnosed"
