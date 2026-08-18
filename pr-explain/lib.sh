@@ -1647,6 +1647,37 @@ pr_explain_strip_quoted_code() {
   ' "$1"
 }
 
+# Emit every markup tag in the document as "line<TAB>tag", excluding all text
+# content and the canonical template style/script payloads (their own open and
+# close tags are kept). Identifier and reference accounting runs on this
+# stream, so an attribute-shaped string in quoted code or prose (for example
+# `PID=""` in a shell codewalk) never counts as markup.
+pr_explain_report_tags() {
+  awk '
+    $0 == "<style id=\"rx-template-css\">" { printf "%d\t%s\n", NR, $0; in_style = 1; next }
+    in_style && $0 == "</style>" { printf "%d\t%s\n", NR, $0; in_style = 0; next }
+    in_style { next }
+    $0 == "<script id=\"rx-template-js\">" { printf "%d\t%s\n", NR, $0; in_script = 1; next }
+    in_script && $0 == "</script>" { printf "%d\t%s\n", NR, $0; in_script = 0; next }
+    in_script { next }
+    {
+      rest = $0
+      while (match(rest, /<[^>]*>/)) {
+        printf "%d\t%s\n", NR, substr(rest, RSTART, RLENGTH)
+        rest = substr(rest, RSTART + RLENGTH)
+      }
+    }
+  ' "$1"
+}
+
+# Count case-insensitive matches of an extended regex in a string, mirroring
+# pr_explain_count_regex for material already extracted from the report.
+pr_explain_count_stream_regex() {
+  local stream="$1" regex="$2" count
+  count=$(grep -Eio "$regex" <<<"$stream" 2>/dev/null | wc -l) || true
+  printf '%s\n' "${count//[[:space:]]/}"
+}
+
 pr_explain_validate_report() {
   local report="$1" snapshot_file="$2" runner="$3"
   local repository number pr_url pr_title base_sha head_sha
@@ -1661,7 +1692,7 @@ pr_explain_validate_report() {
   local codewalk_count notes_count note_count highlight_count role_count table_count compare_count
   local details_count disclosure_count summary_count stat_group_count stat_count card_count
   local tabindex_count preview_scroll_count
-  local class_value class_name id ref value role state field
+  local class_value class_name id ref value role state field report_tags line_no
   local generated_date slop_prose
 
   PR_EXPLAIN_VALIDATION_ERRORS=()
@@ -1891,6 +1922,7 @@ pr_explain_validate_report() {
     done
   done < <(grep -Eo 'class="[^"]+"' "$report" 2>/dev/null || true)
 
+  report_tags=$(pr_explain_report_tags "$report")
   declare -A seen_ids=()
   while IFS=: read -r line_no value; do
     id="${value#id=\"}"
@@ -1901,11 +1933,19 @@ pr_explain_validate_report() {
     else
       seen_ids["$id"]="$line_no"
     fi
-  done < <(grep -noE 'id="[A-Za-z][A-Za-z0-9_.:-]*"' "$report" 2>/dev/null || true)
-  count=$(pr_explain_count_regex "$report" 'id="[^"]*"')
+  done < <(awk '{
+      idx = index($0, "\t")
+      line = substr($0, 1, idx - 1)
+      tag = substr($0, idx + 1)
+      while (match(tag, /id="[A-Za-z][A-Za-z0-9_.:-]*"/)) {
+        printf "%s:%s\n", line, substr(tag, RSTART, RLENGTH)
+        tag = substr(tag, RSTART + RLENGTH)
+      }
+    }' <<<"$report_tags" 2>/dev/null || true)
+  count=$(pr_explain_count_stream_regex "$report_tags" 'id="[^"]*"')
   [[ "$count" -eq "${#seen_ids[@]}" ]] ||
     pr_explain_validation_error E3 "every id must be non-empty and use the canonical identifier syntax"
-  if grep -qE "(id|href|aria-labelledby|aria-describedby)[[:space:]]*=[[:space:]]*'" "$report"; then
+  if grep -qE "(id|href|aria-labelledby|aria-describedby)[[:space:]]*=[[:space:]]*'" <<<"$report_tags"; then
     pr_explain_validation_error E3 "ID and reference attributes must use double quotes"
   fi
   while IFS= read -r value; do
@@ -1913,9 +1953,9 @@ pr_explain_validate_report() {
     ref="${ref%\"}"
     [[ -n "$ref" && -n "${seen_ids[$ref]:-}" ]] ||
       pr_explain_validation_error E3 "dangling fragment link '#$ref'"
-  done < <(grep -Eo 'href="#[^"]*"' "$report" 2>/dev/null || true)
-  count=$(pr_explain_count_regex "$report" '<a([[:space:]>])')
-  ref=$(pr_explain_count_regex "$report" '<a[^>]+href="#[^"]+"')
+  done < <(grep -Eo 'href="#[^"]*"' <<<"$report_tags" 2>/dev/null || true)
+  count=$(pr_explain_count_stream_regex "$report_tags" '<a([[:space:]>])')
+  ref=$(pr_explain_count_stream_regex "$report_tags" '<a[^>]+href="#[^"]+"')
   [[ "$count" -eq "$ref" ]] || pr_explain_validation_error E2 "anchors must use non-empty same-document fragments"
   while IFS= read -r value; do
     value="${value#*=\"}"
@@ -1923,7 +1963,7 @@ pr_explain_validate_report() {
     for ref in $value; do
       [[ -n "${seen_ids[$ref]:-}" ]] || pr_explain_validation_error E3 "dangling accessibility reference '$ref'"
     done
-  done < <(grep -Eo '(aria-labelledby|aria-describedby|data-hl)="[^"]+"' "$report" 2>/dev/null || true)
+  done < <(grep -Eo '(aria-labelledby|aria-describedby|data-hl)="[^"]+"' <<<"$report_tags" 2>/dev/null || true)
 
   for value in what-changes-now what-exists-after evidence residual-risk how-to-reject; do
     count=$(pr_explain_count_regex "$report" "data-q=\"$value\"")

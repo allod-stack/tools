@@ -212,6 +212,30 @@ sed -i 's#<main id="rx-main">#<main id="background">#' "$SABOTAGE"
 validation_failure "$SABOTAGE" 'duplicate|id|background' \
   "rejects duplicate identifiers"
 
+# Quoted code makes attribute-shaped text (`PID=""`, `pid="worker-7"`,
+# `href="#local"`) look like identifiers to a whole-file scan, so identifier
+# and reference accounting must read markup tags only. The first attended v2
+# run failed exactly here: the report quoted the tool's own
+# `PR_EXPLAIN_PROVIDER_PID=""` line back at the validator.
+QUOTED_ATTR_FRAGMENT="$CASE_DIR/quoted-attr-fragment.html"
+cat > "$QUOTED_ATTR_FRAGMENT" <<'HTML'
+<section id="cage-quoting" aria-labelledby="cage-quoting-h" data-layer="receipts" data-objective="obj-2">
+  <h2 id="cage-quoting-h">Quoted code is text, not markup</h2>
+  <p class="rx-claim">Attribute-shaped strings inside quoted code never count as document identifiers.</p>
+  <p>The provider cage clears <code>PR_EXPLAIN_PROVIDER_PID=""</code> before it arms the trap, and quoted lines such as <code>pid="worker-7"</code> or <code>href="#local"</code> stay plain text.</p>
+</section>
+HTML
+QUOTED_ATTR_REPORT="$CASE_DIR/quoted-attr-report.html"
+splice_before_main_close "$VALID_REPORT" "$QUOTED_ATTR_FRAGMENT" "$QUOTED_ATTR_REPORT"
+capture "$ALLOD" pr _validate-report "$QUOTED_ATTR_REPORT" "$SNAPSHOT" codex
+assert_success \
+  "accepts attribute-shaped strings quoted inside code; id accounting reads tags only"
+
+sabotage_copy malformed-id
+sed -i '0,/<p class="rx-claim">/s//<p class="rx-claim" id="9lives">/' "$SABOTAGE"
+validation_failure "$SABOTAGE" 'canonical identifier' \
+  "still rejects a malformed id carried by a real markup tag"
+
 sabotage_copy broken-aria
 sed -i 's/aria-labelledby="background-h"/aria-labelledby="missing-heading"/' "$SABOTAGE"
 validation_failure "$SABOTAGE" 'aria|missing-heading|reference' \
