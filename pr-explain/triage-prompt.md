@@ -50,6 +50,7 @@ Pick the smallest tier whose absence would mislead a reviewer.
 ## Budget, concepts, questions, objectives
 
 - `budget` states what this change deserves, not what a template defaults to: `reading_minutes` for the full report and `max_sections` the author may use inside `main`. Small change, small budget.
+- Size `reading_minutes` for a reader who lacks every concept you list in `concepts` and will be taught them inside the report — not for a peer who skims. Missing prerequisites multiply reading time; they do not add to it.
 - `concepts` names each idea the reader needs: a kebab-case `slug` (quiz items will reference these), a display `name`, a `status` (`new` to this PR, `modified` by it, or unchanged `background`), and `gap` true when the intended reviewer probably lacks it.
 - `questions` is the inventory of developer questions this change raises. Draw on reachability — who calls this, can this path run before that check, what happens on the error arm — and on why-questions: why this design, why now, why not the obvious alternative. Record the real questions your investigation provoked, not generic templates.
 - `objectives` are verb-first capability claims tied to the merge decision: what the reader will be able to `predict`, `decide`, `diagnose`, `explain`, or `trace` about this change after reading. Each must be testable by one quiz item. Use ids `obj-1`, `obj-2`, ... in order. Write 3–7 for `T2` and `T3`, 1–3 for `T1`; a `T0` verdict may leave the list empty.

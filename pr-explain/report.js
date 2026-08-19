@@ -109,29 +109,23 @@
 
       plan.itemPlans.forEach(({ item, choices, result }) => {
         choices.forEach((choice) => {
-          const summary = choice.querySelector("summary");
-          summary.addEventListener("click", (event) => {
-            if (item.dataset.rxAnswered === "true" && choice.dataset.rxSelected !== "true") {
-              event.preventDefault();
-            }
-          });
           choice.addEventListener("toggle", () => {
             if (!choice.open || item.dataset.rxAnswered === "true") return;
             const correct = choice.dataset.correct === "true";
             item.dataset.rxAnswered = "true";
             item.dataset.rxCorrect = String(correct);
             choice.dataset.rxSelected = "true";
+            // Record the first answer, then set the explanations free. The
+            // shared name attribute is what makes the browser close one
+            // choice when another opens; removing it after the first answer
+            // lets the reader open and close every explanation at their
+            // leisure. Nothing is locked and correction is never withheld.
             choices.forEach((entry) => {
-              entry.dataset.rxLocked = "true";
-              if (entry !== choice) {
-                const lockedSummary = entry.querySelector("summary");
-                lockedSummary.setAttribute("aria-disabled", "true");
-                lockedSummary.tabIndex = -1;
-              }
+              entry.removeAttribute("name");
             });
             result.textContent = correct
-              ? "Correct. Answer locked; the revealed explanation states the governing rule."
-              : "Not quite. Answer locked; the revealed explanation identifies the misconception."
+              ? "Correct. Your first answer is recorded; open any choice to compare explanations."
+              : "Not quite. Your first answer is recorded; open the other choices for the misconception and the governing rule.";
             updateScore();
           });
         });

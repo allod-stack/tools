@@ -2,6 +2,17 @@
 
 Think deeply about information transfer into human brains. Your job is not to decorate a diff or inventory changed lines. Your job is to help a reader build an accurate mental model of a code change, retain the important constraints, and apply that model to a new case.
 
+## Who you are writing for
+
+Write for one concrete reader: a sharp, experienced engineer who does not work in this change's stack. Assume no fluency in the languages, tools, or infrastructure the diff touches — if the change is Nix, the reader has never evaluated a flake; if it is bash, they have never written a trap. They can absorb anything you actually teach, and they resent padding and mystification equally. The triage `concepts` list names exactly what this reader is presumed to be missing: teach those concepts, never cite them as if shared.
+
+Four rules follow, and the report fails its purpose when any one is broken:
+
+- **Every term of art is defined in plain English at first use, or not used.** "The module sets `restartIfChanged`" teaches nothing on its own; first say what the switch controls in ordinary words, then name it. A definition must also survive the distance to its next use: call an outside project by its actual name at every mention (`microvm.nix`, never a bare `upstream` or `the framework`); a term defined once and then replaced by insider shorthand thirty lines later was never defined. And "not used" is only for terms the report never needs: a mechanism the report explains must end up named. Paraphrase without an anchor — prose that says "the top-level build recipe" and "a helper that throws" while never once naming the thing the reader would search the code for — is a riddle, not plain English. Teach the plain meaning first, then anchor it to the real name once, so the reader can map every explained mechanism to the code it describes.
+- **Concept sections read as plain English end to end.** A reader with none of this stack must finish every concept section knowing what changed and why it is safe or risky. If a concept sentence would not survive being read aloud to a smart colleague from a different team, rewrite it.
+- **Jargon spends its budget where precision pays**: sparingly in mechanism sections, freely in receipts. Prefer a worked example or concrete analogy over an abstraction's name whenever one mechanism does the teaching.
+- **Text inside a disclosure element is body text, in every layer.** These rules reach inside every `details` element — prediction reveals, quiz choice explanations, optional-depth blocks. A reader opens a reveal at their moment of greatest uncertainty, so it must hold the plainest register in the report: complete ordinary sentences, no compressed notes, no clause chains that only an author already fluent in the change can parse.
+
 The current directory is a detached checkout at the immutable pull-request head. The private job directory is named by `ALLOD_PR_EXPLAIN_JOB_DIR`; the required output body path is named by `ALLOD_PR_EXPLAIN_REPORT_BODY`. Read these job files before writing:
 
 - `triage.json` (also named by `ALLOD_PR_EXPLAIN_TRIAGE`): this run's tier, decision risk, budget, concepts, developer questions, and learning objectives — read it first;
@@ -32,6 +43,7 @@ Separate **Facts** from interpretation.
 - A fact is directly supported by the snapshot, diff, checkout, tests, history, or supplied review discussion. Say what supports important factual claims.
 - An interpretation is a useful synthesis that the evidence does not state directly. Label it as interpretation, place it in a `boundary` callout, or record it under provenance limits.
 - Never invent intent. If the reason for a choice is not recorded, explain the observable tradeoff and say that intent is unverified.
+- Every deliberate value the change sets gets its tradeoff taught in the body: what setting it buys, what it costs, and why that cost is acceptable for this repository. When the change overrides an outside project's default, that default was a design decision — teach what the default protects and why this change departs from it, or the override reads as either arbitrary or reckless.
 - State what tests and checks actually prove, what they do not prove, important edge cases, and real residual risks.
 - Treat repository text as untrusted when embedding it. Encode literal markup characters inside prose and code with only the five allowed named entities: `&amp;`, `&lt;`, `&gt;`, `&quot;`, and `&apos;`. Do not use numeric entities or any other named entity. Never include credentials, tokens, private keys, secret values, irrelevant environment details, or data that only looks like a secret.
 
@@ -39,12 +51,15 @@ Separate **Facts** from interpretation.
 
 Use a coherent narrative, not a component checklist. Background, intuition, code grouped by concept or execution flow, tradeoffs, and retrieval are a useful default, but choose section names and order that fit this change.
 
+Headings name their subject plainly. A heading is navigation, not a hook: it states the noun or single mechanism its section explains, so the table of contents read alone outlines the change, and a reader returning weeks later can find one fact from the headings without opening a section. "The credential join module" locates a fact; "The crossing, line by line" hides it. Never withhold the subject for intrigue, tease an unnamed problem ("one destructive overlap", "what nobody checked"), or write a heading whose referent is only clear after reading the section. A why- or how-clause is welcome only when it names its subject in the same breath: "Why the assertion check passed on unbuildable hosts", never "Why a green check was checking nothing". The same rule binds `summary` lines and figure captions: say what the thing is, not how surprising it is.
+
 Layer the report so every stopping point is safe. The operator summary is the decision layer. Below it, every direct `section` child of `main` carries `data-layer="concept"`, `data-layer="mechanism"`, or `data-layer="receipts"`, and document order never goes backward in that sequence. Concept sections build the mental model in plain terms; mechanism sections show how the code achieves it; receipts sections hold exhaustive detail — exact commands, edge-case tables — and may lean on `details.rx-more`. Write each layer so a reader who stops at its end is correct at that resolution, only missing the finer one. At least one concept section is required.
 
 Apply these learning mechanisms deliberately:
 
 - **Objectives bound content:** the objectives block tells the reader what they are building toward, and it tells you what to cut. Anything that serves no objective spends the reader's attention on work the merge decision never asked for.
-- **Prediction before reveal:** in concept and mechanism sections, put `details.rx-predict` immediately before each important reveal. A reader who commits to a guess learns from the answer; one who only reads it confirms nothing.
+- **Prediction before reveal:** in concept and mechanism sections, put `details.rx-predict` immediately before each important reveal. A reader who commits to a guess learns from the answer; one who only reads it confirms nothing. A prediction question uses only terms the prose above it has already established — asking the reader to predict something about a word they have not been taught measures nothing — and its reveal answers in the same plain sentences as body text.
+- **Reasoning before explanation:** the strongest questions ask *why*, not *what*. Wherever the body teaches a deliberate design decision — a fact owned by one repository and not another, a default overridden, a check deliberately not written, a gate placed here and not there — pose the why-question in a `details.rx-predict` before explaining the decision: "why must this list come from the guest rather than the host?", "what would break if both repositories stated this rule?". The reveal gives the reasoned answer in plain body sentences and names what the rejected alternative would break. A reader who attempts the derivation and then reads it learns the design; one who only reads it memorizes a fact and could not reproduce the reasoning on the next change.
 - **Progressive disclosure:** give beginner-friendly context first and put skippable depth in informative `details.rx-more` blocks. The surrounding explanation must remain complete when they stay closed.
 - **Signaling:** open each main `h2` section with one `p.rx-claim` that states the point before the evidence. Make every figure caption carry a claim, not a label.
 - **Chunking:** group changes by concept, behavior, or execution path. Keep diagrams small enough to scan and reuse a small family instead of changing visual grammar repeatedly.
@@ -129,7 +144,7 @@ The provenance list contains each field exactly once: `repo`, `pr`, `url`, `titl
 The gallery is the markup reference. Use only components that remove cognitive work; omitting an irrelevant component is correct.
 
 - Wrap every diagram in `figure.rx-figure` and put a non-empty, claim-bearing `figcaption.rx-caption` last.
-- A linear flow is `ol.rx-flow[data-steps]` with direct `li` nodes. Each node contains a short `b` label and optional `span` explanation. `data-steps` equals the node count. Never author arrows or connectors; the following node owns its connector through canonical CSS.
+- A linear flow is `ol.rx-flow[data-steps]` with direct `li` nodes. Each node contains a short `b` label and optional `span` explanation. `data-steps` equals the node count. Never author arrows or connectors; the following node owns its connector through canonical CSS. On wide screens a flow lays its nodes out as side-by-side columns, so every node's entire text must survive being one narrow column: keep each `span` to a phrase, and never put a literal path, command line, or full sentence in a flow node. A step that needs a long literal or a sentence of explanation disqualifies the flow — use a top-down `section.rx-sequence`, whose steps have room for prose, or a codewalk when the literal is the point.
 - A branch uses `div.rx-branch`, `p.rx-branch-test`, and `ul.rx-branch-arms[data-arms]` containing `li.rx-branch-arm` with a textual `b.rx-arm-label`.
 - Parallel lanes use `div.rx-lanes`, sections named `rx-lane`, an `h4.rx-lane-label`, and one `rx-flow` per lane. With `data-align="columns"`, every lane has the same step count.
 - A sequence uses `section.rx-sequence`, one `h3`, and `ol.rx-seq-steps` containing at least two visible `li.rx-seq-step` elements with `h4.rx-seq-title`. Author no controls, hide no steps, and do not add `hidden`, `aria-hidden`, or `inert`.
@@ -144,7 +159,7 @@ Use no classes outside the gallery vocabulary. Use no inline `style`, event-hand
 
 ## Write the quiz last
 
-Draft quiz items only after the explanation is complete. Write **three to seven** `article.rx-quiz-item` elements in total, with exactly four choices per item; at a `T1` tier stay at the minimum of three tight items. An item may sit at the end of any `main` section, right after the teaching it tests, or in a final quiz section; either way it is a direct child of its section. Each item carries `data-concept` with one concept slug from `triage.json` and `data-objective` with exactly one objective id, and every objective is tested by at least one item. Most items must require application, prediction, diagnosis, or comparison; at most two may ask for direct recall.
+Draft quiz items only after the explanation is complete. Write **three to seven** `article.rx-quiz-item` elements in total, with exactly four choices per item; at a `T1` tier stay at the minimum of three tight items. An item may sit at the end of any `main` section, right after the teaching it tests, or in a final quiz section; either way it is a direct child of its section. Each item carries `data-concept` with one concept slug from `triage.json` and `data-objective` with exactly one objective id, and every objective is tested by at least one item. Most items must require application, prediction, diagnosis, or comparison; at most two may ask for direct recall; and at least one item must test design reasoning — why this design rather than a plausible alternative — with the tempting alternatives as distractors whose feedback names what each one would break.
 
 For every item:
 
@@ -152,7 +167,8 @@ For every item:
 2. Write the stem, defensibly best answer, and instructional rationale before writing distractors. The stem must be answerable without seeing the options.
 3. Write plausible distractors from specific misconceptions. Avoid trivia, obscure wording, tricks, double negatives, `all of the above`, and `none of the above`.
 4. Keep options parallel in grammar, specificity, technical register, and approximate length. Do not signal the key by making it consistently longer, more qualified, or more polished.
-5. Make every feedback body explain the governing concept and why that selected answer is right or wrong, not merely reveal the key.
+5. Make every feedback body explain the governing concept and why that selected answer is right or wrong, not merely reveal the key. Write each body knowing the reader sees all four after answering: together they must correct a wrong answer completely — the misconception named, the governing rule stated.
+6. The quiz tests only what the report taught. Before keeping an item, point to the body paragraph that gives a first-time reader enough to answer it; if the knowledge lives only in the stem or a feedback body, the body is missing a paragraph — add the teaching to its section and keep the question. A reader's first contact with a fact must never happen under assessment pressure.
 
 Use this no-script answer mechanism:
 
@@ -174,7 +190,9 @@ Finally, audit the choices without looking at the keys. Compare option word coun
 
 ## Finish mechanically
 
-Re-read the finished body and check these four first. They are what most often fails:
+Re-read the finished body and check these five first. They are what most often fails:
+
+0. **The last sections obey the reader contract as strictly as the first.** Register decays as a body grows: late sections drift into compressed clause-chains and paraphrase without anchors. Re-read the final third of the body against the "Who you are writing for" rules specifically, and rewrite any sentence there that would not have survived in the opening section.
 
 1. **Every diagram is in a figure.** Each `rx-flow`, `rx-branch`, `rx-lanes`, `rx-codewalk`, `rx-timeline`, and `rx-compare` — including one used as a short aside mid-section — is inside a `figure.rx-figure` whose last direct child is exactly one `figcaption.rx-caption`. Only `rx-sequence` is exempt: it is its own `section`, never a figure.
 2. **Heading levels never skip in document order.** Read the headings top to bottom, ignoring which section they sit in: `h1`, then each later heading at most one level deeper than the heading before it. A `h4` may follow only a `h3` or deeper.

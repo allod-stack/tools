@@ -401,6 +401,7 @@ main > section > details {
   margin-block-start: 0.2rem;
   color: var(--rx-muted);
   font-size: 0.88rem;
+  overflow-wrap: anywhere;
 }
 
 .rx-flow > li + li::before {
@@ -851,8 +852,8 @@ html[data-rx-js="on"] .rx-sequence[data-rx-mode="step"] .rx-seq-step:not([data-r
   border: 2px solid var(--rx-bad);
 }
 
-.rx-choice[data-rx-locked="true"]:not([data-rx-selected="true"]) > summary {
-  cursor: not-allowed;
+.rx-quiz-item[data-rx-answered="true"] .rx-choice[data-correct="true"] {
+  border: 2px solid var(--rx-good);
 }
 
 .rx-quiz-result {
