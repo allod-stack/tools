@@ -251,16 +251,10 @@ pr_explain_require_snapshot() {
       and (test("^/") | not)
       and (test("//") | not)
       and (test("\\.lock$") | not);
-    # AGit-created pull requests (e.g. Forgejo) report the head as the forges
-    # own pull namespace instead of a pushed branch. That one explicit ref shape
-    # is allowed for head only, and only when it names this exact pull request.
-    def pull_head_ref($n):
-      test("^refs/pull/[1-9][0-9]*/head$")
-      and ((capture("^refs/pull/(?<n>[0-9]+)/head$").n | tonumber) == $n);
     def valid_base_ref:
       ordinary_ref_name;
-    def valid_head_ref($n):
-      ordinary_ref_name or pull_head_ref($n);
+    def valid_head_ref:
+      ordinary_ref_name;
     .schema_version == 1
     and .pull_request.number == $number
     and (.pull_request.url | clone_url)
@@ -270,7 +264,7 @@ pr_explain_require_snapshot() {
     and (.base.ref | valid_base_ref)
     and (.base.sha | type == "string" and test("^([0-9a-f]{40}|[0-9a-f]{64})$"))
     and (.head.repository | repository)
-    and (.head.ref | valid_head_ref($number))
+    and (.head.ref | valid_head_ref)
     and (.head.sha | type == "string" and test("^([0-9a-f]{40}|[0-9a-f]{64})$"))
     and ((.base.sha | length) == (.head.sha | length))
     and ((.pull_request.url | url_parts) as $web
@@ -279,21 +273,29 @@ pr_explain_require_snapshot() {
       | (($web.host | ascii_downcase) == ($base_clone.host | ascii_downcase))
       and (($web.host | ascii_downcase) == ($head_clone.host | ascii_downcase))
       and path_ends($web.path; .base.repository.owner + "/" + .base.repository.name + "/pulls/" + ($number | tostring)))
-  ' <<<"$snapshot" >/dev/null 2>&1 ||
+  ' <<<"$snapshot" >/dev/null 2>&1 || {
+    # Diagnose the one rejected shape an operator may plausibly hit: a pull
+    # request created through Forgejo's AGit namespace has no pushed branch,
+    # so its head is refs/pull/<n>/head. The allod workflow does not accept
+    # AGit submissions; name the cause instead of a generic schema failure.
+    if jq -e '.head.ref? | strings | test("^refs/pull/[1-9][0-9]*/head$")' \
+      <<<"$snapshot" >/dev/null 2>&1; then
+      die 1 "PR #$number was created through AGit (its head is a refs/pull/<n>/head pull-namespace ref, not a pushed branch); the allod workflow does not accept AGit submissions, so it cannot be explained"
+    fi
     die 1 "forge returned an invalid PR snapshot"
+  }
 }
 
 # Turns a snapshot-reported ref into the exact remote ref to ls-remote/fetch.
-# An ordinary branch name becomes refs/heads/<name>. The only explicit full ref
-# accepted is the Forgejo AGit pull-request namespace refs/pull/<n>/head, for
-# head only, and only when <n> is this exact pull request — AGit-created PRs
-# (issue #138) report the head this way instead of a pushed branch. Every
-# other refs/* value, and anything check-ref-format itself would reject
-# (leading '-', ':', '^', '~', '*', wildcards, whitespace/control bytes,
-# traversal, etc.), is refused here, before any git invocation.
+# An ordinary branch name becomes refs/heads/<name>; nothing else is accepted.
+# The AGit pull namespace refs/pull/<n>/head is refused by policy — the allod
+# workflow does not accept AGit submissions (the snapshot schema already
+# diagnoses that shape by name; this is defense in depth) — and every other
+# refs/* value, plus anything check-ref-format itself would reject (leading
+# '-', ':', '^', '~', '*', wildcards, whitespace/control bytes, traversal,
+# etc.), is refused here, before any git invocation.
 pr_explain_normalize_ref() {
-  local ref="$1" side="$2" number="$3"
-  local pull_number
+  local ref="$1" side="$2"
 
   case "$ref" in
     -*) die 1 "$side ref must not begin with '-': $ref" ;;
@@ -303,13 +305,8 @@ pr_explain_normalize_ref() {
   esac
 
   if [[ "$ref" == refs/* ]]; then
-    if [[ "$side" == head && "$ref" =~ ^refs/pull/([1-9][0-9]*)/head$ ]]; then
-      pull_number="${BASH_REMATCH[1]}"
-      if [[ -n "$number" && "$pull_number" != "$number" ]]; then
-        die 1 "head ref names PR #$pull_number, which does not match snapshot PR #$number: $ref"
-      fi
-      printf '%s\n' "$ref"
-      return 0
+    if [[ "$ref" =~ ^refs/pull/[1-9][0-9]*/head$ ]]; then
+      die 1 "$side ref is an AGit pull-namespace ref, which the allod workflow does not accept: $ref"
     fi
     die 1 "$side ref must be an ordinary branch name, not an explicit ref: $ref"
   fi
@@ -866,8 +863,8 @@ pr_explain() {
   head_ref=$(jq -r '.head.ref' <<<"$snapshot")
   head_sha=$(jq -r '.head.sha' <<<"$snapshot")
 
-  base_ref=$(pr_explain_normalize_ref "$base_ref" base "$number")
-  head_ref=$(pr_explain_normalize_ref "$head_ref" head "$number")
+  base_ref=$(pr_explain_normalize_ref "$base_ref" base)
+  head_ref=$(pr_explain_normalize_ref "$head_ref" head)
 
   if [[ "$repo_set" == true && "$repo_arg" != "$base_repo" ]]; then
     die 1 "snapshot base repository '$base_repo' does not match --repo '$repo_arg'"

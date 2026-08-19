@@ -750,32 +750,34 @@ assert_file_exists "$(diagnostics_path)/snapshot.json" "preserves the snapshot f
 # fetch logic must resolve and fetch that exact ref rather than blindly
 # prepending refs/heads/, and every other ref shape stays strictly allowlisted.
 
-new_case agit-full-pull-ref-resolves-and-fetches
+# The allod workflow does not accept AGit submissions (they bypass the
+# public-repository push denial), so a PR whose head is the AGit pull
+# namespace refs/pull/<n>/head is refused by policy, with the cause named.
+new_case agit-created-pr-refused
 export MOCK_SCENARIO=agit
-write_valid_body codex
 agit_output="$CASE_DIR/output/report.html"
 capture_explain "$TEST_TMP/checkout" 7 --codex -R acme/widget --output "$agit_output"
-assert_success "resolves and fetches an AGit-created PR's full refs/pull/<n>/head ref"
-assert_file_exists "$agit_output" "publishes the report for an AGit-created PR"
-assert_equal "$(cat "$MOCK_RUNNER_DIR/codex.head")" "$AGIT_HEAD_SHA" \
-  "fetches and cages the AGit head commit"
-assert_equal "$(cat "$MOCK_RUNNER_DIR/codex.diff")" "changed" \
-  "diffs the AGit head against the base commit"
+assert_failure "refuses an AGit-created PR (refs/pull/<n>/head head)"
+assert_contains "$CAPTURE_OUTPUT" "created through AGit" \
+  "names AGit as the cause of the refusal"
+assert_no_runner "does not disclose source to a runner for an AGit-created PR"
+assert_file_absent "$agit_output" "does not write a report for an AGit-created PR"
 
-new_case agit-full-pull-ref-dry-run
+new_case agit-created-pr-refused-dry-run
 export MOCK_SCENARIO=agit
-write_valid_body codex
 capture_explain "$TEST_TMP/checkout" 7 --codex -R acme/widget \
   --output "$CASE_DIR/output/report.html" --dry-run
-assert_success "dry-run resolves an AGit full pull-request ref without fetching a branch"
+assert_failure "dry-run also refuses an AGit-created PR"
+assert_contains "$CAPTURE_OUTPUT" "created through AGit" \
+  "dry-run names AGit as the cause of the refusal"
 assert_no_runner "dry-run never invokes the provider for an AGit-created PR"
 
 new_case agit-mismatched-pr-number-rejected
 export MOCK_SCENARIO=agit-mismatch
 capture_explain "$TEST_TMP/checkout" 7 --codex -R acme/widget --output "$CASE_DIR/output/report.html"
 assert_failure "rejects an explicit head ref that names a different pull request"
-assert_contains "$CAPTURE_OUTPUT" "invalid PR snapshot" \
-  "diagnoses the mismatched pull-request ref before any fetch"
+assert_contains "$CAPTURE_OUTPUT" "created through AGit" \
+  "diagnoses the AGit-shaped head before any fetch"
 assert_no_runner "does not disclose source to a runner for a mismatched pull ref"
 assert_file_absent "$CASE_DIR/output/report.html" "does not write a report for a mismatched pull ref"
 

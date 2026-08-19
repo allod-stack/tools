@@ -115,7 +115,10 @@ exception: `head.ref` may instead be the exact AGit pull-request ref
 Forgejo reports for a pull request pushed with `git push -o agit` instead of
 a pushed branch. Any other explicit `refs/*` ref, or a ref git itself would
 reject (a leading `-`, whitespace, `:`, `^`, `~`, `*`, path traversal, and
-so on), fails snapshot validation.
+so on), fails snapshot validation. The snapshot accepts the AGit head shape
+because it is a read with no side effects and such pull requests exist on
+forges; `allod pr explain` separately refuses to act on them, because the
+allod workflow does not accept AGit submissions (see docs/pr-explain.md).
 
 ## Auth commands
 

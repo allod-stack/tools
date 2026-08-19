@@ -187,12 +187,16 @@ the head commit is fetched from the head repository recorded in the snapshot;
 you do not need a separate checkout of the fork.
 
 Every ref the snapshot reports is normalized into an exact remote ref before
-any git command runs. An ordinary branch name becomes `refs/heads/<name>`.
-The one exception is the head ref of an AGit-created pull request (for
-example, one pushed with `git push -o agit`): Forgejo reports its own pull
-namespace, `refs/pull/<n>/head`, instead of a pushed branch, and that exact
-ref is accepted for head only when `<n>` matches the pull request. Any other
-explicit `refs/*` ref, and anything git's own ref-name rules would reject —
+any git command runs. An ordinary branch name becomes `refs/heads/<name>`;
+nothing else is accepted. An AGit-created pull request (for example, one
+pushed with `git push -o agit`) has no pushed branch — Forgejo reports its
+own pull namespace, `refs/pull/<n>/head`, as the head — and the allod
+workflow does not accept AGit submissions, so the command refuses such a
+pull request at snapshot validation, before any fetch or provider
+disclosure, with a diagnosis that names AGit. (`forge pr snapshot` still
+describes AGit-created pull requests faithfully; the refusal is this
+command's policy, not the snapshot reader's.) Any other explicit `refs/*`
+ref, and anything git's own ref-name rules would reject —
 a leading `-`, whitespace or control bytes, `:`, `^`, `~`, `*`, path
 traversal — is rejected before it ever reaches git.
 
