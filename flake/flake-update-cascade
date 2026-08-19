@@ -304,8 +304,10 @@ run_combined_cycle() {
       tmp_lock="/tmp/${repo_slug}.flake.lock.new"
 
       echo "  updating ${update_paths[*]} (dry-run)..."
-      if ! timeout 120 nix flake update "${update_paths[@]}" \
-        --flake "$dir" --output-lock-file "$tmp_lock"; then
+      # stdin from /dev/null: decline foreign nixConfig instead of prompting;
+      # --foreground: Ctrl-C and the timeout must reach nix.
+      if ! timeout --foreground 120 nix flake update "${update_paths[@]}" \
+        --flake "$dir" --output-lock-file "$tmp_lock" </dev/null; then
         echo "  nix flake update failed, skipping"
         rm -f "$tmp_lock"
         overall_exit=1
@@ -343,7 +345,10 @@ run_combined_cycle() {
 
       # Step 2: Update all matching paths together.
       echo "  updating ${update_paths[*]}..."
-      if ! timeout 120 nix flake update "${update_paths[@]}" --flake "$dir"; then
+      # stdin from /dev/null: decline foreign nixConfig instead of prompting;
+      # --foreground: Ctrl-C and the timeout must reach nix.
+      if ! timeout --foreground 120 nix flake update "${update_paths[@]}" \
+        --flake "$dir" </dev/null; then
         echo "  nix flake update failed, skipping"
         git -C "$dir" checkout -- flake.lock
         rm -f "$old_lock"
@@ -426,7 +431,10 @@ run_combined_cycle() {
 
       # Step 2: Update all matching paths together.
       echo "  updating ${update_paths[*]}..."
-      if ! timeout 120 nix flake update "${update_paths[@]}" --flake "$dir"; then
+      # stdin from /dev/null: decline foreign nixConfig instead of prompting;
+      # --foreground: Ctrl-C and the timeout must reach nix.
+      if ! timeout --foreground 120 nix flake update "${update_paths[@]}" \
+        --flake "$dir" </dev/null; then
         echo "  nix flake update failed, skipping"
         git -C "$dir" checkout -- flake.lock
         rm -f "$old_lock"
