@@ -108,7 +108,7 @@ Use this shell shape, filling every placeholder from `report-contract.json`, `tr
 </main>
 
 <footer class="rx-footer" id="rx-provenance">
-  <dl class="rx-provenance" data-repository="owner/repo" data-pr="N" data-pr-url="exact snapshot URL" data-base-sha="40 lowercase hex" data-head-sha="40 lowercase hex" data-runner="codex-or-claude">
+  <dl class="rx-provenance" data-repository="owner/repo" data-pr="N" data-pr-url="exact snapshot URL" data-base-sha="40 lowercase hex" data-head-sha="40 lowercase hex" data-runner="codex-claude-or-pi">
     ...required provenance fields...
   </dl>
 </footer>
@@ -122,7 +122,7 @@ These shell parts are new and required:
 - The objectives block is the first section inside `main`: `section#objectives` with `data-layer="concept"`, an `h2`, one `p.rx-claim`, and `ol.rx-objectives` whose `li` ids match the triage objective ids exactly, in the same order. Vary the statements' opening words: four list items that all start with the same three words trip the repeated-opener check.
 - Every direct `section` child of `main` except `#objectives`, and every `figure.rx-figure`, carries `data-objective` naming one or more objective ids, space-separated. Put `data-objective` nowhere else — not on nested sections such as `rx-sequence` or `rx-lane`. Every listed id must exist in the objectives block, and every objective must be claimed by at least one section and tested by at least one quiz item.
 
-The provenance list contains each field exactly once: `repo`, `pr`, `url`, `title`, `base`, `head`, `diffstat`, `runner`, `generator`, `generated`, `sources`, and `limits`. Copy repository, pull request, URL, title, SHAs, runner, and date exactly from `report-contract.json`. Show the runner as `codex subscription CLI` or `claude subscription CLI`. Put the generated date in `<time datetime="YYYY-MM-DD">YYYY-MM-DD</time>`. The `limits` value contains a list with at least one concrete unverified claim.
+The provenance list contains each field exactly once: `repo`, `pr`, `url`, `title`, `base`, `head`, `diffstat`, `runner`, `generator`, `generated`, `sources`, and `limits`. Copy repository, pull request, URL, title, SHAs, runner, and date exactly from `report-contract.json`. Show the runner as `codex subscription CLI`, `claude subscription CLI`, or `pi API CLI`. Put the generated date in `<time datetime="YYYY-MM-DD">YYYY-MM-DD</time>`. The `limits` value contains a list with at least one concrete unverified claim.
 
 ## Component vocabulary
 
@@ -179,6 +179,6 @@ Re-read the finished body and check these four first. They are what most often f
 1. **Every diagram is in a figure.** Each `rx-flow`, `rx-branch`, `rx-lanes`, `rx-codewalk`, `rx-timeline`, and `rx-compare` — including one used as a short aside mid-section — is inside a `figure.rx-figure` whose last direct child is exactly one `figcaption.rx-caption`. Only `rx-sequence` is exempt: it is its own `section`, never a figure.
 2. **Heading levels never skip in document order.** Read the headings top to bottom, ignoring which section they sit in: `h1`, then each later heading at most one level deeper than the heading before it. A `h4` may follow only a `h3` or deeper.
 3. **Objective bookkeeping closes.** The objectives block ids match `triage.json` exactly, same ids and same order; every other direct section child of `main` and every `figure.rx-figure` carries `data-objective`, and nothing else does; every listed id exists in the objectives block; every objective is claimed by at least one section and tested by at least one quiz item.
-4. **Provenance carries the id and the label.** `data-runner` is the bare `codex` or `claude`; the visible runner field reads `codex subscription CLI` or `claude subscription CLI`.
+4. **Provenance carries the id and the label.** `data-runner` is the bare `codex`, `claude`, or `pi`; the visible runner field reads `codex subscription CLI`, `claude subscription CLI`, or `pi API CLI`.
 
 Then confirm that the required body file exists and is non-empty; every tag stays on one physical line and follows the lowercase, double-quoted, no-comment, no-self-closing grammar; `p.rx-cost` follows `p.rx-lede` and contains the word `minute`; every direct section child of `main` carries `data-layer` and the layer order never goes backward, with at least one concept section; the three-to-seven quiz items each carry `data-concept` and `data-objective`, no answer letter is correct more than twice, and the misconception labels are complete; every internal reference resolves; every sequence has at least two visible steps; no authored content uses `hidden`, `aria-hidden`, or `inert`; code whitespace is exact; the rest of provenance matches the contract; the main explanation works with scripts absent; and no secret-looking or environment-specific material entered the fragment. Do not commit, push, edit the pull request, or write anywhere except the required report-body path.

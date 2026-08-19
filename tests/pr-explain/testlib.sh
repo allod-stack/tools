@@ -466,6 +466,11 @@ for ((i = 0; i < ${#argv[@]}; i++)); do
     break
   fi
 done
+# Pi has no --add-dir; its runs receive the job directory only through the
+# exported ALLOD_PR_EXPLAIN_JOB_DIR contract, which every runner also gets.
+if [[ -z "$job" ]]; then
+  job="${ALLOD_PR_EXPLAIN_JOB_DIR:-}"
+fi
 printf '%s\n' "$repo" > "$prefix.repo"
 printf '%s\n' "$job" > "$prefix.job"
 stat -c '%a' "$job" > "$prefix.job-mode"
@@ -587,6 +592,7 @@ EOF
   chmod +x "$TEST_TMP/bin/pr-explain-runner"
   ln -s pr-explain-runner "$TEST_TMP/bin/codex"
   ln -s pr-explain-runner "$TEST_TMP/bin/claude"
+  ln -s pr-explain-runner "$TEST_TMP/bin/pi"
 }
 
 # Schema-exact triage judgment fixtures, one per tier the tests exercise,
@@ -726,6 +732,7 @@ scenario_runner_label() {
   case "$1" in
     codex) printf 'codex subscription CLI\n' ;;
     claude) printf 'claude subscription CLI\n' ;;
+    pi) printf 'pi API CLI\n' ;;
     *) printf '%s\n' "$1" ;;
   esac
 }
@@ -903,7 +910,8 @@ read_runner_args() {
 }
 
 runner_was_called() {
-  [[ -e "$MOCK_RUNNER_DIR/codex.args0" || -e "$MOCK_RUNNER_DIR/claude.args0" ]]
+  [[ -e "$MOCK_RUNNER_DIR/codex.args0" || -e "$MOCK_RUNNER_DIR/claude.args0" ||
+    -e "$MOCK_RUNNER_DIR/pi.args0" ]]
 }
 
 assert_no_runner() {

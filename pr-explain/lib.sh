@@ -60,6 +60,18 @@ pr_explain_emit_slop_prompt() { pr_explain_emit_asset slop-prompt.md; }
 pr_explain_emit_repair_prompt() { pr_explain_emit_asset repair-prompt.md; }
 pr_explain_emit_gallery() { pr_explain_emit_asset component-gallery.html; }
 
+# The one honest display name per runner, shared by the consent screen, the
+# provenance validator, and every operator-facing message. The subscription
+# CLIs spend a subscription; pi spends metered API credits from its own
+# credential store, and calling it a subscription would misstate what the
+# operator consented to.
+pr_explain_runner_display() {
+  case "$1" in
+    pi) printf 'pi API CLI' ;;
+    *) printf '%s subscription CLI' "$1" ;;
+  esac
+}
+
 pr_explain_html_escape() {
   jq -sRr @html
 }
@@ -2321,7 +2333,7 @@ pr_explain_validate_report() {
       pr_explain_validation_error E18 "visible base SHA does not match snapshot"
     grep -Fq "<dt data-field=\"head\">Head commit</dt><dd><code>$head_sha</code></dd>" "$provenance_html" ||
       pr_explain_validation_error E18 "visible head SHA does not match snapshot"
-    grep -Fq "<dt data-field=\"runner\">Runner</dt><dd>$runner subscription CLI</dd>" "$provenance_html" ||
+    grep -Fq "<dt data-field=\"runner\">Runner</dt><dd>$(pr_explain_runner_display "$runner")</dd>" "$provenance_html" ||
       pr_explain_validation_error E18 "visible runner provenance is missing"
   fi
   count=$(pr_explain_count_regex "$body_html" '<dl class="rx-provenance"')

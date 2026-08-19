@@ -50,15 +50,18 @@ trap 'handle_signal 143 SIGTERM' TERM
 pr_usage() {
   cat <<'EOF'
 Usage:
-  allod pr explain <number> (--codex | --claude) [-R|--repo <owner/repo>]
+  allod pr explain <number> (--codex | --claude | --pi) [-R|--repo <owner/repo>]
     [--checkout <path>] --output <report.html> [--replace] [--dry-run]
     [--model <model>] [--effort <low|medium|high|xhigh|max>]
     [--force-tier <T1|T2|T3>] [--no-slop] [--no-repair]
 
 The provider flag is explicit consent to send the pull request's source and
-review context to that installed subscription CLI. Before invoking it, allod
-prints the repository, PR, immutable base/head commits, runner, output, and
-how many provider calls the run may make.
+review context to that installed CLI. --codex and --claude spend their
+subscriptions; --pi spends metered API credits through the pi coding agent,
+which authenticates from its own credential store — API keys and provider
+credentials in the environment are always stripped, for every runner. Before
+invoking it, allod prints the repository, PR, immutable base/head commits,
+runner, output, and how many provider calls the run may make.
 
 A run opens with a triage pass: the provider assesses the change and writes a
 structured complexity judgment (tier, reading budget, concepts, learning
@@ -381,7 +384,7 @@ pr_explain_print_consent() {
   printf '  URL: %s\n' "$url"
   printf '  base: %s\n' "$base"
   printf '  head: %s\n' "$head"
-  printf '  runner: %s subscription CLI\n' "$runner"
+  printf '  runner: %s\n' "$(pr_explain_runner_display "$runner")"
   printf '  model: %s\n' "$model_display"
   printf '  effort: %s\n' "$effort"
   printf '  output: %s\n' "$output"
@@ -479,6 +482,34 @@ pr_explain_run_provider() {
         --output-format text
         --add-dir "$job_dir"
         --effort "$effort"
+      )
+      [[ -z "$model" ]] || command_args+=(--model "$model")
+      pushd -- "$repo_dir" >/dev/null
+      "${clean_env[@]}" "${command_args[@]}" <"$prompt" >"$stdout_log" 2>"$stderr_log" &
+      PR_EXPLAIN_PROVIDER_PID=$!
+      set +e
+      wait "$PR_EXPLAIN_PROVIDER_PID"
+      provider_status=$?
+      PR_EXPLAIN_PROVIDER_PID=""
+      popd >/dev/null
+      return "$provider_status"
+      ;;
+    pi)
+      # Pi authenticates from its own credential store under HOME, so unlike
+      # the two subscription runners it needs no credential passthrough at
+      # all: the environment scrub stays maximal. The --no-* battery is pi's
+      # equivalent of codex --ignore-user-config/--ignore-rules — no
+      # extensions, skills, prompt templates, project context files, or
+      # project-local trust from the untrusted caged checkout.
+      command_args=(
+        pi -p
+        --no-session
+        --no-extensions
+        --no-skills
+        --no-prompt-templates
+        --no-context-files
+        --no-approve
+        --thinking "$effort"
       )
       [[ -z "$model" ]] || command_args+=(--model "$model")
       pushd -- "$repo_dir" >/dev/null
@@ -710,8 +741,8 @@ pr_explain() {
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --codex|--claude)
-        [[ "$provider_set" == false ]] || die 1 "choose exactly one provider: --codex or --claude"
+      --codex|--claude|--pi)
+        [[ "$provider_set" == false ]] || die 1 "choose exactly one provider: --codex, --claude, or --pi"
         runner="${1#--}"
         provider_set=true
         shift
@@ -799,7 +830,7 @@ pr_explain() {
   done
 
   [[ "$number" =~ ^[1-9][0-9]*$ ]] || die 1 "pr explain requires a positive PR number"
-  [[ "$provider_set" == true ]] || die 1 "pr explain requires exactly one of --codex or --claude"
+  [[ "$provider_set" == true ]] || die 1 "pr explain requires exactly one of --codex, --claude, or --pi"
   [[ "$output_set" == true && -n "$output_arg" ]] || die 1 "pr explain requires --output <report.html>"
   case "$effort" in
     low|medium|high|xhigh|max) ;;
@@ -834,7 +865,7 @@ pr_explain() {
   fi
   command -v jq >/dev/null 2>&1 || die 1 "jq is required"
   command -v git >/dev/null 2>&1 || die 1 "git is required"
-  command -v "$runner" >/dev/null 2>&1 || die 1 "$runner subscription CLI is not installed"
+  command -v "$runner" >/dev/null 2>&1 || die 1 "$(pr_explain_runner_display "$runner") is not installed"
   forge_bin=$(pr_explain_resolve_forge)
 
   set +e
@@ -1022,8 +1053,8 @@ pr_explain() {
     # provider: the diagnostics go back as data on stdin, the run keeps the
     # same argv and sanitized environment, and every cage postcondition is
     # re-checked afterwards. A second failure is final.
-    printf 'allod: validation failed; requesting one repair pass from the %s subscription CLI\n' \
-      "$runner" >&2
+    printf 'allod: validation failed; requesting one repair pass from the %s\n' \
+      "$(pr_explain_runner_display "$runner")" >&2
     pr_explain_write_repair_prompt "$job_dir/repair-prompt.md" "$body" \
       "$job_dir/validation.diagnostics.txt"
     pr_explain_run_pass "$runner runner repair pass" "$runner" "$model" "$effort" "$repo_dir" \

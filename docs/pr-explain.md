@@ -2,7 +2,7 @@
 
 `allod pr explain` turns one immutable pull-request snapshot into a validated,
 self-contained HTML teaching report. Use it when a normal diff is not enough to
-understand a change: choose the subscription provider explicitly, review the
+understand a change: choose the provider explicitly, review the
 identity and commit summary printed by the command, then inspect the report. A
 triage pass first judges how much explanation the change deserves, so a trivial
 change is declined rather than padded. The command only reads the PR and
@@ -28,7 +28,7 @@ allod pr explain 42 --claude \
 The complete interface is:
 
 ```text
-allod pr explain <number> (--codex | --claude)
+allod pr explain <number> (--codex | --claude | --pi)
   [-R|--repo <owner/repo>] [--checkout <path>]
   --output <report.html> [--replace] [--dry-run]
   [--model <model>] [--effort <low|medium|high|xhigh|max>]
@@ -42,6 +42,7 @@ including for a dry run.
 |---|---|
 | `--codex` | Consent to send the report inputs to the installed Codex subscription CLI through `codex exec`. |
 | `--claude` | Consent to send the report inputs to the installed Claude subscription CLI through `claude -p`. |
+| `--pi` | Consent to send the report inputs to the installed pi coding agent through `pi -p`. Pi meters API credits rather than a subscription and authenticates from its own credential store; like every runner, it receives an environment with all API keys and provider credentials stripped, and it runs with extensions, skills, prompt templates, project context files, and project-local trust disabled. |
 | `-R`, `--repo` | Forge repository in `owner/repo` form. Without it, `forge` infers the repository from the checkout. |
 | `--checkout` | Local checkout of the PR's base repository. Without it, the current checkout is used. |
 | `--output` | Required destination for the completed HTML report. Its parent directory must already exist. |

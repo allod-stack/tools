@@ -63,7 +63,7 @@ assert_contains "$(cat "$PROMPT")" "Every diagram is in a figure" \
   "the prompt's final check leads with the figure containment contract"
 assert_contains "$(cat "$PROMPT")" "Heading levels never skip in document order" \
   "the prompt's final check names heading order as a document-wide property"
-assert_contains "$(cat "$PROMPT")" "bare \`codex\` or \`claude\`" \
+assert_contains "$(cat "$PROMPT")" "bare \`codex\`, \`claude\`, or \`pi\`" \
   "the prompt's final check separates the raw runner id from its visible label"
 for repair_rule in "minimum structural correction" "Preserve the semantic content" \
   "figure.rx-figure" "rx-sequence" "heading levels never skip" "data-runner" \

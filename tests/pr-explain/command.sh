@@ -222,6 +222,54 @@ assert_env_value "$claude_env" CLAUDE_CODE_OAUTH_TOKEN "$CLAUDE_CODE_OAUTH_TOKEN
 assert_env_value "$claude_env" CLAUDE_CODE_OAUTH_REFRESH_TOKEN "$CLAUDE_CODE_OAUTH_REFRESH_TOKEN" \
   "retains Claude subscription refresh authentication"
 
+new_case fork-pi
+export MOCK_SCENARIO=fork
+write_valid_body pi
+pi_output="$CASE_DIR/output/report.html"
+capture_explain "$TEST_TMP/checkout" 7 --pi -R acme/widget \
+  --checkout "$TEST_TMP/checkout" --output "$pi_output" \
+  --model pi-test-model --effort xhigh
+assert_success "generates a fork-head report with pi"
+assert_file_exists "$pi_output" "installs the pi fork-head report"
+assert_contains "$CAPTURE_OUTPUT" "pi API CLI" \
+  "discloses pi as an API-metered runner, not a subscription"
+
+declare -a pi_args=()
+read_runner_args pi pi_args
+assert_equal "${#pi_args[@]}" "11" "uses the exact hardened pi argument count with a model override"
+assert_equal "${pi_args[0]}" "-p" "uses pi print mode"
+assert_equal "${pi_args[1]}" "--no-session" "does not retain a pi session"
+assert_equal "${pi_args[2]}" "--no-extensions" "disables pi extension discovery"
+assert_equal "${pi_args[3]}" "--no-skills" "disables pi skill discovery"
+assert_equal "${pi_args[4]}" "--no-prompt-templates" "disables pi prompt-template discovery"
+assert_equal "${pi_args[5]}" "--no-context-files" "ignores untrusted project context files"
+assert_equal "${pi_args[6]}" "--no-approve" "refuses project-local trust inside the cage"
+assert_equal "${pi_args[7]}" "--thinking" "uses pi's thinking flag for effort"
+assert_equal "${pi_args[8]}" "xhigh" "passes the requested pi effort"
+assert_equal "${pi_args[9]}" "--model" "uses pi's model override flag"
+assert_equal "${pi_args[10]}" "pi-test-model" "passes the requested pi model"
+if [[ "$(cat "$MOCK_RUNNER_DIR/pi.pwd")" != "$TEST_TMP/checkout" ]]; then
+  pass "starts pi outside the operator checkout"
+else
+  fail "starts pi outside the operator checkout" "pi ran in: $TEST_TMP/checkout"
+fi
+assert_equal "$(cat "$MOCK_RUNNER_DIR/pi.job-mode")" "700" "runs pi with a mode-0700 job directory"
+assert_runner_calls pi 3 "a clean pi run spends the same three provider calls"
+assert_contains "$(cat "$MOCK_RUNNER_DIR/pi.2.stdin")" "complete diff" \
+  "supplies the same investigation prompt to pi's author pass"
+
+pi_env="$MOCK_RUNNER_DIR/pi.env"
+for deny_name in "${deny_names[@]}"; do
+  assert_env_absent "$pi_env" "$deny_name" "removes $deny_name from the pi runner environment"
+done
+assert_env_value "$pi_env" FORGE_TOKEN_FILE /dev/null "blocks Forge token-file fallback for pi"
+assert_env_absent "$pi_env" CODEX_HOME "does not disclose Codex subscription state to pi"
+assert_env_absent "$pi_env" CODEX_ACCESS_TOKEN "does not disclose Codex authentication to pi"
+assert_env_absent "$pi_env" ANTHROPIC_CONFIG_DIR "does not disclose Claude subscription state to pi"
+assert_env_absent "$pi_env" CLAUDE_CODE_OAUTH_TOKEN "does not disclose Claude authentication to pi"
+assert_env_absent "$pi_env" CLAUDE_CODE_OAUTH_REFRESH_TOKEN \
+  "does not disclose Claude refresh authentication to pi"
+
 new_case dirty
 export MOCK_SCENARIO=dirty
 write_valid_body codex
