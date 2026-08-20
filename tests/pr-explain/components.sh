@@ -22,49 +22,65 @@ emit_and_compare() {
 
 CSS="$ROOT/pr-explain/report.css"
 JS="$ROOT/pr-explain/report.js"
-PROMPT="$ROOT/pr-explain/prompt.md"
+CONTRACT="$ROOT/pr-explain/contract.md"
+OUTLINE_PROMPT="$ROOT/pr-explain/outline-prompt.md"
+SECTION_PROMPT="$ROOT/pr-explain/section-prompt.md"
+QUIZ_PROMPT="$ROOT/pr-explain/quiz-prompt.md"
 REPAIR_PROMPT="$ROOT/pr-explain/repair-prompt.md"
 GALLERY="$ROOT/pr-explain/component-gallery.html"
 
 emit_and_compare css "$CSS" "the installed CLI embeds the checked stylesheet byte-for-byte"
 emit_and_compare js "$JS" "the installed CLI embeds the checked enhancement script byte-for-byte"
-emit_and_compare prompt "$PROMPT" "the installed CLI embeds the checked common prompt byte-for-byte"
+emit_and_compare contract "$CONTRACT" \
+  "the installed CLI embeds the checked shared contract byte-for-byte"
+emit_and_compare outline-prompt "$OUTLINE_PROMPT" \
+  "the installed CLI embeds the checked outline prompt byte-for-byte"
+emit_and_compare section-prompt "$SECTION_PROMPT" \
+  "the installed CLI embeds the checked section prompt byte-for-byte"
+emit_and_compare quiz-prompt "$QUIZ_PROMPT" \
+  "the installed CLI embeds the checked quiz prompt byte-for-byte"
 emit_and_compare repair-prompt "$REPAIR_PROMPT" \
   "the installed CLI embeds the checked repair prompt byte-for-byte"
 emit_and_compare gallery "$GALLERY" "the installed CLI embeds the checked component gallery byte-for-byte"
 
-assert_contains "$(cat "$PROMPT")" "information transfer" \
-  "the prompt treats explanation as information transfer"
-assert_contains "$(cat "$PROMPT")" "human brains" \
-  "the prompt explicitly asks the runner to think about human brains"
+assert_contains "$(cat "$CONTRACT")" "information transfer" \
+  "the contract treats explanation as information transfer"
+assert_contains "$(cat "$CONTRACT")" "human brains" \
+  "the contract explicitly asks the runner to think about human brains"
+assert_contains "$(cat "$CONTRACT")" "finest technical teacher" \
+  "the contract opens with the characterization register anchor"
 for learning_term in "progressive disclosure" signaling chunking "concrete examples" \
-  "dual coding" "active retrieval" misconception; do
-  if grep -Fqi "$learning_term" "$PROMPT"; then
-    pass "the prompt requires $learning_term"
+  "dual coding" misconception; do
+  if grep -Fqi "$learning_term" "$SECTION_PROMPT"; then
+    pass "the section prompt requires $learning_term"
   else
-    fail "the prompt requires $learning_term" "missing from: $PROMPT"
+    fail "the section prompt requires $learning_term" "missing from: $SECTION_PROMPT"
   fi
 done
-assert_contains "$(cat "$PROMPT")" "complete diff" \
-  "the prompt requires reading the complete diff"
-assert_contains "$(cat "$PROMPT")" "surrounding" \
-  "the prompt requires investigating surrounding code"
-assert_contains "$(cat "$PROMPT")" "review" \
-  "the prompt requires investigating pull request reviews"
-assert_contains "$(cat "$PROMPT")" "Facts" \
-  "the prompt separates facts from interpretation"
-assert_contains "$(cat "$PROMPT")" "not decoration" \
-  "the prompt allows pictures and motion only when they reduce cognitive work"
+assert_contains "$(cat "$QUIZ_PROMPT")" "active retrieval" \
+  "the quiz prompt grounds the quiz in active retrieval"
+assert_contains "$(cat "$CONTRACT")" "complete diff" \
+  "the contract requires reading the complete diff"
+assert_contains "$(cat "$CONTRACT")" "surrounding" \
+  "the contract requires investigating surrounding code"
+assert_contains "$(cat "$CONTRACT")" "review" \
+  "the contract requires investigating pull request reviews"
+assert_contains "$(cat "$CONTRACT")" "Facts" \
+  "the contract separates facts from interpretation"
+assert_contains "$(cat "$SECTION_PROMPT")" "not decoration" \
+  "the section prompt allows pictures and motion only when they reduce cognitive work"
+assert_contains "$(cat "$SECTION_PROMPT")" "as strictly as the report's opening" \
+  "the section prompt re-checks the reader contract on every section"
 
 # The three contracts real attended runs actually broke. They are stated once
 # in the vocabulary and again as a final check, because the final check is what
 # a runner re-reads before returning.
-assert_contains "$(cat "$PROMPT")" "Every diagram is in a figure" \
-  "the prompt's final check leads with the figure containment contract"
-assert_contains "$(cat "$PROMPT")" "Heading levels never skip in document order" \
-  "the prompt's final check names heading order as a document-wide property"
-assert_contains "$(cat "$PROMPT")" "bare \`codex\`, \`claude\`, or \`pi\`" \
-  "the prompt's final check separates the raw runner id from its visible label"
+assert_contains "$(cat "$SECTION_PROMPT")" "Every diagram is in a figure" \
+  "the section prompt's final check leads with the figure containment contract"
+assert_contains "$(cat "$SECTION_PROMPT")" "Heading levels never skip in document order" \
+  "the section prompt's final check names heading order as a document-wide property"
+assert_contains "$(cat "$QUIZ_PROMPT")" "bare \`codex\`, \`claude\`, or \`pi\`" \
+  "the quiz prompt's final check separates the raw runner id from its visible label"
 for repair_rule in "minimum structural correction" "Preserve the semantic content" \
   "figure.rx-figure" "rx-sequence" "heading levels never skip" "data-runner" \
   "Do not modify" "non-empty regular file"; do

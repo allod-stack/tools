@@ -3,7 +3,7 @@
 source "$(dirname "${BASH_SOURCE[0]}")/testlib.sh"
 
 new_case validation-base
-write_valid_body codex
+write_valid_fragments codex
 VALID_REPORT="$CASE_DIR/output/valid.html"
 SNAPSHOT="$CASE_DIR/snapshot.json"
 write_snapshot_file "$SNAPSHOT"
@@ -545,18 +545,18 @@ validation_failure "$SABOTAGE" "minute" \
   "rejects a reading-cost line that never states minutes (E21)"
 
 sabotage_copy layer-missing
-sed -i 's# data-layer="concept" data-objective="obj-1 obj-3"# data-objective="obj-1 obj-3"#' "$SABOTAGE"
+sed -i 's# data-layer="concept" data-objective="obj-1 obj-2 obj-3"# data-objective="obj-1 obj-2 obj-3"#' "$SABOTAGE"
 validation_failure "$SABOTAGE" 'missing its data-layer' \
   "rejects a main section with no data-layer (E22)"
 
 sabotage_copy layer-unknown
-sed -i 's#data-layer="concept" data-objective="obj-1 obj-3"#data-layer="overview" data-objective="obj-1 obj-3"#' "$SABOTAGE"
+sed -i 's#data-layer="concept" data-objective="obj-1 obj-2 obj-3"#data-layer="overview" data-objective="obj-1 obj-2 obj-3"#' "$SABOTAGE"
 validation_failure "$SABOTAGE" 'unknown data-layer' \
   "rejects an unknown data-layer value (E22)"
 
 sabotage_copy layer-order
-sed -i 's#data-layer="concept" data-objective="obj-1 obj-3"#data-layer="receipts" data-objective="obj-1 obj-3"#' "$SABOTAGE"
-sed -i 's#data-layer="receipts" data-objective="obj-1 obj-2 obj-3"#data-layer="mechanism" data-objective="obj-1 obj-2 obj-3"#' "$SABOTAGE"
+sed -i 's#<section id="background" aria-labelledby="background-h" data-layer="concept"#<section id="background" aria-labelledby="background-h" data-layer="receipts"#' "$SABOTAGE"
+sed -i 's#<section id="quiz" aria-labelledby="quiz-h" data-layer="receipts"#<section id="quiz" aria-labelledby="quiz-h" data-layer="mechanism"#' "$SABOTAGE"
 validation_failure "$SABOTAGE" 'non-decreasing' \
   "rejects layers out of concept, mechanism, receipts order (E22)"
 
@@ -604,12 +604,12 @@ validation_failure "$SABOTAGE" "allowed only inside '#objectives'|rx-objectives"
   "rejects an rx-objectives list outside #objectives (E23)"
 
 sabotage_copy objective-ref-unknown
-sed -i 's#data-objective="obj-1 obj-3"#data-objective="obj-1 obj-9"#' "$SABOTAGE"
+sed -i 's#data-objective="obj-1 obj-2 obj-3"#data-objective="obj-1 obj-9"#' "$SABOTAGE"
 validation_failure "$SABOTAGE" 'unknown objective' \
   "rejects a data-objective naming an id the block never declares (E24)"
 
 sabotage_copy section-without-objective
-sed -i 's# data-objective="obj-1 obj-3"##' "$SABOTAGE"
+sed -i 's# data-objective="obj-1 obj-2 obj-3"##' "$SABOTAGE"
 validation_failure "$SABOTAGE" 'must declare the objectives it serves' \
   "rejects a main section with no data-objective (E24)"
 
@@ -631,7 +631,7 @@ validation_failure "$SABOTAGE" 'not claimed by any main section' \
 
 sabotage_copy objective-without-quiz-claim
 sed -i 's#<li id="obj-3">You can trace every provenance field back to the immutable snapshot.</li>#&\n      <li id="obj-4">You can audit the coverage checker from its own reports.</li>#' "$SABOTAGE"
-sed -i 's#data-objective="obj-1 obj-3"#data-objective="obj-1 obj-3 obj-4"#' "$SABOTAGE"
+sed -i 's#data-objective="obj-1 obj-2 obj-3"#data-objective="obj-1 obj-2 obj-3 obj-4"#' "$SABOTAGE"
 validation_failure "$SABOTAGE" 'not tested by any quiz item' \
   "rejects an objective no quiz item tests (E24)"
 

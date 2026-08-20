@@ -431,21 +431,29 @@ done
 cat > "$prefix.stdin"
 cp "$prefix.stdin" "$pass_prefix.stdin"
 
-# Per-pass control: MOCK_RUNNER_MODE_<n>, MOCK_BODY_FILE_<n>, and
-# MOCK_TRIAGE_FILE_<n> override the unnumbered variables for pass <n>; the
-# unnumbered variables are the defaults for every pass. With nothing set at
-# all, pass 1 behaves as a well-behaved triage pass (writes the shared valid
-# T2 judgment and leaves the body alone) and every later pass writes the
-# staged body — the v2 pipeline's happy path.
+# Per-pass control: MOCK_RUNNER_MODE_<n>, MOCK_BODY_FILE_<n>,
+# MOCK_TRIAGE_FILE_<n>, and MOCK_OUTLINE_FILE_<n> override the unnumbered
+# variables for pass <n>; the unnumbered variables are the defaults for every
+# pass. With nothing set at all, pass 1 behaves as a well-behaved triage pass
+# (writes the shared valid T2 judgment and leaves the body alone), pass 2 as a
+# well-behaved outline pass (writes the fixture section plan and the front
+# fragment), and every later pass writes whatever its per-pass body fixture
+# names — the sectioned pipeline's happy path.
 mode_var="MOCK_RUNNER_MODE_$calls"
 mode="${!mode_var:-${MOCK_RUNNER_MODE:-}}"
 if [[ -z "$mode" ]]; then
-  if [[ "$calls" -eq 1 ]]; then mode=triage; else mode=success; fi
+  case "$calls" in
+    1) mode=triage ;;
+    2) mode=outline ;;
+    *) mode=success ;;
+  esac
 fi
 body_var="MOCK_BODY_FILE_$calls"
 body_source="${!body_var:-${MOCK_BODY_FILE:-}}"
 triage_var="MOCK_TRIAGE_FILE_$calls"
 triage_source="${!triage_var:-${MOCK_TRIAGE_FILE:-${MOCK_TRIAGE_T2:-}}}"
+outline_var="MOCK_OUTLINE_FILE_$calls"
+outline_source="${!outline_var:-${MOCK_OUTLINE_FILE:-}}"
 
 repo="$PWD"
 job=""
@@ -510,6 +518,13 @@ require_triage_env() {
   }
 }
 
+require_outline_env() {
+  [[ -n "${ALLOD_PR_EXPLAIN_OUTLINE:-}" && -n "$outline_source" ]] || {
+    printf 'missing ALLOD_PR_EXPLAIN_OUTLINE or outline fixture\n' >&2
+    exit 27
+  }
+}
+
 case "$mode" in
   fail)
     printf '%s runner failed deliberately\n' "$runner" >&2
@@ -542,6 +557,21 @@ case "$mode" in
     require_triage_env
     cp "$triage_source" "$ALLOD_PR_EXPLAIN_TRIAGE"
     printf '{"tampered":true}' >> "$job/snapshot.json"
+    ;;
+  outline)
+    require_outline_env
+    require_body_env
+    cp "$outline_source" "$ALLOD_PR_EXPLAIN_OUTLINE"
+    cp "$body_source" "$ALLOD_PR_EXPLAIN_REPORT_BODY"
+    ;;
+  outline-no-plan)
+    require_body_env
+    cp "$body_source" "$ALLOD_PR_EXPLAIN_REPORT_BODY"
+    ;;
+  fragment-writes-report-body)
+    require_body_env
+    cp "$body_source" "$ALLOD_PR_EXPLAIN_REPORT_BODY"
+    printf '<p>rogue report body written by a fragment pass</p>\n' > "$job/report-body.html"
     ;;
   success)
     require_body_env
@@ -699,10 +729,11 @@ new_case() {
   export MOCK_RUNNER_DIR="$CASE_DIR/runner"
   export MOCK_FORGE_LOG="$CASE_DIR/forge.log"
   export MOCK_SCENARIO=same
-  unset MOCK_RUNNER_MODE MOCK_BODY_FILE MOCK_TRIAGE_FILE MOCK_VALID_BODY_FILE
-  for pass_number in 1 2 3 4; do
+  unset MOCK_RUNNER_MODE MOCK_BODY_FILE MOCK_TRIAGE_FILE MOCK_OUTLINE_FILE \
+    MOCK_VALID_BODY_FILE MOCK_INVALID_BODY_FILE
+  for pass_number in $(seq 1 20); do
     unset "MOCK_RUNNER_MODE_$pass_number" "MOCK_BODY_FILE_$pass_number" \
-      "MOCK_TRIAGE_FILE_$pass_number"
+      "MOCK_TRIAGE_FILE_$pass_number" "MOCK_OUTLINE_FILE_$pass_number"
   done
   mkdir -p "$MOCK_RUNNER_DIR" "$CASE_DIR/output"
   : > "$MOCK_FORGE_LOG"
@@ -737,13 +768,68 @@ scenario_runner_label() {
   esac
 }
 
-write_valid_body() {
-  local runner="$1"
-  local head runner_label body
+# Fragment fixtures for the sectioned pipeline: the outline pass's section
+# plan and front-matter fragment, one or two body-section fragments, and the
+# closing quiz-and-provenance fragment, plus their assembly — the exact body
+# the tool stages after the authoring passes. Exports the happy-path mock
+# inputs: pass 1 triage (fixture default), pass 2 outline + front, pass 3 the
+# first section, then (optionally a second section, then) the quiz pass, with
+# the unnumbered MOCK_BODY_FILE left on the assembled body so the slop pass
+# returns it unchanged.
+write_valid_fragments() {
+  local runner="$1" section_total="${2:-1}"
+  local head runner_label
   head=$(scenario_head_sha)
   runner_label=$(scenario_runner_label "$runner")
-  body="$CASE_DIR/valid-body.html"
-  export MOCK_BODY_FILE="$body"
+
+  FRONT_FRAGMENT="$CASE_DIR/fragment-front.html"
+  SECTION1_FRAGMENT="$CASE_DIR/fragment-section-1.html"
+  SECTION2_FRAGMENT="$CASE_DIR/fragment-section-2.html"
+  QUIZ_FRAGMENT="$CASE_DIR/fragment-quiz.html"
+  OUTLINE_FIXTURE="$CASE_DIR/outline.json"
+  ASSEMBLED_VALID="$CASE_DIR/assembled-valid.html"
+
+  if [[ "$section_total" -eq 2 ]]; then
+    cat > "$OUTLINE_FIXTURE" <<'EOF'
+{
+  "sections": [
+    {
+      "id": "background",
+      "title": "Background",
+      "layer": "concept",
+      "objectives": ["obj-1", "obj-3"],
+      "concepts": ["snapshot-immutability"],
+      "gist": "An immutable snapshot makes every later claim traceable."
+    },
+    {
+      "id": "staging",
+      "title": "The staged report boundary",
+      "layer": "mechanism",
+      "objectives": ["obj-2"],
+      "concepts": ["staged-report-boundary"],
+      "gist": "The staged body earns publication only through the validator."
+    }
+  ],
+  "notes": "Fixture evidence notes recorded by the outline pass."
+}
+EOF
+  else
+    cat > "$OUTLINE_FIXTURE" <<'EOF'
+{
+  "sections": [
+    {
+      "id": "background",
+      "title": "Background",
+      "layer": "concept",
+      "objectives": ["obj-1", "obj-2", "obj-3"],
+      "concepts": ["snapshot-immutability", "staged-report-boundary"],
+      "gist": "An immutable snapshot makes every later claim traceable."
+    }
+  ],
+  "notes": "Fixture evidence notes recorded by the outline pass."
+}
+EOF
+  fi
 
   {
     cat <<'EOF'
@@ -765,7 +851,17 @@ write_valid_body() {
     <li class="rx-card" data-q="how-to-reject"><h3>How to reject or roll back</h3><p>Reject the pull request or revert its commit.</p></li>
   </ul>
 </section>
+EOF
+    if [[ "$section_total" -eq 2 ]]; then
+      cat <<'EOF'
+<nav class="rx-toc" aria-label="Contents"><ol><li><a href="#objectives">Objectives</a></li><li><a href="#background">Background</a></li><li><a href="#staging">The staged report boundary</a></li><li><a href="#quiz">Quiz</a></li></ol></nav>
+EOF
+    else
+      cat <<'EOF'
 <nav class="rx-toc" aria-label="Contents"><ol><li><a href="#objectives">Objectives</a></li><li><a href="#background">Background</a></li><li><a href="#quiz">Quiz</a></li></ol></nav>
+EOF
+    fi
+    cat <<'EOF'
 <main id="rx-main">
   <section id="objectives" aria-labelledby="objectives-h" data-layer="concept">
     <h2 id="objectives-h">What you can do after reading</h2>
@@ -776,11 +872,36 @@ write_valid_body() {
       <li id="obj-3">You can trace every provenance field back to the immutable snapshot.</li>
     </ol>
   </section>
-  <section id="background" aria-labelledby="background-h" data-layer="concept" data-objective="obj-1 obj-3">
-    <h2 id="background-h">Background</h2>
-    <p class="rx-claim">An immutable snapshot makes every later claim traceable.</p>
-    <p>The complete diff and surrounding code supply the evidence for this explanation.</p>
-  </section>
+EOF
+  } > "$FRONT_FRAGMENT"
+
+  if [[ "$section_total" -eq 2 ]]; then
+    cat > "$SECTION1_FRAGMENT" <<'EOF'
+<section id="background" aria-labelledby="background-h" data-layer="concept" data-objective="obj-1 obj-3">
+  <h2 id="background-h">Background</h2>
+  <p class="rx-claim">An immutable snapshot makes every later claim traceable.</p>
+  <p>The complete diff and surrounding code supply the evidence for this explanation.</p>
+</section>
+EOF
+    cat > "$SECTION2_FRAGMENT" <<'EOF'
+<section id="staging" aria-labelledby="staging-h" data-layer="mechanism" data-objective="obj-2">
+  <h2 id="staging-h">The staged report boundary</h2>
+  <p class="rx-claim">The staged body earns publication only through the validator.</p>
+  <p>The tool captures each pass's output defensively before anything reads it.</p>
+</section>
+EOF
+  else
+    cat > "$SECTION1_FRAGMENT" <<'EOF'
+<section id="background" aria-labelledby="background-h" data-layer="concept" data-objective="obj-1 obj-2 obj-3">
+  <h2 id="background-h">Background</h2>
+  <p class="rx-claim">An immutable snapshot makes every later claim traceable.</p>
+  <p>The complete diff and surrounding code supply the evidence for this explanation.</p>
+</section>
+EOF
+  fi
+
+  {
+    cat <<'EOF'
   <section id="quiz" aria-labelledby="quiz-h" data-layer="receipts" data-objective="obj-1 obj-2 obj-3">
     <h2 id="quiz-h">Check yourself</h2>
     <p class="rx-claim">These questions test application rather than surface recall.</p>
@@ -838,7 +959,7 @@ write_valid_body() {
 </main>
 EOF
     cat <<EOF
-<footer class="rx-footer">
+<footer class="rx-footer" id="rx-provenance">
   <dl class="rx-provenance" data-repository="acme/widget" data-pr="7" data-pr-url="https://forge.example/acme/widget/pulls/7" data-base-sha="$BASE_SHA" data-head-sha="$head" data-runner="$runner">
     <dt data-field="repo">Repository</dt><dd>acme/widget</dd>
     <dt data-field="pr">Pull request</dt><dd>#7</dd>
@@ -855,19 +976,36 @@ EOF
   </dl>
 </footer>
 EOF
-  } > "$body"
+  } > "$QUIZ_FRAGMENT"
+
+  if [[ "$section_total" -eq 2 ]]; then
+    cat "$FRONT_FRAGMENT" "$SECTION1_FRAGMENT" "$SECTION2_FRAGMENT" "$QUIZ_FRAGMENT" \
+      > "$ASSEMBLED_VALID"
+    export MOCK_BODY_FILE_4="$SECTION2_FRAGMENT"
+    export MOCK_BODY_FILE_5="$QUIZ_FRAGMENT"
+  else
+    cat "$FRONT_FRAGMENT" "$SECTION1_FRAGMENT" "$QUIZ_FRAGMENT" > "$ASSEMBLED_VALID"
+    export MOCK_BODY_FILE_4="$QUIZ_FRAGMENT"
+  fi
+  export MOCK_OUTLINE_FILE="$OUTLINE_FIXTURE"
+  export MOCK_BODY_FILE_2="$FRONT_FRAGMENT"
+  export MOCK_BODY_FILE_3="$SECTION1_FRAGMENT"
+  export MOCK_BODY_FILE="$ASSEMBLED_VALID"
+  export MOCK_VALID_BODY_FILE="$ASSEMBLED_VALID"
 }
 
-# A body that is otherwise valid but carries one real structural defect the
-# validator names with a stable code — a timeline diagram outside any figure,
-# the same E8 contract a real attended run tripped. $2 is optional extra
-# markup for tests that need a second, attacker-shaped diagnostic. Leaves
-# MOCK_BODY_FILE on the defective body and MOCK_VALID_BODY_FILE on the clean
-# one, so a repair pass can be pointed at the corrected version.
-write_invalid_body() {
+# Fragments that are otherwise valid but whose first body section carries one
+# real structural defect the validator names with a stable code — a timeline
+# diagram outside any figure, the same E8 contract a real attended run
+# tripped. $2 is optional extra markup for tests that need a second,
+# attacker-shaped diagnostic. The section pass fixture and the unnumbered
+# slop-pass default both point at the defective content, so the assembled
+# body fails validation; MOCK_VALID_BODY_FILE stays on the clean assembly for
+# a repair pass to be pointed at.
+write_invalid_fragments() {
   local runner="$1" extra="${2:-}"
-  write_valid_body "$runner"
-  local valid="$MOCK_BODY_FILE" invalid="$CASE_DIR/invalid-body.html"
+  write_valid_fragments "$runner"
+  local invalid_section="$CASE_DIR/invalid-section-1.html"
 
   awk -v extra="$extra" '
     { print }
@@ -878,10 +1016,54 @@ write_invalid_body() {
       print "    </ol>"
       if (extra != "") print extra
     }
-  ' "$valid" > "$invalid"
+  ' "$SECTION1_FRAGMENT" > "$invalid_section"
 
-  export MOCK_VALID_BODY_FILE="$valid"
-  export MOCK_BODY_FILE="$invalid"
+  ASSEMBLED_INVALID="$CASE_DIR/assembled-invalid.html"
+  cat "$FRONT_FRAGMENT" "$invalid_section" "$QUIZ_FRAGMENT" > "$ASSEMBLED_INVALID"
+  export MOCK_BODY_FILE_3="$invalid_section"
+  export MOCK_BODY_FILE="$ASSEMBLED_INVALID"
+  export MOCK_INVALID_BODY_FILE="$ASSEMBLED_INVALID"
+}
+
+# Sabotaged section plans, one per rule the tool-side outline schema gate must
+# refuse. Each pairs with the valid front fragment: the schema gate runs
+# before the front-matter checks, so the sabotage under test is always the
+# one that fails the run.
+write_outline_fixtures() {
+  local dir="$TEST_TMP/outline"
+  mkdir -p "$dir"
+
+  jq -n '{sections: [
+      {id: "background", title: "Background", layer: "concept",
+       objectives: ["obj-1", "obj-2", "obj-3"], concepts: [], gist: "One."},
+      {id: "background", title: "Background again", layer: "concept",
+       objectives: ["obj-1"], concepts: [], gist: "Two."}
+    ]}' > "$dir/duplicate-ids.json"
+
+  jq -n '{sections: [
+      {id: "how-it-works", title: "How it works", layer: "mechanism",
+       objectives: ["obj-1", "obj-2", "obj-3"], concepts: [], gist: "One."},
+      {id: "background", title: "Background", layer: "concept",
+       objectives: ["obj-1"], concepts: [], gist: "Two."}
+    ]}' > "$dir/backward-layers.json"
+
+  jq -n '{sections: [
+      {id: "background", title: "Background", layer: "concept",
+       objectives: ["obj-1", "obj-3"], concepts: [], gist: "Leaves obj-2 unclaimed."}
+    ]}' > "$dir/unclaimed-objective.json"
+
+  jq -n '{sections: [
+      {id: "quiz", title: "A section squatting on the quiz id", layer: "concept",
+       objectives: ["obj-1", "obj-2", "obj-3"], concepts: [], gist: "One."}
+    ]}' > "$dir/reserved-id.json"
+
+  printf 'this is not a section plan at all\n' > "$dir/invalid.json"
+
+  export MOCK_OUTLINE_DUPLICATE_IDS="$dir/duplicate-ids.json"
+  export MOCK_OUTLINE_BACKWARD_LAYERS="$dir/backward-layers.json"
+  export MOCK_OUTLINE_UNCLAIMED_OBJECTIVE="$dir/unclaimed-objective.json"
+  export MOCK_OUTLINE_RESERVED_ID="$dir/reserved-id.json"
+  export MOCK_OUTLINE_INVALID="$dir/invalid.json"
 }
 
 write_snapshot_file() {
@@ -947,6 +1129,7 @@ setup_git_fixture
 install_forge_mock
 install_runner_mocks
 write_triage_fixtures
+write_outline_fixtures
 export PATH="$TEST_TMP/bin:$PATH"
 # Explicit injection, not PATH precedence: pr-explain prefers the forge
 # shipped beside its resolved allod tools root (here, $ROOT/forge, the real
