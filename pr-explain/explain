@@ -70,13 +70,17 @@ already suffices; the run prints that judgment and generates nothing.
 --force-tier replaces the tier judgment in either direction and is recorded
 in the judgment itself.
 
-After the author pass writes the report body, a deletion-only slop pass
-tightens its prose; --no-slop skips it. When the assembled report fails
-validation, allod sends the validator's diagnostics back to the same provider
-for exactly one repair pass. A full run therefore costs at most four provider
-calls (triage, author, slop, repair); --no-slop and --no-repair each remove
-one, and --no-repair fails the run on the first validation failure.
-Validation itself is identical either way.
+After triage, an outline pass plans the report's sections and writes its
+front matter; each planned section is then authored by its own provider call
+with the full reader contract re-anchored, and a final call writes the quiz
+and provenance. The tool assembles those fragments into the report body. A
+deletion-only slop pass tightens the assembled prose; --no-slop skips it.
+When the assembled report fails validation, allod sends the validator's
+diagnostics back to the same provider for exactly one repair pass. A full run
+therefore costs at most 17 provider calls (triage, outline, one per section
+up to the twelve-section budget cap, quiz, slop, repair); --no-slop and
+--no-repair each remove one, and --no-repair fails the run on the first
+validation failure. Validation itself is identical either way.
 
 The model defaults to the selected CLI's built-in default. Explanation effort
 defaults to high. --dry-run resolves and verifies the snapshot without
@@ -367,8 +371,10 @@ pr_explain_print_consent() {
     calls_display='0 (--dry-run)'
   else
     printf 'allod: provider disclosure confirmed by --%s\n' "$runner"
-    max_calls=2
-    passes='triage, author'
+    # 1 triage + 1 outline + at most 12 section passes (the triage budget cap
+    # on max_sections) + 1 quiz, before the optional slop and repair passes.
+    max_calls=15
+    passes='triage, outline, up to 12 section passes, quiz'
     if [[ "$slop" == true ]]; then
       max_calls=$((max_calls + 1))
       passes+=', slop'
@@ -446,6 +452,7 @@ pr_explain_run_provider() {
     "ALLOD_PR_EXPLAIN_REPORT_BODY=$body"
     "ALLOD_PR_EXPLAIN_JOB_DIR=$job_dir"
     "ALLOD_PR_EXPLAIN_TRIAGE=$job_dir/triage.json"
+    "ALLOD_PR_EXPLAIN_OUTLINE=$job_dir/outline.json"
   )
 
   case "$runner" in
@@ -672,6 +679,33 @@ pr_explain_run_triage_pass() {
   [[ -z "$job_status" ]] || die 1 "$subject modified the detached job checkout"
 }
 
+# The outline pass writes two artifacts: the front-matter fragment, captured
+# through the ordinary body-pass contract, and the section plan, which gets
+# the same regular-file custody checks as the triage judgment plus the schema
+# gate. The assembled report body must still be empty — every authoring pass
+# writes only its own fragment.
+pr_explain_run_outline_pass() {
+  local subject="$1" runner="$2" model="$3" effort="$4" repo_dir="$5" job_dir="$6"
+  local prompt="$7" fragment="$8" stdout_log="$9" stderr_log="${10}" capture="${11}"
+  local outline="${12}" triage="${13}" body="${14}" head_sha="${15}" snapshot_digest="${16}"
+  local outline_resolved
+
+  pr_explain_run_pass "$subject" "$runner" "$model" "$effort" "$repo_dir" "$job_dir" \
+    "$prompt" "$fragment" "$stdout_log" "$stderr_log" "$capture" \
+    "$head_sha" "$snapshot_digest"
+
+  [[ -s "$outline" ]] || die 1 "$subject completed without writing the section plan"
+  [[ -f "$outline" && ! -L "$outline" ]] ||
+    die 1 "$subject replaced the section plan with a non-regular file"
+  outline_resolved=$(realpath -e -- "$outline") || die 1 "could not resolve the section plan"
+  [[ "$outline_resolved" == "$outline" ]] ||
+    die 1 "$subject moved the section plan outside the job directory"
+  [[ ! -s "$body" ]] || die 1 "$subject wrote the report body outside its fragment"
+  pr_explain_validate_outline "$outline" "$triage" ||
+    die 1 "$subject wrote a section plan that fails the schema gate"
+  pr_explain_check_front_fragment "$subject" "$capture" "$outline"
+}
+
 # Render the validator's structured diagnostics as prompt-safe data: one stable
 # `CODE: message` line per error, with control bytes and backticks neutralized
 # and both the line length and the list bounded. Some diagnostics quote
@@ -715,11 +749,72 @@ pr_explain_write_slop_prompt() {
   local destination="$1" body="$2"
   {
     printf '# Tighten the staged report body\n\n'
-    printf 'The report body below was accepted from the author pass. Rewrite that same\n'
-    printf 'file in place; the snapshot, the diff, and the checkout have not changed.\n\n'
+    printf 'The report body below was assembled from the accepted authoring passes.\n'
+    printf 'Rewrite that same file in place; the snapshot, the diff, and the checkout\n'
+    printf 'have not changed.\n\n'
     printf 'Canonical body path, the only file you may change:\n\n'
     printf '    %s\n\n' "$body"
     pr_explain_emit_slop_prompt
+  } >"$destination"
+  chmod 0600 "$destination"
+}
+
+# Quote the accepted fragments, in assembly order, as the prompt's closing
+# section. The quoted report is data for the pass to continue, and it is what
+# re-anchors terminology and register: the pass sees the actual prose it
+# extends, not a summary of it.
+pr_explain_write_report_so_far() {
+  local fragment
+  printf '## The report so far\n\n'
+  printf 'Everything between the markers is the accepted report, quoted in assembly\n'
+  printf 'order. Continue it; never restate, rewrite, or contradict it.\n\n'
+  printf 'BEGIN THE REPORT SO FAR\n'
+  for fragment in "$@"; do
+    cat -- "$fragment"
+    if [[ "$(tail -c 1 -- "$fragment" | wc -l)" -eq 0 ]]; then
+      printf '\n'
+    fi
+  done
+  printf 'END THE REPORT SO FAR\n'
+}
+
+pr_explain_write_outline_prompt() {
+  local destination="$1"
+  {
+    pr_explain_emit_contract
+    printf '\n'
+    pr_explain_emit_outline_prompt
+  } >"$destination"
+  chmod 0600 "$destination"
+}
+
+pr_explain_write_section_prompt() {
+  local destination="$1" outline="$2" index="$3"
+  shift 3
+  local entry number=$((index + 1))
+  entry=$(jq --argjson index "$index" '.sections[$index]' "$outline") ||
+    die 1 "could not extract planned section $number from the section plan"
+  {
+    pr_explain_emit_contract
+    printf '\n'
+    pr_explain_emit_section_prompt
+    printf '\n## This call\n\n'
+    printf 'Write section %s of the plan in `outline.json`. Its entry:\n\n' "$number"
+    printf '```json\n%s\n```\n\n' "$entry"
+    pr_explain_write_report_so_far "$@"
+  } >"$destination"
+  chmod 0600 "$destination"
+}
+
+pr_explain_write_quiz_prompt() {
+  local destination="$1"
+  shift
+  {
+    pr_explain_emit_contract
+    printf '\n'
+    pr_explain_emit_quiz_prompt
+    printf '\n'
+    pr_explain_write_report_so_far "$@"
   } >"$destination"
   chmod 0600 "$destination"
 }
@@ -734,10 +829,15 @@ pr_explain() {
   local head_repo head_clone head_ref head_sha checkout_origin checkout_identity
   local base_fetch_url head_fetch_url
   local actual_base actual_head job_dir repo_dir discussion_status object_format
-  local body report prompt generated_date adjacent_temp
+  local body report generated_date adjacent_temp
   local body_capture repair_capture slop_capture assembly_source
-  local triage triage_prompt tier tier_reason forced_triage slop_size author_size
+  local triage triage_prompt tier tier_reason forced_triage slop_size assembled_size
   local snapshot_digest forge_bin
+  local outline fragments_dir front_fragment front_capture fragment
+  local section_count section_index section_number section_id section_label
+  local section_fragment section_capture section_prompt_file section_subject
+  local quiz_fragment quiz_capture
+  local -a assembly_fragments=()
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -964,7 +1064,10 @@ pr_explain() {
   generated_date=$(date -u +%F)
   body="$job_dir/report-body.html"
   report="$job_dir/report.html"
-  prompt="$job_dir/prompt.md"
+  outline="$job_dir/outline.json"
+  fragments_dir="$job_dir/fragments"
+  mkdir -p -- "$fragments_dir"
+  chmod 0700 "$fragments_dir"
   jq -n \
     --arg repository "$repository" \
     --argjson pull_request "$number" \
@@ -981,7 +1084,7 @@ pr_explain() {
       base_sha: $base_sha, head_sha: $head_sha, runner: $runner, model: $model,
       effort: $effort, generated: $generated, report_body: $report_body}' \
     >"$job_dir/report-contract.json"
-  pr_explain_emit_prompt >"$prompt"
+  pr_explain_write_outline_prompt "$job_dir/outline-prompt.md"
   triage="$job_dir/triage.json"
   triage_prompt="$job_dir/triage-prompt.md"
   pr_explain_emit_triage_prompt >"$triage_prompt"
@@ -1018,11 +1121,78 @@ pr_explain() {
     printf 'allod: triage tier %s: %s\n' "$tier" "$tier_reason"
   fi
 
+  # The authoring passes: outline (plans the sections and writes the front
+  # matter), then one pass per planned section in document order, then the
+  # closing quiz-and-provenance pass. Every pass writes only its own fragment
+  # — the assembled report body stays a tool artifact, checked empty after
+  # each pass — and each fragment is mechanically checked before the next
+  # provider call spends anything continuing from it.
+  front_fragment="$fragments_dir/front.html"
+  front_capture="$fragments_dir/front.captured.html"
+  : >"$front_fragment"
+  chmod 0600 "$front_fragment"
+  pr_explain_run_outline_pass "$runner runner outline pass" "$runner" "$model" "$effort" \
+    "$repo_dir" "$job_dir" "$job_dir/outline-prompt.md" "$front_fragment" \
+    "$job_dir/runner.outline.stdout" "$job_dir/runner.outline.stderr" "$front_capture" \
+    "$outline" "$triage" "$body" "$head_sha" "$snapshot_digest"
+  section_count=$(jq -r '.sections | length' "$outline") ||
+    die 1 "could not count the planned sections"
+  printf 'allod: outline accepted: %s section pass(es) to run\n' "$section_count"
+  assembly_fragments=("$front_capture")
+
+  for ((section_index = 0; section_index < section_count; section_index++)); do
+    section_number=$((section_index + 1))
+    section_id=$(jq -r ".sections[$section_index].id" "$outline") ||
+      die 1 "could not read the planned id for section $section_number"
+    section_label=$(printf '%02d' "$section_number")
+    section_subject="$runner runner section pass $section_number ($section_id)"
+    section_fragment="$fragments_dir/section-$section_label-$section_id.html"
+    section_capture="$fragments_dir/section-$section_label-$section_id.captured.html"
+    : >"$section_fragment"
+    chmod 0600 "$section_fragment"
+    section_prompt_file="$job_dir/section-prompt.$section_label-$section_id.md"
+    pr_explain_write_section_prompt "$section_prompt_file" "$outline" "$section_index" \
+      "${assembly_fragments[@]}"
+    pr_explain_run_pass "$section_subject" "$runner" "$model" "$effort" "$repo_dir" \
+      "$job_dir" "$section_prompt_file" "$section_fragment" \
+      "$job_dir/runner.section-$section_label.stdout" \
+      "$job_dir/runner.section-$section_label.stderr" "$section_capture" \
+      "$head_sha" "$snapshot_digest"
+    pr_explain_check_section_fragment "$section_subject" "$section_capture" \
+      "$outline" "$section_index"
+    [[ ! -s "$body" ]] || die 1 "$section_subject wrote the report body outside its fragment"
+    assembly_fragments+=("$section_capture")
+  done
+
+  quiz_fragment="$fragments_dir/quiz.html"
+  quiz_capture="$fragments_dir/quiz.captured.html"
+  : >"$quiz_fragment"
+  chmod 0600 "$quiz_fragment"
+  pr_explain_write_quiz_prompt "$job_dir/quiz-prompt.md" "${assembly_fragments[@]}"
+  pr_explain_run_pass "$runner runner quiz pass" "$runner" "$model" "$effort" "$repo_dir" \
+    "$job_dir" "$job_dir/quiz-prompt.md" "$quiz_fragment" "$job_dir/runner.quiz.stdout" \
+    "$job_dir/runner.quiz.stderr" "$quiz_capture" "$head_sha" "$snapshot_digest"
+  pr_explain_check_quiz_fragment "$runner runner quiz pass" "$quiz_capture" "$outline"
+  [[ ! -s "$body" ]] || die 1 "$runner runner quiz pass wrote the report body outside its fragment"
+  assembly_fragments+=("$quiz_capture")
+
+  # Assembly is code, not a provider call: concatenate the captured fragments
+  # in plan order into the staged report body, normalizing the one seam a
+  # capture can leave (a missing trailing newline would weld two fragments'
+  # tags onto one physical line).
   body_capture="$job_dir/report-body.captured.html"
   repair_capture="$job_dir/report-body.repair.captured.html"
-  pr_explain_run_pass "$runner runner" "$runner" "$model" "$effort" "$repo_dir" "$job_dir" \
-    "$prompt" "$body" "$job_dir/runner.stdout" "$job_dir/runner.stderr" \
-    "$body_capture" "$head_sha" "$snapshot_digest"
+  : >"$body"
+  for fragment in "${assembly_fragments[@]}"; do
+    cat -- "$fragment" >>"$body" || die 1 "could not assemble the report body from its fragments"
+    # Command substitution strips a trailing newline, so probe for one by
+    # counting it instead of comparing the captured byte.
+    if [[ "$(tail -c 1 -- "$fragment" | wc -l)" -eq 0 ]]; then
+      printf '\n' >>"$body"
+    fi
+  done
+  cp -- "$body" "$body_capture" || die 1 "could not record the assembled report body"
+  chmod 0600 "$body_capture"
 
   assembly_source="$body_capture"
   if [[ "$slop" == true ]]; then
@@ -1032,8 +1202,8 @@ pr_explain() {
       "$job_dir" "$job_dir/slop-prompt.md" "$body" "$job_dir/runner.slop.stdout" \
       "$job_dir/runner.slop.stderr" "$slop_capture" "$head_sha" "$snapshot_digest"
     slop_size=$(stat -c %s -- "$slop_capture") || die 1 "could not size the slop pass capture"
-    author_size=$(stat -c %s -- "$body_capture") || die 1 "could not size the author pass capture"
-    [[ "$slop_size" -le "$author_size" ]] ||
+    assembled_size=$(stat -c %s -- "$body_capture") || die 1 "could not size the assembled report body"
+    [[ "$slop_size" -le "$assembled_size" ]] ||
       die 1 "$runner runner slop pass grew the report body; a slop pass may only cut"
     assembly_source="$slop_capture"
   fi
@@ -1110,11 +1280,14 @@ pr_main() {
     explain) pr_explain "$@" ;;
     _emit-asset)
       [[ $# -eq 1 ]] ||
-        die 1 "internal asset emitter requires css, js, prompt, triage-prompt, slop-prompt, repair-prompt, or gallery"
+        die 1 "internal asset emitter requires css, js, contract, outline-prompt, section-prompt, quiz-prompt, triage-prompt, slop-prompt, repair-prompt, or gallery"
       case "$1" in
         css) pr_explain_emit_css ;;
         js) pr_explain_emit_js ;;
-        prompt) pr_explain_emit_prompt ;;
+        contract) pr_explain_emit_contract ;;
+        outline-prompt) pr_explain_emit_outline_prompt ;;
+        section-prompt) pr_explain_emit_section_prompt ;;
+        quiz-prompt) pr_explain_emit_quiz_prompt ;;
         triage-prompt) pr_explain_emit_triage_prompt ;;
         slop-prompt) pr_explain_emit_slop_prompt ;;
         repair-prompt) pr_explain_emit_repair_prompt ;;
