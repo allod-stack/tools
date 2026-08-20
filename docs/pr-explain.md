@@ -61,10 +61,13 @@ deliberate one-run override. The default `high` effort favors careful repository
 investigation; lower it for a quick iteration or raise it only when the
 installed CLI supports the requested level.
 
-## Triage and the four passes
+## Triage and the pass pipeline
 
 Generation is a pipeline of provider passes, all against the same consented
-subscription CLI, at most four per run:
+subscription CLI. The report is authored one piece per pass — the reader
+contract is re-anchored at the top of every authoring prompt, so the last
+section is written under the same instruction pressure as the first — and the
+tool assembles the pieces:
 
 1. **Triage** (`pr-explain/triage-prompt.md`) reads the job files and the
    checkout and writes `triage.json` into the private job directory: a tier, a
@@ -74,14 +77,37 @@ subscription CLI, at most four per run:
 2. **T0 short-circuit** — when triage answers tier `T0` and no `--force-tier`
    was given, the command prints the tier judgment and its reason, generates
    nothing, and exits 0.
-3. **Author** (`pr-explain/prompt.md`) writes the report body, honoring the
-   triage tier, budget, and objectives.
-4. **Slop** (`pr-explain/slop-prompt.md`) tightens the staged body by deletion
-   only: it may cut sentences, list items, and whole elements and tighten
-   wording, but it cannot add content or change code, provenance, quiz
-   correctness data, or objective ids. Skip it with `--no-slop`.
-5. **Validation and one bounded repair pass**, unchanged: the same validator,
+3. **Outline** (`pr-explain/outline-prompt.md`) does the deep investigation,
+   writes `outline.json` — the section plan: id, title, layer, objectives,
+   concepts, and a one-sentence gist per section, plus free-form evidence
+   notes for later passes — and writes the report's front matter (masthead,
+   operator summary, table of contents, objectives block) as a fragment. The
+   tool validates the plan mechanically before any section pass runs: section
+   count within the triage budget, unique non-reserved kebab-case ids, layer
+   order never backward with at least one concept section, every triage
+   objective claimed, and a table of contents that matches the plan exactly.
+   An invalid plan fails the run; there is no outline repair.
+4. **Section passes**, one provider call per planned section, strictly in
+   document order (`pr-explain/section-prompt.md`). Each call receives the
+   shared contract, the section's plan entry, and every previously accepted
+   fragment quoted verbatim, and writes exactly one `<section>` fragment.
+   The tool checks each fragment's opening tag against the plan before the
+   next call runs.
+5. **Quiz** (`pr-explain/quiz-prompt.md`) sees the whole assembled-so-far
+   report and writes the final quiz section, the closing `main` tag, and the
+   provenance footer.
+6. **Assembly** — the tool, not a provider, concatenates the fragments into
+   the staged report body.
+7. **Slop** (`pr-explain/slop-prompt.md`) tightens the assembled body by
+   deletion only: it may cut sentences, list items, and whole elements and
+   tighten wording, but it cannot add content or change code, provenance,
+   quiz correctness data, or objective ids. Skip it with `--no-slop`.
+8. **Validation and one bounded repair pass**, unchanged: the same validator,
    with the same errors blocking publication.
+
+Every authoring prompt opens with one shared block (`pr-explain/contract.md`):
+the characterization anchor, the reader contract, evidence discipline, voice,
+and the fragment grammar. Per-pass rules live only in their pass's prompt.
 
 Tiers grade how much explanation the change deserves:
 
@@ -160,9 +186,10 @@ The provider flag is the consent boundary. Before running a provider, the
 command prints the repository and PR number, immutable base and head commits,
 selected runner, and destination. Choosing `--codex` or `--claude` explicitly
 means the PR title, body, review context, complete diff, and relevant source can
-be sent to that provider's installed subscription CLI, in at most four calls per
-run — triage, author, slop, and repair — and the printed consent text states
-that maximum. There is no API-key, Pi, nullsink, or direct provider-API mode.
+be sent to that provider's installed subscription CLI, in at most 17 calls per
+run — triage, outline, one per planned section up to the twelve-section budget
+cap, quiz, slop, and repair — and the printed consent text states that
+maximum. There is no API-key, Pi, nullsink, or direct provider-API mode.
 
 The provider runs inside the development VM cage. Provider API credentials and
 routing overrides, cloud-provider credentials and routing switches, and Forge
@@ -256,16 +283,24 @@ every cage postcondition is re-checked afterward: the staged body is captured
 safely, the immutable snapshot must be unchanged, and the detached job checkout
 must still be clean at the snapshotted head.
 
-The loop is bounded, not adaptive. One run makes **at most four provider
-calls** — triage, author, slop, and repair:
+The loop is bounded, not adaptive. With `N` planned sections (1 to 12, capped
+by the triage `max_sections` budget), one run makes **at most `N + 5`
+provider calls** — 17 at the twelve-section worst case, and the consent text
+states that ceiling before triage runs:
 
 | Run | Provider calls |
 |---|---|
 | `--dry-run` | 0 |
 | Triage answers `T0`, no `--force-tier` | 1 |
-| Body validates | 3 (2 with `--no-slop`) |
-| Body fails, repair validates | 4 (3 with `--no-slop`) |
-| Body fails, repaired body fails | 4, then the run fails |
+| Outline fails the schema gate | 2, then the run fails |
+| Body validates | N + 4 (N + 3 with `--no-slop`) |
+| Body fails, repair validates | N + 5 (N + 4 with `--no-slop`) |
+| Body fails, repaired body fails | N + 5, then the run fails |
+
+A fragment pass that breaks its mechanical contract — a section that does not
+match its plan entry, a missing section plan, a fragment carrying another
+pass's markup — fails the run at that pass, before the next provider call
+spends anything continuing from it.
 
 A second validation failure is final. Both passes' diagnostics, prompts, runner
 logs, and captured bodies stay in the preserved job directory, and any previous
@@ -285,9 +320,13 @@ runner failure, missing output, or validation failure, the command prints and
 preserves the `.allod-pr-explain.*` job directory beside the destination so you
 can inspect the prompts, runner logs, snapshot, discussion, complete diff,
 triage verdict, and rejected staging file alongside the validator diagnostics.
-Each pass keeps its own artifacts there: the triage verdict in `triage.json`,
-`runner.stdout`/`runner.stderr` and `report-body.captured.html` for the
-authoring call, the tightened body captured after the slop pass, and `repair-prompt.md`,
+Each pass keeps its own artifacts there: the triage verdict in `triage.json`;
+the section plan in `outline.json` and the per-pass prompts
+(`outline-prompt.md`, one `section-prompt.NN-<id>.md` per section,
+`quiz-prompt.md`); the captured fragments under `fragments/`; per-pass runner
+logs (`runner.outline.*`, `runner.section-NN.*`, `runner.quiz.*`); the
+assembled body in `report-body.captured.html`; the tightened body captured
+after the slop pass; and `repair-prompt.md`,
 `runner.repair.stdout`/`runner.repair.stderr`, and
 `report-body.repair.captured.html` for the repair pass, with the
 diagnostics that triggered each in `validation.diagnostics.txt` and

@@ -14,7 +14,10 @@ pr-explain/               PR explanation report tool (behind `allod pr explain`)
   explain                 entry point: resolve, run the provider, assemble, publish
   validate-report          standalone report validator, usable directly
   lib.sh                  shared asset emission and validation logic
-  prompt.md               shared comprehension-first agent prompt
+  contract.md             shared reader contract prepended to every authoring prompt
+  outline-prompt.md       outline pass: section plan and front matter
+  section-prompt.md       one body section per provider call
+  quiz-prompt.md          closing quiz and provenance pass
   repair-prompt.md        rules for the single bounded validation repair pass
   report.css              responsive component vocabulary
   report.js               optional progressive enhancements

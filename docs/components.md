@@ -6,7 +6,8 @@ The checked assets are:
 
 - [`pr-explain/report.css`](../pr-explain/report.css) — layout, color, print, focus, and responsive behavior;
 - [`pr-explain/report.js`](../pr-explain/report.js) — optional sequence, quiz, codewalk, and print enhancements;
-- [`pr-explain/prompt.md`](../pr-explain/prompt.md) — investigation and authoring contract;
+- [`pr-explain/contract.md`](../pr-explain/contract.md) — the shared reader contract, characterization anchor, and fragment grammar prepended to every authoring prompt;
+- [`pr-explain/outline-prompt.md`](../pr-explain/outline-prompt.md), [`pr-explain/section-prompt.md`](../pr-explain/section-prompt.md), [`pr-explain/quiz-prompt.md`](../pr-explain/quiz-prompt.md) — the per-pass authoring contracts;
 - [`pr-explain/component-gallery.html`](../pr-explain/component-gallery.html) — self-contained visual reference and regression fixture.
 
 The runner writes a body fragment. `allod` supplies the document shell and inserts the checked CSS and JavaScript verbatim. A report cannot override either asset: extra style blocks, scripts, inline styles, and event-handler attributes fail validation. This is what turns a component fix into one reviewed template change instead of another per-report fork.
