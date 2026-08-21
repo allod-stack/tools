@@ -173,8 +173,25 @@ pr_explain_check_front_fragment() {
 
   toc_expected=$(jq -r '(["objectives"] + (.sections | map(.id)) + ["quiz"]) | join("\n")' "$outline") ||
     die 1 "could not derive the planned table of contents"
-  toc_actual=$(sed -n '/class="rx-toc"/,/<\/nav>/p' "$fragment" |
-    grep -o 'href="#[^"]*"' | sed 's/^href="#//; s/"$//') || true
+  # Bound the href scan to the nav element itself. A line-address range would
+  # run to end-of-fragment when the nav opens and closes on one physical line
+  # (the closing address never matches a later line), scooping legitimate
+  # anchors that follow the table of contents — a termref in the objectives
+  # block, for example — into the comparison.
+  toc_actual=$(awk '
+    !in_nav && /<nav class="rx-toc"/ {
+      in_nav = 1
+      sub(/^.*<nav class="rx-toc"/, "<nav class=\"rx-toc\"")
+    }
+    in_nav {
+      if (index($0, "</nav>")) {
+        sub(/<\/nav>.*$/, "</nav>")
+        print
+        exit
+      }
+      print
+    }
+  ' "$fragment" | grep -o 'href="#[^"]*"' | sed 's/^href="#//; s/"$//') || true
   [[ "$toc_actual" == "$toc_expected" ]] ||
     die 1 "$subject table of contents does not match the section plan"
 }

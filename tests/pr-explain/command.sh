@@ -1273,6 +1273,40 @@ assert_contains "$CAPTURE_OUTPUT" "table of contents does not match the section 
   "diagnoses the plan-contradicting table of contents"
 assert_runner_calls codex 2 "the run stops before any section pass"
 
+# The TOC guard compares only the nav element's own links against the plan: a
+# legitimate anchor after the table of contents — here a term-recall link in
+# the objectives block — must not be scooped into the comparison. This is the
+# regression witness for a nav that opens and closes on one physical line.
+new_case front-anchor-after-toc
+write_valid_fragments codex
+anchored_front="$CASE_DIR/anchored-front.html"
+sed 's#<p class="rx-claim">Objectives bound the report: every later section and quiz item names the objective it serves.</p>#<p class="rx-claim">Objectives bound the <dfn class="rx-term" id="term-report">report</dfn>: every later section and quiz item names the objective it serves, and recall links point back to the <a class="rx-termref" href="\#term-report">report</a>.</p>#' \
+  "$FRONT_FRAGMENT" > "$anchored_front"
+if cmp -s "$FRONT_FRAGMENT" "$anchored_front"; then
+  fail "the anchored front fixture actually adds an anchor after the table of contents"
+else
+  pass "the anchored front fixture actually adds an anchor after the table of contents"
+fi
+export MOCK_BODY_FILE_2="$anchored_front"
+anchored_output="$CASE_DIR/output/report.html"
+capture_explain "$TEST_TMP/checkout" 7 --codex -R acme/widget --output "$anchored_output"
+assert_success "front matter with an anchor after the table of contents passes the TOC guard"
+assert_file_exists "$anchored_output" "the anchored front matter publishes"
+assert_runner_calls codex 5 \
+  "the anchored front matter spends the full five-pass run, not a short-circuit"
+
+new_case section-missing-layer
+write_valid_fragments codex
+unlayered_section="$CASE_DIR/unlayered-section.html"
+sed 's# data-layer="concept"##' "$SECTION1_FRAGMENT" > "$unlayered_section"
+export MOCK_BODY_FILE_3="$unlayered_section"
+capture_explain "$TEST_TMP/checkout" 7 --codex -R acme/widget \
+  --output "$CASE_DIR/output/report.html"
+assert_failure "fails closed when a section fragment's opening tag lacks data-layer"
+assert_contains "$CAPTURE_OUTPUT" "does not open with the planned section tag" \
+  "diagnoses the layerless section against the plan"
+assert_runner_calls codex 3 "the run stops at the layerless section pass"
+
 new_case section-wrong-id
 write_valid_fragments codex
 mislabeled_section="$CASE_DIR/mislabeled-section.html"
