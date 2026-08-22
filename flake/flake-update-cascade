@@ -105,13 +105,32 @@ get_update_paths() {
 }
 
 # Extract the full rev for a direct input path from a lock file.
+#
+# A path is walked one edge at a time, and an edge is one of two shapes: a
+# pinned input is the node's name as a string, while a `follows` is an absolute
+# path from root as an array. Resolving the array the same way is what keeps
+# this working across an update that turns a pin into a redirect — the paths are
+# discovered from the pre-update lock, so an input collapsed to a `follows` by
+# the update is still asked about against the post-update lock. Indexing
+# `.nodes` with the array instead ends the run with "Cannot index object with
+# array", after Nix has already written the new lock and before it is committed.
+# A path that no longer resolves yields empty rather than an error.
 get_rev() {
   local lockfile="$1" path="$2"
   jq -r --arg path "$path" '
     . as $lock
-    | reduce ($path | split("/"))[] as $part
-        ("root"; $lock.nodes[.].inputs[$part])
-    | $lock.nodes[.].locked.rev // empty
+    | def follow($node; $parts):
+        if $node == null then null
+        elif ($parts | length) == 0 then $node
+        else
+          ($lock.nodes[$node].inputs[$parts[0]]) as $edge
+          | (if ($edge | type) == "array"
+             then follow("root"; $edge)
+             else $edge end) as $next
+          | follow($next; $parts[1:])
+        end;
+      follow("root"; ($path | split("/")))
+    | if . == null then empty else $lock.nodes[.].locked.rev // empty end
   ' "$lockfile"
 }
 
