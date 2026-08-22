@@ -156,6 +156,11 @@ case "$hook" in
     fi
 
     while read -r local_ref local_sha remote_ref remote_sha; do
+      if [[ "$remote_ref" == refs/for/* ]]; then
+        echo "ERROR: AGit is not an accepted intake path for this workflow. Push an ordinary branch via allod change submit, or use the patch relay for public repositories." >&2
+        exit 1
+      fi
+
       local_branch="$(branch_from_ref "$local_ref")"
       remote_branch="$(branch_from_ref "$remote_ref")"
 

@@ -5,7 +5,8 @@ Git hook policy enforcement and setup scripts.
 ## `protected-refs-policy`
 
 Hook dispatcher that enforces branch protection, signing requirements, and
-external remote restrictions. Invoked as a git hook (pre-commit, pre-rebase,
+external remote restrictions, and rejects AGit `refs/for/*` submissions.
+Invoked as a git hook (pre-commit, pre-rebase,
 pre-merge-commit, pre-push) and delegates to per-repo tracked hooks and
 `.git/hooks/` hooks after running policy checks.
 

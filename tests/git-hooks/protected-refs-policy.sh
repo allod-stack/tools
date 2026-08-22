@@ -92,6 +92,23 @@ printf '%s %s %s %s\n' \
   | assert_blocks "pre-push: blocks push to unauthorized remote" \
     bash "$policy" pre-push origin ssh://example.invalid/repo.git
 
+# --- Pre-push: AGit ref blocking ---
+
+printf '%s %s %s %s\n' \
+  refs/heads/agent/test "${zero}1" refs/for/master/some-topic "$zero" \
+  | assert_blocks "pre-push: blocks AGit refs/for/* push" \
+    bash "$policy" pre-push origin "$forge_url"
+
+grep -q "AGit is not an accepted intake path" "$test_stderr" \
+  && pass "pre-push: AGit block explains the sanctioned intake paths" \
+  || fail "pre-push: AGit block explains the sanctioned intake paths" \
+    "expected AGit intake-path message in stderr, got: $(cat "$test_stderr")"
+
+printf '%s %s %s %s\n' \
+  refs/heads/agent/foo "${zero}1" refs/heads/agent/foo "$zero" \
+  | assert_allows "pre-push: allows ordinary agent/foo push" \
+    bash "$policy" pre-push origin "$forge_url"
+
 # --- Pre-push: force-push blocking ---
 
 git checkout -b agent/feature >/dev/null 2>&1
