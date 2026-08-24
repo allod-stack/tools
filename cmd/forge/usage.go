@@ -20,6 +20,8 @@ PR commands:
       List open pull requests
   forge pr view <number>
       Show PR details and comments
+  forge pr snapshot <number>
+      Print a stable immutable PR snapshot as JSON
   forge pr review-comments <number>
       List inline review comments with IDs (for use with reply)
   forge pr reply <number> <comment-id> [-b <text> | -F <file>]
@@ -117,6 +119,15 @@ Flags:
 	"pr view": `Usage: forge pr view <number> [-R <owner/repo>]
 
 Show PR details and comments.
+
+Flags:
+  -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
+`,
+	"pr snapshot": `Usage: forge pr snapshot <number> [-R <owner/repo>]
+
+Print a stable, versioned JSON snapshot of a pull request and its immutable
+base/head commits. Fork pull requests retain each side's repository identity
+and HTTPS clone URL.
 
 Flags:
   -R, --repo <owner/repo>   Target repository (default: inferred from git remote)

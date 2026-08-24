@@ -60,6 +60,8 @@ func TestValidation(t *testing.T) {
 		{"requires a title when creating an issue", []string{"issue", "create", "--body", "body"}, "requires --title"},
 		{"requires a change when editing an issue", []string{"issue", "edit", "20"}, "issue edit requires"},
 		{"rejects conflicting issue milestone edit flags", []string{"issue", "edit", "20", "--milestone", "July batch", "--remove-milestone"}, "cannot be combined"},
+		{"requires a positive pull request snapshot number", []string{"pr", "snapshot", "nope"}, "PR number must be a positive integer"},
+		{"requires one pull request snapshot number", []string{"pr", "snapshot"}, "usage: forge pr snapshot"},
 		{"requires a pull request comment body", []string{"pr", "comment", "12"}, "requires --body or --body-file"},
 		{"requires an issue comment body", []string{"issue", "comment", "20"}, "requires --body or --body-file"},
 		{"rejects clear plus issue label changes", []string{"issue", "labels", "20", "--clear", "--add-label", "bug"}, "--clear cannot be combined"},

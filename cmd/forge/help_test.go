@@ -48,6 +48,7 @@ func TestCommandHelp(t *testing.T) {
 
 		// --- Read-only commands ---
 		{"pr list --help", []string{"pr", "list", "--help"}, "pr list", []string{"--repo"}},
+		{"pr snapshot --help", []string{"pr", "snapshot", "--help"}, "pr snapshot", []string{"<number>", "versioned JSON"}},
 		{"issue view -h", []string{"issue", "view", "-h"}, "issue view", []string{"<number>"}},
 		{"pr find-by-head --help", []string{"pr", "find-by-head", "--help"}, "pr find-by-head", []string{"<branch>"}},
 		{"issue edit -h", []string{"issue", "edit", "-h"}, "issue edit", []string{"--title", "--body-file", "--remove-milestone", "--add-label"}},

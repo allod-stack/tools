@@ -142,6 +142,8 @@ func dispatch(resource, command string, args []string) {
 			prList(args)
 		case "view":
 			prView(args)
+		case "snapshot":
+			prSnapshotCommand(args)
 		case "review-comments":
 			prReviewComments(args)
 		case "reply":
