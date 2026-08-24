@@ -1,8 +1,9 @@
 package main
 
-// Port of tests/forge/api-errors.sh, plus new tests pinning allod/tools#144.
+// Retained API-error scenarios from the retired shell suite, plus tests that
+// pin the corrected allod/tools#144 behavior.
 //
-// Bash cases intentionally omitted as already covered (see
+// Historical shell cases intentionally omitted as already covered (see
 // cmd/forge/harness_test.go: TestAPIErrorRendering, TestAPITransportFailure,
 // TestCurlExitCodeMapping, TestRecordingServerEnqueue; and
 // internal/forgeapi/client_test.go for the transport layer beneath them):
@@ -45,12 +46,10 @@ package main
 //     sub-test and by TestRecordingServerEnqueue. The rest of this scenario
 //     is a check that `issue view`'s full rendering (issue title, then a
 //     second request for comments) was not broken by splitting status from
-//     body; that is `issue view`'s own behaviour (tests/forge/read.sh), not
-//     api()'s, and is out of scope for this file.
+//     body; that behavior is pinned by read_test.go, not this file.
 //
-// That accounts for every tests/forge/api-errors.sh case; nothing remains to
-// port. What follows are new tests pinning behaviour bash's suite never
-// covered.
+// That accounts for every retired API-error scenario. What follows pins
+// behavior the shell suite never covered.
 
 import (
 	"net/http"

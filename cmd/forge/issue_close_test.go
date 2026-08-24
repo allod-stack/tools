@@ -1,6 +1,6 @@
 package main
 
-// Port of tests/forge/issue-close.sh: issue close's reason/duplicate-of
+// Retained shell-suite scenarios for issue close's reason/duplicate-of
 // comment composition and the comment-then-PATCH request order.
 //
 // Shared scaffolding (expReq, assertScenario, runOK, assertJSONBody) lives in

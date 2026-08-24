@@ -1,6 +1,6 @@
 package main
 
-// Ported from tests/forge/validation.sh.
+// Retained validation scenarios from the retired shell suite.
 //
 // Bash-test cases intentionally omitted here because
 // cmd/forge/harness_test.go already pins them byte-for-byte:

@@ -2,14 +2,11 @@ package main
 
 // Differential-parity tests.
 //
-// Everything here was found by running the bash `forge` and this port side by
-// side against the same local responder, and every expectation below is the
-// byte-exact output bash produced for the same argv and the same fixture —
-// not what the port "should" do. Each block names the bash line it comes from.
-//
-// The bash suite (tests/forge/*.sh) covers none of these: they are the corners
-// where the shell's own machinery — command substitution, `read`, the `echo`
-// builtin, jq's JSON parser — is part of the observable behaviour.
+// Everything here was found by running the retired Bash `forge` and the Go
+// port side by side against the same local responder. Every expectation is the
+// byte-exact historical output for the same argv and fixture, not what the port
+// "should" do. These are corners where shell machinery was observable and the
+// old shell suite had no coverage.
 
 import (
 	"os"

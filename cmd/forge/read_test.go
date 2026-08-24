@@ -1,14 +1,12 @@
 package main
 
-// Ported from tests/forge/read.sh. Nothing in read.sh is already pinned by
-// cmd/forge/harness_test.go (that file's foundation tests exercise auth,
-// token verification, and api()/apiTry error rendering, not the read
-// commands' own output rendering or request shapes), so every scenario below
-// is ported; there is nothing to list as intentionally omitted.
+// Retained read-command scenarios from the retired shell suite. The foundation
+// tests in harness_test.go exercise auth, token verification, and api()/apiTry
+// error rendering, not the read commands' own output or request shapes, so all
+// former scenarios remain here.
 //
-// Fixture bodies are copied verbatim from tests/forge/testlib.sh's mock curl
-// so that the same substrings bash's assert_contains checked are present
-// here too. bash's assert_request/assert_auth use 1-based request numbers
+// Fixture bodies preserve the retired mock Forgejo responses so the same output
+// substrings remain covered. The shell assertions used 1-based request numbers
 // counting from the last reset_requests; srv.assertRequest and
 // srv.requests()[i] are 0-based, so bash's request N is index N-1 here.
 

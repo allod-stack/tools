@@ -1,8 +1,8 @@
 package main
 
-// Shared helpers, transliterated one for one from the bash forge script. Every
-// exported behaviour here is pinned by tests/forge/*.sh; the bash file is the
-// spec and the line numbers in the comments point at it.
+// Shared helpers preserving the frozen CLI contract inherited from the retired
+// Bash implementation. Exported behaviour is pinned by the Go test suite and
+// docs/forge.md; historical line references in comments name that implementation.
 //
 // Package-level state mirrors the bash globals. Command implementations read
 // and write these directly, the way the bash functions read $REPO and $BODY:

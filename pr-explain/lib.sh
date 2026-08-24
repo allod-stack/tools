@@ -3,27 +3,16 @@
 # Sourced with `set -euo pipefail` already in effect in the caller.
 
 PR_EXPLAIN_LIB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-# The allod tools root is always this tool directory's parent: whichever
-# candidate `resolve_pr_explain_dir` in the `allod` dispatcher picked — an
-# ALLOD_TOOLS_DIR package, a source checkout's own `pr-explain/`, or a
-# `$WORK_DIR/allod/tools/pr-explain` checkout — that parent is exactly the
-# root `forge` ships beside in every one of those layouts.
-PR_EXPLAIN_TOOLS_ROOT="$(cd -- "$PR_EXPLAIN_LIB_DIR/.." && pwd)"
 
 pr_explain_asset_dir() {
   printf '%s\n' "$PR_EXPLAIN_LIB_DIR"
 }
 
-# Resolve the `forge` executable to use for this run. Checked in order:
-#  1. ALLOD_PR_EXPLAIN_FORGE — an explicit override for tests and development,
-#     validated as an executable file so it cannot silently no-op.
-#  2. The `forge` shipped beside the resolved allod tools root, so a source
-#     checkout's own companion `forge` is preferred over anything older that
-#     happens to sit earlier on PATH.
-#  3. `forge` on PATH, for packaged installs where `forge` ships as its own
-#     package rather than beside `pr-explain/`.
+# Resolve the `forge` executable to use for this run. An explicit
+# ALLOD_PR_EXPLAIN_FORGE override supports tests and development; installed
+# use resolves the separately packaged Go binary from PATH.
 pr_explain_resolve_forge() {
-  local override="${ALLOD_PR_EXPLAIN_FORGE:-}" candidate override_dir
+  local override="${ALLOD_PR_EXPLAIN_FORGE:-}" override_dir
 
   if [[ -n "$override" ]]; then
     [[ -f "$override" && -x "$override" ]] ||
@@ -34,14 +23,7 @@ pr_explain_resolve_forge() {
     return 0
   fi
 
-  candidate="$PR_EXPLAIN_TOOLS_ROOT/forge"
-  if [[ -f "$candidate" && -x "$candidate" ]]; then
-    printf '%s\n' "$candidate"
-    return 0
-  fi
-
-  command -v forge 2>/dev/null ||
-    die 1 "forge companion not found beside allod tools root '$PR_EXPLAIN_TOOLS_ROOT' or on PATH"
+  command -v forge 2>/dev/null || die 1 "forge not found on PATH"
 }
 
 pr_explain_emit_asset() {

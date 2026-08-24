@@ -1,9 +1,8 @@
 package main
 
-// The API call itself and the rendering of its failures. Everything here is a
-// transliteration of bash api() (forge lines 244-274) and the errexit that
-// follows its call sites; tests/forge/api-errors.sh pins the exact text and
-// the exact exit codes.
+// The API call itself and the rendering of its failures. Everything here
+// preserves the contract of the retired Bash api() and the errexit that
+// followed its call sites; the Go API-error tests pin exact text and exit codes.
 
 import (
 	"bytes"

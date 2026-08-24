@@ -27,8 +27,8 @@ forge: POST /repos/owner/repo/labels failed: HTTP 403: user should have a permis
 ```
 
 Read the status to tell a permission problem (403) from a missing resource (404) or
-a rejected payload (422). Redirects count as failures too: no `-L` is passed, so a
-3xx body is never the resource that was requested -- an `http://` `FORGE_URL` against
+a rejected payload (422). Redirects are not followed and count as failures, so a 3xx
+body is never mistaken for the requested resource. An `http://` `FORGE_URL` against
 an https-only forge reports `HTTP 308` rather than looking like an empty result.
 
 The trailing text is the API's `message` when the response carries one. Otherwise it
@@ -36,9 +36,11 @@ is the start of the raw body, which for a proxy error is HTML rather than anythi
 the forge said; either way it is truncated to 200 characters, flattened to a single
 line, and stripped of control bytes. A response with no body leaves just the status.
 
-A transport failure -- the request never completing -- instead reports `curl exit <n>`
-and returns curl's own code, so 22 specifically means the forge answered and the
-answer was not a success.
+A transport failure -- the request never completing -- instead reports the
+compatibility message `curl exit <n>` and returns the corresponding curl-style code.
+The Go client preserves that established CLI contract even though requests are made
+in-process; code 22 specifically means the forge answered and the answer was not a
+success.
 
 ## PR commands
 

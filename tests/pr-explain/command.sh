@@ -1132,31 +1132,31 @@ assert_contains "$(cat "$slop_output")" "The change makes the teaching path expl
 assert_contains "$(cat "$MOCK_RUNNER_DIR/codex.5.stdin")" "the only file you may change" \
   "the slop prompt names the canonical body path as the only writable file"
 
-# forge companion resolution: pr-explain must use the `forge` shipped beside
-# the resolved allod tools root over anything installed earlier on PATH, per
-# the exact bug this guards against — a stale PATH `forge` shadowing a source
-# checkout's own compatible companion.
+# forge resolution: the retired Bash companion no longer exists beside a
+# source checkout, so pr-explain must resolve the separately packaged Go
+# binary from PATH.
 
-new_case forge-resolution-source-checkout-beats-stale-path
+new_case forge-resolution-source-checkout-uses-path
 fake_checkout="$CASE_DIR/tools-root"
 make_fake_source_checkout "$fake_checkout"
-stale_marker="$CASE_DIR/stale-forge-invoked"
-install_stale_forge "$CASE_DIR/stale-path/forge" "$stale_marker"
+path_forge="$CASE_DIR/forge-path/forge"
+mkdir -p "$(dirname -- "$path_forge")"
+write_forge_mock_script "$path_forge"
 
 saved_tools_dir="${ALLOD_TOOLS_DIR:-}"
 saved_forge_override="${ALLOD_PR_EXPLAIN_FORGE:-}"
 saved_path="$PATH"
 unset ALLOD_TOOLS_DIR ALLOD_PR_EXPLAIN_FORGE
-export PATH="$CASE_DIR/stale-path:$PATH"
+export PATH="$CASE_DIR/forge-path:$PATH"
 capture_explain_with "$fake_checkout/allod" "$TEST_TMP/checkout" 7 --codex -R acme/widget \
   --output "$CASE_DIR/output/report.html" --dry-run
 export ALLOD_TOOLS_DIR="$saved_tools_dir"
 export ALLOD_PR_EXPLAIN_FORGE="$saved_forge_override"
 export PATH="$saved_path"
 
-assert_success "a source checkout's own ./allod resolves the PR through its own companion forge"
-assert_file_absent "$stale_marker" "never falls back to a stale forge earlier on PATH when the checkout ships its own"
-assert_file_exists "$fake_checkout/.invoked" "uses the forge shipped beside the resolved tools root"
+assert_success "a source checkout's own ./allod resolves forge from PATH"
+assert_file_exists "$(dirname -- "$path_forge")/.invoked" \
+  "uses the separately packaged forge from PATH"
 
 new_case forge-resolution-explicit-override-wins
 fake_checkout="$CASE_DIR/tools-root"
@@ -1176,9 +1176,7 @@ export ALLOD_PR_EXPLAIN_FORGE="$saved_forge_override"
 
 assert_success "an explicit ALLOD_PR_EXPLAIN_FORGE override resolves the PR"
 assert_file_exists "$(dirname -- "$override_forge")/.invoked" \
-  "the explicit override is used even though the checkout ships its own compatible forge"
-assert_file_absent "$fake_checkout/.invoked" \
-  "the tools-root companion is not consulted once an explicit override is set"
+  "the explicit override is used instead of forge from PATH"
 
 new_case forge-override-rejects-nonexecutable
 export ALLOD_PR_EXPLAIN_FORGE="$CASE_DIR/not-a-forge"

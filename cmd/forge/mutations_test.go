@@ -1,6 +1,6 @@
 package main
 
-// Port of tests/forge/mutations.sh: every mutating pr/issue/label/milestone
+// Retained shell-suite scenarios for every mutating pr/issue/label/milestone
 // command, pinning the exact request sequence and JSON payload each sends.
 //
 // bash's mock curl is one static case statement shared by the whole file, and

@@ -3,8 +3,8 @@
 
   # This flake exists for development only: `nix build .#forge`,
   # `nix flake check`, `nix develop`. Every consumer imports this repository
-  # with `flake = false` and reads the scripts straight out of the source tree,
-  # so nothing here changes what they see.
+  # with `flake = false` and defines its production packages from the source
+  # tree, so nothing here changes what they build.
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 

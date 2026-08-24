@@ -153,17 +153,10 @@ progressive-enhancement script, and gallery from that same directory.
 Generation does not depend on an `allod/tools` source checkout beyond that
 resolution; `--checkout` always names the repository being explained.
 
-It resolves its `forge` companion the same way: the `forge` shipped beside
-whichever of those tool directories won — the allod tools root, whether that
-is an `ALLOD_TOOLS_DIR` package, this repository's own checkout, or a
-`$WORK_DIR/allod/tools` checkout — takes priority over any `forge` earlier on
-`PATH`, so a stale installed `forge` cannot shadow a checkout's own compatible
-one. `forge` is also packaged as its own standalone binary for installs where
-it and `allod` do not share a tools root; that packaged `forge` is used when
-no companion sits beside the resolved tools root. `ALLOD_PR_EXPLAIN_FORGE`
-overrides this resolution to an explicit executable path, for tests and
-local development; it must name an existing, executable file or the command
-fails clearly rather than silently falling back.
+`forge` is a separately packaged Go binary and is resolved from `PATH`.
+`ALLOD_PR_EXPLAIN_FORGE` overrides that resolution with an explicit executable
+path for tests and local development; it must name an existing, executable
+file or the command fails clearly rather than silently falling back.
 
 ### Standalone validator
 

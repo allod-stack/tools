@@ -378,7 +378,7 @@ func userRoutes(login string) map[string]cannedResponse {
 
 // ============================ Foundation tests ============================
 
-// --- Help routing (tests/forge/help.sh) ---
+// --- Help routing (retired shell-suite scenarios) ---
 
 func TestHelpRouting(t *testing.T) {
 	srv := newRecordingServer(t, map[string]cannedResponse{})
@@ -509,7 +509,7 @@ func TestProjectCommandsUnavailable(t *testing.T) {
 	}
 }
 
-// --- Token loading (tests/forge/auth.sh, tests/forge/token.sh) ---
+// --- Token loading (retired shell-suite scenarios) ---
 
 func TestLoadTokenErrors(t *testing.T) {
 	t.Run("no credential source", func(t *testing.T) {
@@ -570,7 +570,7 @@ func TestLoadTokenErrors(t *testing.T) {
 	})
 }
 
-// --- auth status (tests/forge/auth.sh) ---
+// --- auth status (retired shell-suite scenarios) ---
 
 func TestAuthStatus(t *testing.T) {
 	t.Run("valid env token", func(t *testing.T) {
@@ -662,7 +662,7 @@ func TestAuthStatus(t *testing.T) {
 	})
 }
 
-// --- token verify (tests/forge/token.sh) ---
+// --- token verify (retired shell-suite scenarios) ---
 
 func TestTokenVerify(t *testing.T) {
 	t.Run("valid token from stdin", func(t *testing.T) {
@@ -766,7 +766,7 @@ func TestTokenVerify(t *testing.T) {
 	})
 }
 
-// --- api() error rendering (tests/forge/api-errors.sh) ---
+// --- api() error rendering (retired shell-suite scenarios) ---
 
 func TestAPIErrorRendering(t *testing.T) {
 	srv := newRecordingServer(t, map[string]cannedResponse{

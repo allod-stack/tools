@@ -1,8 +1,8 @@
 package main
 
-// Ported from tests/forge/snapshot.sh. The response bodies are the same mock
-// Forgejo objects from tests/forge/testlib.sh; each case therefore exercises
-// the Go command against the scenario that pins the bash command today.
+// Retained snapshot scenarios from the retired shell suite. The response
+// bodies preserve its mock Forgejo objects, so each contract case remains
+// pinned against the Go command.
 
 import (
 	"encoding/json"

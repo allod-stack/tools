@@ -1,6 +1,6 @@
 package main
 
-// Port of tests/forge/pr-close.sh: pr close's target resolution (number, URL,
+// Retained shell-suite scenarios for pr close's target resolution (number, URL,
 // branch), the optional closing comment, and the guarded branch deletion.
 // Request order is the point of this file: resolve target -> optional
 // comment POST -> PATCH state -> optional GET-then-DELETE branch.
@@ -14,7 +14,7 @@ func TestPRClose(t *testing.T) {
 	srv := newRecordingServer(t, map[string]cannedResponse{
 		"PATCH /api/v1/repos/acme/widget/pulls/12":          {Body: `{"html_url":"https://forge.example/acme/widget/pulls/12"}`},
 		"POST /api/v1/repos/acme/widget/issues/12/comments": {Body: `{"html_url":"https://forge.example/acme/widget/issues/12#comment-1"}`},
-		// Two open PRs with distinct head branches, matching tests/forge/testlib.sh:
+		// Two open PRs with distinct head branches, matching the retired fixture:
 		// the real pulls list endpoint ignores head/base filters, so the client
 		// matches head.ref itself.
 		"GET /api/v1/repos/acme/widget/pulls?state=open&limit=50": {

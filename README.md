@@ -1,15 +1,17 @@
 # allod/tools
 
-Shell scripts for managing a multi-repo NixOS dev environment. All scripts are
-packaged via `pkgs.writeShellApplication` in `profiles` (dev VMs) and
-`nexus` (host machine) — no manual installation needed after
-`nixos-rebuild switch`.
+Command-line tools for managing a multi-repo NixOS dev environment. Shell tools
+are packaged with `pkgs.writeShellApplication`; `forge` is a standard-library-only
+Go binary built with `pkgs.buildGoModule`. Dev VMs and the host install them through
+their Nix composition, with no manual installation after `nixos-rebuild switch`.
 
 ## Layout
 
 ```
 allod                     main CLI (change, patch, pr, pm)
-forge                     Forgejo CLI
+cmd/forge/                Forgejo CLI Go command
+internal/forgeapi/        in-process Forgejo API client
+internal/gitremote/       Git remote parsing shared by Go commands
 pr-explain/               PR explanation report tool (behind `allod pr explain`)
   explain                 entry point: resolve, run the provider, assemble, publish
   validate-report          standalone report validator, usable directly

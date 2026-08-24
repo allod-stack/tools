@@ -1,6 +1,6 @@
 package main
 
-// Port of tests/forge/auth.sh.
+// Retained authentication scenarios from the retired shell suite.
 //
 // Bash cases intentionally omitted as already covered (see
 // cmd/forge/harness_test.go: TestAuthStatus, TestLoadTokenErrors,

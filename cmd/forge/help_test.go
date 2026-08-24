@@ -1,6 +1,6 @@
 package main
 
-// Ported from tests/forge/help.sh.
+// Retained help scenarios from the retired shell suite.
 //
 // Bash-test cases intentionally omitted here because
 // cmd/forge/harness_test.go's TestHelpRouting already pins them

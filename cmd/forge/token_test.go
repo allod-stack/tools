@@ -1,6 +1,6 @@
 package main
 
-// Port of tests/forge/token.sh.
+// Retained token scenarios from the retired shell suite.
 //
 // Bash cases intentionally omitted as already covered (see
 // cmd/forge/harness_test.go: TestTokenVerify):
