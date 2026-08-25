@@ -8,7 +8,8 @@ their Nix composition, with no manual installation after `nixos-rebuild switch`.
 ## Layout
 
 ```
-allod                     main CLI (change, patch, pr, pm)
+allod                     Bash compatibility oracle for the main CLI
+cmd/allod/                Go main CLI (change, patch, pr, pm)
 cmd/forge/                Forgejo CLI Go command
 internal/forgeapi/        in-process Forgejo API client
 internal/gitremote/       Git remote parsing shared by Go commands

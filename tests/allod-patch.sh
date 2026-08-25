@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-ALLOD="$ROOT/allod"
+ALLOD="${ALLOD_UNDER_TEST:-$ROOT/allod}"
 REAL_GIT=$(command -v git)
 REAL_SSH=$(command -v ssh)
 TMP=$(mktemp -d)
@@ -150,8 +150,9 @@ export MOCK_SSH_LOG MOCK_SSH_CALL_FILE
 make_mock_ssh_path() {
   local bin="$MOCK_SSH_DIR/bin"
   mkdir -p "$bin"
-  cat > "$bin/ssh" <<'MOCK_SSH_EOF'
-#!/usr/bin/env bash
+  {
+    printf '#!%s\n' "$(command -v bash)"
+    cat <<'MOCK_SSH_EOF'
 
 # Parse SSH args: ssh [options] [--] host command...
 host=""
@@ -236,6 +237,7 @@ esac
 # Execute the remote command locally with stdin/stdout preserved
 bash -c "$remote_cmd"
 MOCK_SSH_EOF
+  } > "$bin/ssh"
   chmod +x "$bin/ssh"
 
   # Build PATH with mock ssh first, plus all needed tools
@@ -271,8 +273,9 @@ MOCK_PATH="$MOCK_BIN:$PATH"
 make_mock_git_path() {
   local bin="$TMP/mock-git-bin-$1"
   mkdir -p "$bin"
-  cat > "$bin/git" <<'EOF'
-#!/usr/bin/env bash
+  {
+    printf '#!%s\n' "$(command -v bash)"
+    cat <<'EOF'
 set -euo pipefail
 for arg in "$@"; do
   if [[ "$arg" == "push" ]]; then
@@ -282,6 +285,7 @@ for arg in "$@"; do
 done
 exec "$REAL_GIT" "$@"
 EOF
+  } > "$bin/git"
   chmod +x "$bin/git"
   # Include mock SSH bin for combined path
   printf '%s:%s:%s\n' "$bin" "$MOCK_BIN" "$PATH"
@@ -291,22 +295,22 @@ EOF
 # CLI routing tests
 # ================================================================
 
-capture bash "$ALLOD" --help
+capture "$ALLOD" --help
 assert_status 0 "allod --help exits 0"
 assert_contains "$CAPTURE_OUTPUT" "change" "allod --help lists change"
 assert_contains "$CAPTURE_OUTPUT" "patch" "allod --help lists patch"
 
-capture bash "$ALLOD" patch --help
+capture "$ALLOD" patch --help
 assert_status 0 "allod patch --help exits 0"
 assert_contains "$CAPTURE_OUTPUT" "fetch" "patch help lists fetch"
 assert_contains "$CAPTURE_OUTPUT" "apply" "patch help lists apply"
 assert_contains "$CAPTURE_OUTPUT" "receive" "patch help lists receive"
 
-capture bash "$ALLOD" patch
+capture "$ALLOD" patch
 assert_status 1 "allod patch with no subcommand exits 1"
 assert_contains "$CAPTURE_OUTPUT" "Usage" "patch no-subcommand shows usage"
 
-capture bash "$ALLOD" patch nope
+capture "$ALLOD" patch nope
 assert_status 1 "allod patch nope exits 1"
 assert_contains "$CAPTURE_OUTPUT" "unknown patch command" "unknown patch subcommand message"
 
@@ -320,7 +324,7 @@ init_repo "$source_repo" master
 add_commit "$source_repo" "first change" "changed content"
 
 reset_mock_ssh
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo"
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:$source_repo"
 assert_status 0 "fetch happy path exits 0"
 assert_contains "$CAPTURE_OUTPUT" "fetched 1 patch" "fetch reports patch count"
 assert_contains "$CAPTURE_OUTPUT" "artifact dir:" "fetch reports artifact dir"
@@ -356,7 +360,7 @@ add_commit "$source_repo" "change two"
 add_commit "$source_repo" "change three"
 
 reset_mock_ssh
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo"
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:$source_repo"
 assert_status 0 "fetch multiple commits exits 0"
 assert_contains "$CAPTURE_OUTPUT" "fetched 3 patch" "fetch reports 3 patches"
 artifact_path=$(printf '%s' "$CAPTURE_OUTPUT" | grep 'artifact dir:' | sed 's/.*artifact dir: //')
@@ -370,7 +374,7 @@ init_repo "$source_repo" main
 add_commit "$source_repo" "main branch default change"
 
 reset_mock_ssh
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo"
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:$source_repo"
 assert_status 0 "fetch defaults to source default branch"
 assert_contains "$CAPTURE_OUTPUT" "fetched 1 patch" "fetch default branch reports patch count"
 artifact_path=$(printf '%s' "$CAPTURE_OUTPUT" | grep 'artifact dir:' | sed 's/.*artifact dir: //')
@@ -378,27 +382,27 @@ rm -rf "$artifact_path"
 
 # --- Input validation ---
 reset_mock_ssh
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch ":$source_repo"
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch ":$source_repo"
 assert_status 1 "fetch empty host exits 1"
 assert_equal "$(get_ssh_call_count)" "0" "fetch empty host makes no SSH calls"
 
 reset_mock_ssh
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:"
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:"
 assert_status 1 "fetch empty source repo exits 1"
 
 reset_mock_ssh
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:relative/path"
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:relative/path"
 assert_status 1 "fetch relative source repo exits 1"
 assert_contains "$CAPTURE_OUTPUT" "absolute path" "fetch relative repo message"
 
 reset_mock_ssh
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:/repo/with
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:/repo/with
 newline"
 assert_status 1 "fetch newline source repo exits 1"
 assert_equal "$(get_ssh_call_count)" "0" "fetch newline source repo makes no SSH calls"
 
 reset_mock_ssh
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo" --base "refs/with
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:$source_repo" --base "refs/with
 newline"
 assert_status 1 "fetch newline base exits 1"
 assert_equal "$(get_ssh_call_count)" "0" "fetch newline base makes no SSH calls"
@@ -410,7 +414,7 @@ add_commit "$source_repo" "ahead of base"
 printf 'modified\n' > "$source_repo/tracked.txt"
 
 reset_mock_ssh
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo"
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:$source_repo"
 assert_status 10 "fetch dirty tracked exits 10"
 assert_contains "$CAPTURE_OUTPUT" "dirty" "fetch dirty tracked message"
 
@@ -423,7 +427,7 @@ printf 'staged\n' > "$source_repo/new-staged.txt"
 git -C "$source_repo" add new-staged.txt
 
 reset_mock_ssh
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo"
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:$source_repo"
 assert_status 10 "fetch dirty staged exits 10"
 
 git -C "$source_repo" reset -q HEAD new-staged.txt
@@ -435,7 +439,7 @@ add_commit "$source_repo" "ahead of base"
 printf 'untracked\n' > "$source_repo/untracked-file.txt"
 
 reset_mock_ssh
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo"
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:$source_repo"
 assert_status 10 "fetch dirty untracked exits 10"
 
 rm "$source_repo/untracked-file.txt"
@@ -445,7 +449,7 @@ source_repo="$TMP/repos/fetch-no-commits"
 init_repo "$source_repo" master
 
 reset_mock_ssh
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo"
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:$source_repo"
 assert_status 11 "fetch no commits exits 11"
 assert_contains "$CAPTURE_OUTPUT" "not ahead" "fetch no commits message"
 
@@ -462,7 +466,7 @@ git -C "$source_repo" commit -qm "root export initial"
 git -C "$source_repo" remote add origin "$root_remote"
 
 reset_mock_ssh
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo"
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:$source_repo"
 assert_status 0 "fetch falls back to root export when no source base exists"
 assert_contains "$CAPTURE_OUTPUT" "root.." "fetch root export reports root range"
 artifact_path=$(printf '%s' "$CAPTURE_OUTPUT" | grep 'artifact dir:' | sed 's/.*artifact dir: //')
@@ -480,7 +484,7 @@ git -C "$source_repo" checkout -q -b other
 add_commit "$source_repo" "on other"
 
 reset_mock_ssh
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo" --base master
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:$source_repo" --base master
 assert_status 0 "fetch from branch with master as base works"
 artifact_path=$(printf '%s' "$CAPTURE_OUTPUT" | grep 'artifact dir:' | sed 's/.*artifact dir: //')
 rm -rf "$artifact_path"
@@ -496,7 +500,7 @@ git -C "$source_repo" push -q origin master
 git -C "$source_repo" checkout -q feature
 
 reset_mock_ssh
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo" --base origin/master
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:$source_repo" --base origin/master
 assert_status 11 "fetch diverged base exits 11"
 assert_contains "$CAPTURE_OUTPUT" "not an ancestor" "fetch diverged message"
 
@@ -516,7 +520,7 @@ git -C "$source_repo" push -q origin master
 
 reset_mock_ssh
 base_before_merge=$(git -C "$source_repo" rev-parse HEAD~2)
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo" --base "$base_before_merge"
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:$source_repo" --base "$base_before_merge"
 assert_status 11 "fetch merge commits exits 11"
 assert_contains "$CAPTURE_OUTPUT" "non-linear" "fetch merge commits message"
 
@@ -528,7 +532,7 @@ init_repo "$source_repo" master
 git -C "$source_repo" commit -q --allow-empty -m "empty commit"
 
 reset_mock_ssh
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo"
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:$source_repo"
 assert_status 0 "fetch empty commits exits 0 (format-patch produces a patch file)"
 artifact_path=$(printf '%s' "$CAPTURE_OUTPUT" | grep 'artifact dir:' | sed 's/.*artifact dir: //')
 rm -rf "$artifact_path"
@@ -536,7 +540,7 @@ rm -rf "$artifact_path"
 # --- SSH connection failure ---
 reset_mock_ssh
 export MOCK_SSH_FAIL="connect"
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo"
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:$source_repo"
 assert_status 1 "fetch SSH connection failure exits 1"
 assert_contains "$CAPTURE_OUTPUT" "Connection refused" "fetch SSH failure message"
 export MOCK_SSH_FAIL=""
@@ -550,7 +554,7 @@ add_commit "$source_repo" "content for cleanup fail test"
 
 reset_mock_ssh
 export MOCK_SSH_FAIL="cleanup"
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo"
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:$source_repo"
 assert_status 1 "fetch cleanup failure exits 1"
 assert_contains "$CAPTURE_OUTPUT" "remote cleanup failed" "fetch cleanup failure message"
 assert_contains "$CAPTURE_OUTPUT" "local artifact:" "fetch cleanup failure shows local path"
@@ -572,7 +576,7 @@ output_dir="$TMP/custom-output/patches"
 mkdir -p "$TMP/custom-output"
 
 reset_mock_ssh
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo" --output "$output_dir"
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:$source_repo" --output "$output_dir"
 assert_status 0 "fetch --output exits 0"
 [[ -d "$output_dir" ]] && pass "fetch --output creates specified dir" || fail "fetch --output creates dir" "missing: $output_dir"
 [[ -f "$output_dir/manifest.json" ]] && pass "fetch --output has manifest" || fail "fetch --output has manifest"
@@ -581,7 +585,7 @@ rm -rf "$output_dir"
 # --output existing path
 mkdir -p "$output_dir"
 reset_mock_ssh
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo" --output "$output_dir"
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:$source_repo" --output "$output_dir"
 assert_status 1 "fetch --output existing path exits 1"
 assert_contains "$CAPTURE_OUTPUT" "already exists" "fetch --output existing path message"
 assert_equal "$(get_ssh_call_count)" "0" "fetch --output existing path makes no SSH calls"
@@ -590,14 +594,14 @@ rmdir "$output_dir"
 # --output dangling symlink
 ln -s "$TMP/nonexistent-target" "$output_dir"
 reset_mock_ssh
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo" --output "$output_dir"
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:$source_repo" --output "$output_dir"
 assert_status 1 "fetch --output dangling symlink exits 1"
 assert_equal "$(get_ssh_call_count)" "0" "fetch --output dangling symlink makes no SSH calls"
 rm "$output_dir"
 
 # --output missing parent
 reset_mock_ssh
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo" --output "$TMP/nonexistent-parent/patches"
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:$source_repo" --output "$TMP/nonexistent-parent/patches"
 assert_status 1 "fetch --output missing parent exits 1"
 assert_equal "$(get_ssh_call_count)" "0" "fetch --output missing parent makes no SSH calls"
 
@@ -608,7 +612,7 @@ add_commit "$source_repo" "truncated tar content"
 
 reset_mock_ssh
 export MOCK_SSH_FAIL="truncated_tar"
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo"
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:$source_repo"
 assert_status 1 "fetch truncated tar exits 1"
 assert_contains "$CAPTURE_OUTPUT" "manual cleanup" "fetch truncated tar prints remote tmpdir"
 # Verify no local artifact left
@@ -626,7 +630,7 @@ add_commit "$source_repo" "after tag one"
 add_commit "$source_repo" "after tag two"
 
 reset_mock_ssh
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo" --base v1.0
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:$source_repo" --base v1.0
 assert_status 0 "fetch --base custom ref exits 0"
 assert_contains "$CAPTURE_OUTPUT" "fetched 2 patch" "fetch --base produces correct patch count"
 artifact_path=$(printf '%s' "$CAPTURE_OUTPUT" | grep 'artifact dir:' | sed 's/.*artifact dir: //')
@@ -643,13 +647,13 @@ init_repo "$source_repo_b" master
 add_commit "$source_repo_b" "static test b"
 
 reset_mock_ssh
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo_a" --base origin/master
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:$source_repo_a" --base origin/master
 log_a=$(get_ssh_commands)
 artifact_a=$(printf '%s' "$CAPTURE_OUTPUT" | grep 'artifact dir:' | sed 's/.*artifact dir: //')
 rm -rf "$artifact_a"
 
 reset_mock_ssh
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo_b" --base HEAD~1
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:$source_repo_b" --base HEAD~1
 log_b=$(get_ssh_commands)
 artifact_b=$(printf '%s' "$CAPTURE_OUTPUT" | grep 'artifact dir:' | sed 's/.*artifact dir: //')
 rm -rf "$artifact_b"
@@ -671,7 +675,7 @@ init_repo "$source_repo_special" master
 add_commit "$source_repo_special" "injection test"
 
 reset_mock_ssh
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo_special"
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:$source_repo_special"
 assert_status 0 "fetch with shell metacharacters in repo path succeeds"
 artifact_path=$(printf '%s' "$CAPTURE_OUTPUT" | grep 'artifact dir:' | sed 's/.*artifact dir: //')
 [[ -f "$artifact_path/manifest.json" ]] && pass "fetch with metacharacters produces valid manifest" || \
@@ -685,7 +689,7 @@ add_commit "$source_repo_meta" "meta base test"
 
 sentinel_file="$TMP/injection-sentinel"
 reset_mock_ssh
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo_meta" \
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:$source_repo_meta" \
   --base "\$(touch $sentinel_file)"
 # Should fail (invalid ref) but not create sentinel
 [[ "$CAPTURE_STATUS" -ne 0 ]] && pass "fetch with injected base exits non-zero" || \
@@ -700,7 +704,7 @@ init_repo "$source_repo_long" master
 add_commit "$source_repo_long" "long path test"
 
 reset_mock_ssh
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo_long"
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:$source_repo_long"
 assert_status 0 "fetch with long repo path succeeds"
 artifact_path=$(printf '%s' "$CAPTURE_OUTPUT" | grep 'artifact dir:' | sed 's/.*artifact dir: //')
 rm -rf "$artifact_path"
@@ -716,7 +720,7 @@ make_artifact() {
   reset_mock_ssh
   set +e
   local out
-  out=$(PATH="$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo" --output "$artifact_dir" 2>&1)
+  out=$(PATH="$MOCK_PATH" "$ALLOD" patch fetch "testhost:$source_repo" --output "$artifact_dir" 2>&1)
   local st=$?
   set -e
   if [[ "$st" -ne 0 ]]; then
@@ -737,7 +741,7 @@ artifact="$TMP/artifacts/apply-happy"
 make_artifact "$source_repo" "$artifact"
 
 pre_head=$(git -C "$dest_repo" rev-parse HEAD)
-capture bash "$ALLOD" patch apply "$artifact" --repo "$dest_repo"
+capture "$ALLOD" patch apply "$artifact" --repo "$dest_repo"
 assert_status 0 "apply happy path exits 0"
 assert_contains "$CAPTURE_OUTPUT" "applied 1 patch" "apply reports patch count"
 post_head=$(git -C "$dest_repo" rev-parse HEAD)
@@ -764,7 +768,7 @@ git -C "$dest_repo_norm" remote set-url origin \
 artifact="$TMP/artifacts/apply-normalized-https"
 make_artifact "$source_repo" "$artifact"
 
-capture bash "$ALLOD" patch apply "$artifact" --repo "$dest_repo_norm"
+capture "$ALLOD" patch apply "$artifact" --repo "$dest_repo_norm"
 assert_status 0 "apply accepts equivalent https and scp remotes"
 rm -rf "$artifact"
 
@@ -783,7 +787,7 @@ git -C "$dest_repo_norm" remote set-url origin \
 artifact="$TMP/artifacts/apply-normalized-ssh"
 make_artifact "$source_repo" "$artifact"
 
-capture bash "$ALLOD" patch apply "$artifact" --repo "$dest_repo_norm"
+capture "$ALLOD" patch apply "$artifact" --repo "$dest_repo_norm"
 assert_status 0 "apply accepts equivalent ssh URL and https remotes"
 rm -rf "$artifact"
 
@@ -802,7 +806,7 @@ git -C "$dest_repo_norm" remote set-url origin \
 artifact="$TMP/artifacts/apply-normalized-port"
 make_artifact "$source_repo" "$artifact"
 
-capture bash "$ALLOD" patch apply "$artifact" --repo "$dest_repo_norm"
+capture "$ALLOD" patch apply "$artifact" --repo "$dest_repo_norm"
 assert_status 0 "apply accepts equivalent https and ssh port remotes"
 rm -rf "$artifact"
 
@@ -821,7 +825,7 @@ git -C "$dest_repo_norm_mm" remote set-url origin \
 artifact="$TMP/artifacts/apply-normalized-mismatch"
 make_artifact "$source_repo" "$artifact"
 
-capture bash "$ALLOD" patch apply "$artifact" --repo "$dest_repo_norm_mm"
+capture "$ALLOD" patch apply "$artifact" --repo "$dest_repo_norm_mm"
 assert_status 13 "apply rejects different normalized remotes"
 assert_contains "$CAPTURE_OUTPUT" "mismatch" "apply normalized mismatch message"
 rm -rf "$artifact"
@@ -837,7 +841,7 @@ clone_repo "$source_repo" "$dest_repo"
 artifact="$TMP/artifacts/apply-cwd"
 make_artifact "$source_repo" "$artifact"
 
-capture bash -c "cd /tmp && bash '$ALLOD' patch apply '$artifact' --repo '$dest_repo'"
+capture bash -c "cd /tmp && '$ALLOD' patch apply '$artifact' --repo '$dest_repo'"
 assert_status 0 "apply from different cwd exits 0"
 
 # --- Destination repo resolution failure ---
@@ -849,7 +853,7 @@ artifact="$TMP/artifacts/apply-missing-dest"
 make_artifact "$source_repo" "$artifact"
 
 missing_dest="$TMP/repos/apply-missing-dest-repo"
-capture bash "$ALLOD" patch apply "$artifact" --repo "$missing_dest"
+capture "$ALLOD" patch apply "$artifact" --repo "$missing_dest"
 assert_status 1 "apply missing destination repo exits 1"
 assert_contains "$CAPTURE_OUTPUT" "destination repository path is not a directory" \
   "apply missing destination names destination"
@@ -879,7 +883,7 @@ git -C "$dest_repo_root_nonempty" remote set-url origin "$root_remote"
 artifact="$TMP/artifacts/apply-root-nonempty"
 make_artifact "$source_repo" "$artifact"
 
-capture bash "$ALLOD" patch apply "$artifact" --repo "$dest_repo_root_nonempty"
+capture "$ALLOD" patch apply "$artifact" --repo "$dest_repo_root_nonempty"
 assert_status 14 "apply rejects root export into non-empty destination"
 assert_contains "$CAPTURE_OUTPUT" "empty destination history" \
   "apply root export non-empty destination message"
@@ -900,7 +904,7 @@ make_artifact "$source_repo" "$artifact"
 patch_file=$(jq -r '.patches[0].filename' "$artifact/manifest.json")
 printf 'tampered\n' >> "$artifact/$patch_file"
 
-capture bash "$ALLOD" patch apply "$artifact" --repo "$dest_repo"
+capture "$ALLOD" patch apply "$artifact" --repo "$dest_repo"
 assert_status 12 "apply checksum mismatch exits 12"
 assert_contains "$CAPTURE_OUTPUT" "checksum mismatch" "apply checksum mismatch message"
 
@@ -908,14 +912,14 @@ assert_contains "$CAPTURE_OUTPUT" "checksum mismatch" "apply checksum mismatch m
 bad_artifact="$TMP/artifacts/apply-bad-json"
 mkdir -p "$bad_artifact"
 printf 'not json' > "$bad_artifact/manifest.json"
-capture bash "$ALLOD" patch apply "$bad_artifact" --repo "$dest_repo"
+capture "$ALLOD" patch apply "$bad_artifact" --repo "$dest_repo"
 assert_status 12 "apply malformed JSON exits 12"
 
 # --- Manifest validation: symlinked manifest ---
 bad_artifact="$TMP/artifacts/apply-symlink-manifest"
 mkdir -p "$bad_artifact"
 ln -s /dev/null "$bad_artifact/manifest.json"
-capture bash "$ALLOD" patch apply "$bad_artifact" --repo "$dest_repo"
+capture "$ALLOD" patch apply "$bad_artifact" --repo "$dest_repo"
 assert_status 12 "apply symlinked manifest exits 12"
 rm -rf "$bad_artifact"
 
@@ -923,7 +927,7 @@ rm -rf "$bad_artifact"
 bad_artifact="$TMP/artifacts/apply-missing-field"
 mkdir -p "$bad_artifact"
 printf '{"repo_remote":"x","base_commit":"a"}' > "$bad_artifact/manifest.json"
-capture bash "$ALLOD" patch apply "$bad_artifact" --repo "$dest_repo"
+capture "$ALLOD" patch apply "$bad_artifact" --repo "$dest_repo"
 assert_status 12 "apply missing required field exits 12"
 assert_contains "$CAPTURE_OUTPUT" "missing required field" "apply missing field message"
 rm -rf "$bad_artifact"
@@ -934,7 +938,7 @@ mkdir -p "$bad_artifact"
 cat > "$bad_artifact/manifest.json" <<'BADJSON'
 {"repo_remote":"x","base_commit":"abcdef","head_commit":"123456","patch_count":0,"patches":[]}
 BADJSON
-capture bash "$ALLOD" patch apply "$bad_artifact" --repo "$dest_repo"
+capture "$ALLOD" patch apply "$bad_artifact" --repo "$dest_repo"
 assert_status 12 "apply non-full hex commit exits 12"
 assert_contains "$CAPTURE_OUTPUT" "not a full lowercase hex commit ID" "apply bad commit message"
 rm -rf "$bad_artifact"
@@ -945,7 +949,7 @@ mkdir -p "$bad_artifact"
 cat > "$bad_artifact/manifest.json" <<'BADJSON'
 {"repo_remote":"x","base_commit":"refs/heads/master","head_commit":"refs/heads/master","patch_count":0,"patches":[]}
 BADJSON
-capture bash "$ALLOD" patch apply "$bad_artifact" --repo "$dest_repo"
+capture "$ALLOD" patch apply "$bad_artifact" --repo "$dest_repo"
 assert_status 12 "apply refname commit exits 12"
 rm -rf "$bad_artifact"
 
@@ -956,7 +960,7 @@ base_sha=$(git -C "$dest_repo" rev-parse HEAD)
 cat > "$bad_artifact/manifest.json" <<BADJSON
 {"repo_remote":"x","base_commit":"${base_sha}","head_commit":"${base_sha}","patch_count":5,"patches":[]}
 BADJSON
-capture bash "$ALLOD" patch apply "$bad_artifact" --repo "$dest_repo"
+capture "$ALLOD" patch apply "$bad_artifact" --repo "$dest_repo"
 assert_status 12 "apply patch count mismatch exits 12"
 assert_contains "$CAPTURE_OUTPUT" "does not match" "apply count mismatch message"
 rm -rf "$bad_artifact"
@@ -969,7 +973,7 @@ dup_sha=$(sha256sum -b -- "$bad_artifact/0001-a.patch" | awk '{print $1}')
 cat > "$bad_artifact/manifest.json" <<BADJSON
 {"repo_remote":"x","base_commit":"${base_sha}","head_commit":"${base_sha}","patch_count":2,"patches":[{"filename":"0001-a.patch","sha256":"${dup_sha}"},{"filename":"0001-a.patch","sha256":"${dup_sha}"}]}
 BADJSON
-capture bash "$ALLOD" patch apply "$bad_artifact" --repo "$dest_repo"
+capture "$ALLOD" patch apply "$bad_artifact" --repo "$dest_repo"
 assert_status 12 "apply duplicate filenames exits 12"
 assert_contains "$CAPTURE_OUTPUT" "duplicate" "apply duplicate message"
 rm -rf "$bad_artifact"
@@ -980,7 +984,7 @@ mkdir -p "$bad_artifact"
 cat > "$bad_artifact/manifest.json" <<BADJSON
 {"repo_remote":"x","base_commit":"${base_sha}","head_commit":"${base_sha}","patch_count":1,"patches":[{"filename":"../etc/passwd.patch","sha256":"aaaa"}]}
 BADJSON
-capture bash "$ALLOD" patch apply "$bad_artifact" --repo "$dest_repo"
+capture "$ALLOD" patch apply "$bad_artifact" --repo "$dest_repo"
 assert_status 12 "apply path traversal filename exits 12"
 assert_contains "$CAPTURE_OUTPUT" "invalid" "apply traversal message"
 rm -rf "$bad_artifact"
@@ -992,7 +996,7 @@ printf 'x\n' > "$bad_artifact/0001-a.patch"
 cat > "$bad_artifact/manifest.json" <<BADJSON
 {"repo_remote":"x","base_commit":"${base_sha}","head_commit":"${base_sha}","patch_count":1,"patches":[{"filename":"0001-a.patch","sha256":"not-a-hex-digest-but-it-is-64-chars-long-xxxxxxxxxxxxxxxxxx!!"}]}
 BADJSON
-capture bash "$ALLOD" patch apply "$bad_artifact" --repo "$dest_repo"
+capture "$ALLOD" patch apply "$bad_artifact" --repo "$dest_repo"
 assert_status 12 "apply non-hex digest exits 12"
 assert_contains "$CAPTURE_OUTPUT" "hex digest" "apply bad digest message"
 rm -rf "$bad_artifact"
@@ -1009,7 +1013,7 @@ artifact="$TMP/artifacts/apply-unlisted"
 make_artifact "$source_repo" "$artifact"
 printf 'extra\n' > "$artifact/9999-extra.patch"
 
-capture bash "$ALLOD" patch apply "$artifact" --repo "$dest_repo_unlisted"
+capture "$ALLOD" patch apply "$artifact" --repo "$dest_repo_unlisted"
 assert_status 12 "apply unlisted .patch file exits 12"
 assert_contains "$CAPTURE_OUTPUT" "unlisted" "apply unlisted message"
 rm -rf "$artifact"
@@ -1027,7 +1031,7 @@ make_artifact "$source_repo" "$artifact"
 patch_file=$(jq -r '.patches[0].filename' "$artifact/manifest.json")
 rm "$artifact/$patch_file"
 
-capture bash "$ALLOD" patch apply "$artifact" --repo "$dest_repo_missing"
+capture "$ALLOD" patch apply "$artifact" --repo "$dest_repo_missing"
 assert_status 12 "apply missing listed patch exits 12"
 assert_contains "$CAPTURE_OUTPUT" "missing" "apply missing patch message"
 rm -rf "$artifact"
@@ -1047,7 +1051,7 @@ real_patch="$artifact/${patch_file}.real"
 mv "$artifact/$patch_file" "$real_patch"
 ln -s "$real_patch" "$artifact/$patch_file"
 
-capture bash "$ALLOD" patch apply "$artifact" --repo "$dest_repo_sl"
+capture "$ALLOD" patch apply "$artifact" --repo "$dest_repo_sl"
 assert_status 12 "apply symlink patch file exits 12"
 assert_contains "$CAPTURE_OUTPUT" "symlink" "apply symlink patch message"
 rm -rf "$artifact"
@@ -1063,7 +1067,7 @@ init_repo "$dest_repo_mm" master
 artifact="$TMP/artifacts/apply-mismatch"
 make_artifact "$source_repo" "$artifact"
 
-capture bash "$ALLOD" patch apply "$artifact" --repo "$dest_repo_mm"
+capture "$ALLOD" patch apply "$artifact" --repo "$dest_repo_mm"
 assert_status 13 "apply repo identity mismatch exits 13"
 assert_contains "$CAPTURE_OUTPUT" "mismatch" "apply mismatch message"
 assert_contains "$CAPTURE_OUTPUT" "manifest remote:" "apply mismatch shows manifest URL"
@@ -1085,7 +1089,7 @@ add_commit "$source_repo" "base missing change"
 artifact="$TMP/artifacts/apply-base-missing"
 make_artifact "$source_repo" "$artifact"
 
-capture bash "$ALLOD" patch apply "$artifact" --repo "$dest_repo_bm"
+capture "$ALLOD" patch apply "$artifact" --repo "$dest_repo_bm"
 assert_status 14 "apply base commit missing exits 14"
 assert_contains "$CAPTURE_OUTPUT" "git fetch" "apply base missing hints git fetch"
 rm -rf "$artifact"
@@ -1106,7 +1110,7 @@ git -C "$dest_repo_na" commit -q --allow-empty -m "orphan root"
 artifact="$TMP/artifacts/apply-not-ancestor"
 make_artifact "$source_repo" "$artifact"
 
-capture bash "$ALLOD" patch apply "$artifact" --repo "$dest_repo_na"
+capture "$ALLOD" patch apply "$artifact" --repo "$dest_repo_na"
 assert_status 14 "apply base not ancestor exits 14"
 assert_contains "$CAPTURE_OUTPUT" "not an ancestor" "apply not ancestor message"
 rm -rf "$artifact"
@@ -1123,7 +1127,7 @@ printf 'dirty\n' > "$dest_repo_dirty/untracked.txt"
 artifact="$TMP/artifacts/apply-dirty-dest"
 make_artifact "$source_repo" "$artifact"
 
-capture bash "$ALLOD" patch apply "$artifact" --repo "$dest_repo_dirty"
+capture "$ALLOD" patch apply "$artifact" --repo "$dest_repo_dirty"
 assert_status 16 "apply dirty destination exits 16"
 rm "$dest_repo_dirty/untracked.txt"
 rm -rf "$artifact"
@@ -1143,7 +1147,7 @@ artifact="$TMP/artifacts/apply-conflict"
 make_artifact "$source_repo" "$artifact"
 
 pre_head=$(git -C "$dest_repo_conflict" rev-parse HEAD)
-capture bash "$ALLOD" patch apply "$artifact" --repo "$dest_repo_conflict"
+capture "$ALLOD" patch apply "$artifact" --repo "$dest_repo_conflict"
 assert_status 15 "apply conflict exits 15"
 post_head=$(git -C "$dest_repo_conflict" rev-parse HEAD)
 assert_equal "$post_head" "$pre_head" "apply conflict leaves HEAD unchanged"
@@ -1174,7 +1178,7 @@ git -C "$dest_repo_ahead" commit -qm "pre-existing dest commit"
 artifact="$TMP/artifacts/apply-ahead"
 make_artifact "$source_repo" "$artifact"
 
-capture bash "$ALLOD" patch apply "$artifact" --repo "$dest_repo_ahead"
+capture "$ALLOD" patch apply "$artifact" --repo "$dest_repo_ahead"
 assert_status 0 "apply with destination ahead of base exits 0"
 rm -rf "$artifact"
 
@@ -1194,7 +1198,7 @@ push_log="$TMP/push-apply.log"
 export REAL_GIT GIT_PUSH_LOG="$push_log"
 mock_git_path=$(make_mock_git_path apply-push)
 
-capture_with_path "$mock_git_path" bash "$ALLOD" patch apply "$artifact" --repo "$dest_repo_push" --push
+capture_with_path "$mock_git_path" "$ALLOD" patch apply "$artifact" --repo "$dest_repo_push" --push
 assert_status 0 "apply --push exits 0"
 push_calls=$(cat "$push_log")
 assert_contains "$push_calls" "push" "apply --push calls git push"
@@ -1216,7 +1220,7 @@ push_log="$TMP/push-nopush.log"
 export GIT_PUSH_LOG="$push_log"
 mock_git_path=$(make_mock_git_path apply-nopush)
 
-capture_with_path "$mock_git_path" bash "$ALLOD" patch apply "$artifact" --repo "$dest_repo_nopush"
+capture_with_path "$mock_git_path" "$ALLOD" patch apply "$artifact" --repo "$dest_repo_nopush"
 assert_status 0 "apply without --push exits 0"
 push_calls=$(cat "$push_log")
 [[ -z "$push_calls" ]] && pass "apply without --push does not call git push" || \
@@ -1237,7 +1241,7 @@ artifact="$TMP/artifacts/apply-multi"
 make_artifact "$source_repo" "$artifact"
 
 pre_head=$(git -C "$dest_repo_multi" rev-parse HEAD)
-capture bash "$ALLOD" patch apply "$artifact" --repo "$dest_repo_multi"
+capture "$ALLOD" patch apply "$artifact" --repo "$dest_repo_multi"
 assert_status 0 "apply multiple patches exits 0"
 assert_contains "$CAPTURE_OUTPUT" "applied 3 patch" "apply reports 3 patches"
 commit_count=$(git -C "$dest_repo_multi" rev-list --count "$pre_head..HEAD")
@@ -1261,7 +1265,7 @@ artifact="$TMP/artifacts/apply-whitespace"
 make_artifact "$source_repo" "$artifact"
 
 pre_head=$(git -C "$dest_repo_ws" rev-parse HEAD)
-capture bash "$ALLOD" patch apply "$artifact" --repo "$dest_repo_ws"
+capture "$ALLOD" patch apply "$artifact" --repo "$dest_repo_ws"
 assert_status 1 "apply whitespace failure exits 1"
 assert_contains "$CAPTURE_OUTPUT" "whitespace" "apply whitespace message"
 assert_contains "$CAPTURE_OUTPUT" "pre-apply HEAD" "apply whitespace shows pre-apply HEAD"
@@ -1285,7 +1289,7 @@ rm -rf "$remote_url"
 artifact="$TMP/artifacts/apply-push-fail"
 make_artifact "$source_repo" "$artifact"
 
-capture bash "$ALLOD" patch apply "$artifact" --repo "$dest_repo_pf" --push
+capture "$ALLOD" patch apply "$artifact" --repo "$dest_repo_pf" --push
 assert_status 1 "apply --push failure exits 1"
 assert_contains "$CAPTURE_OUTPUT" "push failed" "apply push failure message"
 assert_contains "$CAPTURE_OUTPUT" "pre-apply HEAD" "apply push failure shows pre-apply HEAD"
@@ -1309,7 +1313,7 @@ dest_repo_recv="$TMP/repos/receive-happy-dest"
 clone_repo "$source_repo" "$dest_repo_recv"
 
 reset_mock_ssh
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch receive "testhost:$source_repo" "$dest_repo_recv"
+capture_with_path "$MOCK_PATH" "$ALLOD" patch receive "testhost:$source_repo" "$dest_repo_recv"
 assert_status 0 "receive happy path exits 0"
 assert_contains "$CAPTURE_OUTPUT" "artifact dir:" "receive prints artifact dir"
 
@@ -1338,7 +1342,7 @@ git -C "$dest_repo_root" remote set-url origin \
   "ssh://git@forge.anarch.diy:2222/allod/nexus.git"
 
 reset_mock_ssh
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch receive "testhost:$source_repo" "$dest_repo_root"
+capture_with_path "$MOCK_PATH" "$ALLOD" patch receive "testhost:$source_repo" "$dest_repo_root"
 assert_status 0 "receive applies root export to empty destination with normalized remotes"
 recv_content=$(cat "$dest_repo_root/tracked.txt")
 assert_equal "$recv_content" "root received" "receive root export produces content"
@@ -1362,7 +1366,7 @@ git -C "$dest_repo_root" remote set-url origin \
   "ssh://git@forge.anarch.diy:2222/allod/nexus.git"
 
 reset_mock_ssh
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch receive "testhost:$source_repo" "$dest_repo_root"
+capture_with_path "$MOCK_PATH" "$ALLOD" patch receive "testhost:$source_repo" "$dest_repo_root"
 assert_status 0 "receive applies root export with no source remote"
 assert_not_contains "$CAPTURE_OUTPUT" "repo identity mismatch" \
   "receive root export no source remote skips identity mismatch"
@@ -1387,7 +1391,7 @@ git -C "$dest_repo_norm" remote set-url origin \
   "ssh://git@forge.anarch.diy:2222/allod/inventory.git"
 
 reset_mock_ssh
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch receive "testhost:$source_repo" "$dest_repo_norm"
+capture_with_path "$MOCK_PATH" "$ALLOD" patch receive "testhost:$source_repo" "$dest_repo_norm"
 assert_status 0 "receive accepts equivalent https and ssh port remotes"
 
 # --- Destination repo preflight failure ---
@@ -1401,7 +1405,7 @@ init_repo "$cwd_repo" master
 missing_dest="$TMP/repos/receive-missing-dest-repo"
 reset_mock_ssh
 capture_with_path "$MOCK_PATH" bash -c \
-  "cd '$cwd_repo' && bash '$ALLOD' patch receive 'testhost:$source_repo' '$missing_dest'"
+  "cd '$cwd_repo' && '$ALLOD' patch receive 'testhost:$source_repo' '$missing_dest'"
 assert_status 1 "receive missing destination repo exits 1"
 assert_contains "$CAPTURE_OUTPUT" "destination repository path is not a directory" \
   "receive missing destination names destination"
@@ -1425,7 +1429,7 @@ clone_repo "$source_repo" "$dest_repo_ff"
 find /tmp -maxdepth 1 -type d -name "allod-patch-receive.*" -exec rm -rf {} + 2>/dev/null || true
 
 reset_mock_ssh
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch receive "testhost:$source_repo" "$dest_repo_ff"
+capture_with_path "$MOCK_PATH" "$ALLOD" patch receive "testhost:$source_repo" "$dest_repo_ff"
 assert_status 11 "receive propagates fetch failure exit code (11 for no commits)"
 
 # Verify receive-owned parent is cleaned up when no artifact was promoted
@@ -1442,7 +1446,7 @@ clone_repo "$source_repo" "$dest_repo_cf"
 
 reset_mock_ssh
 export MOCK_SSH_FAIL="cleanup"
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch receive "testhost:$source_repo" "$dest_repo_cf"
+capture_with_path "$MOCK_PATH" "$ALLOD" patch receive "testhost:$source_repo" "$dest_repo_cf"
 assert_status 1 "receive propagates cleanup failure"
 assert_contains "$CAPTURE_OUTPUT" "artifact dir preserved" "receive cleanup failure preserves artifact"
 # Apply should not have run
@@ -1461,7 +1465,7 @@ dest_repo_af="$TMP/repos/receive-apply-fail-dest"
 init_repo "$dest_repo_af" master
 
 reset_mock_ssh
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch receive "testhost:$source_repo" "$dest_repo_af"
+capture_with_path "$MOCK_PATH" "$ALLOD" patch receive "testhost:$source_repo" "$dest_repo_af"
 assert_status 13 "receive propagates apply failure exit code (13 for mismatch)"
 assert_contains "$CAPTURE_OUTPUT" "artifact dir:" "receive prints artifact dir on apply failure"
 
@@ -1480,7 +1484,7 @@ mock_git_path=$(make_mock_git_path receive-push)
 combined_path="${mock_git_path%%:*}:$MOCK_PATH"
 
 reset_mock_ssh
-capture_with_path "$combined_path" bash "$ALLOD" patch receive "testhost:$source_repo" "$dest_repo_rp" --push
+capture_with_path "$combined_path" "$ALLOD" patch receive "testhost:$source_repo" "$dest_repo_rp" --push
 assert_status 0 "receive --push exits 0"
 push_calls=$(cat "$push_log")
 assert_contains "$push_calls" "push" "receive --push triggers git push"
@@ -1496,7 +1500,7 @@ base_sha=$(git -C "$dest_repo" rev-parse HEAD)
 cat > "$bad_artifact/manifest.json" <<BADJSON
 {"repo_remote":"x","base_commit":"${base_sha}","head_commit":"${base_sha}","patch_count":1,"patches":[{"filename":"0001-foo\u0007bar.patch","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}
 BADJSON
-capture bash "$ALLOD" patch apply "$bad_artifact" --repo "$dest_repo"
+capture "$ALLOD" patch apply "$bad_artifact" --repo "$dest_repo"
 assert_status 12 "apply control-character filename exits 12"
 assert_contains "$CAPTURE_OUTPUT" "invalid" "apply control-character filename message"
 rm -rf "$bad_artifact"
@@ -1508,7 +1512,7 @@ add_commit "$source_repo" "tmpdir empty test"
 
 reset_mock_ssh
 export MOCK_SSH_FAIL="bad_tmpdir_"
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo"
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:$source_repo"
 assert_status 1 "fetch empty tmpdir exits 1"
 assert_contains "$CAPTURE_OUTPUT" "no output" "fetch empty tmpdir message"
 export MOCK_SSH_FAIL=""
@@ -1516,7 +1520,7 @@ export MOCK_SSH_FAIL=""
 # --- Remote tmpdir validation: relative path ---
 reset_mock_ssh
 export MOCK_SSH_FAIL="bad_tmpdir_tmp/allod-patch.abcdefghij"
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo"
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:$source_repo"
 assert_status 1 "fetch relative tmpdir exits 1"
 assert_contains "$CAPTURE_OUTPUT" "invalid remote temp dir" "fetch relative tmpdir message"
 export MOCK_SSH_FAIL=""
@@ -1524,7 +1528,7 @@ export MOCK_SSH_FAIL=""
 # --- Remote tmpdir validation: wrong prefix ---
 reset_mock_ssh
 export MOCK_SSH_FAIL="bad_tmpdir_/tmp/evil-dir.abcdefghij"
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo"
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:$source_repo"
 assert_status 1 "fetch wrong-prefix tmpdir exits 1"
 assert_contains "$CAPTURE_OUTPUT" "invalid remote temp dir" "fetch wrong-prefix tmpdir message"
 export MOCK_SSH_FAIL=""
@@ -1532,7 +1536,7 @@ export MOCK_SSH_FAIL=""
 # --- Remote tmpdir validation: path traversal ---
 reset_mock_ssh
 export MOCK_SSH_FAIL="bad_tmpdir_/tmp/allod-patch.abcdefghij/../../../etc"
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo"
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:$source_repo"
 assert_status 1 "fetch traversal tmpdir exits 1"
 export MOCK_SSH_FAIL=""
 
@@ -1542,7 +1546,7 @@ mkdir -p "$unwritable_parent"
 chmod 000 "$unwritable_parent"
 
 reset_mock_ssh
-capture_with_path "$MOCK_PATH" bash "$ALLOD" patch fetch "testhost:$source_repo" --output "$unwritable_parent/patches"
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:$source_repo" --output "$unwritable_parent/patches"
 assert_status 1 "fetch --output unwritable parent exits 1"
 assert_equal "$(get_ssh_call_count)" "0" "fetch --output unwritable parent makes no SSH calls"
 chmod 755 "$unwritable_parent"

@@ -28,10 +28,25 @@
         };
       };
 
+      allod = pkgs.buildGoModule {
+        pname = "allod";
+        version = "0.1.0";
+        src = ./.;
+        # Standard library only, by design: no module dependencies to vendor.
+        vendorHash = null;
+        subPackages = [ "cmd/allod" ];
+
+        meta = {
+          description = "Allod workspace change and patch-transfer CLI";
+          mainProgram = "allod";
+          platforms = pkgs.lib.platforms.unix;
+        };
+      };
+
       # buildGoModule's check phase only tests the packages named in
       # subPackages, so the internal ones need a check of their own. This also
       # covers formatting and vet, which nothing else would.
-      goChecks = pkgs.runCommand "forge-go-checks"
+      goChecks = pkgs.runCommand "allod-tools-go-checks"
         {
           # git is a test dependency: internal/gitremote drives the real thing.
           nativeBuildInputs = [ pkgs.go pkgs.git ];
@@ -62,15 +77,51 @@
 
         touch "$out"
       '';
+
+      allodParity = pkgs.runCommand "allod-parity-tests"
+        {
+          nativeBuildInputs = [
+            pkgs.bash
+            pkgs.coreutils
+            pkgs.findutils
+            pkgs.gawk
+            pkgs.git
+            pkgs.gnugrep
+            pkgs.gnused
+            pkgs.gnutar
+            pkgs.gzip
+            pkgs.jq
+            pkgs.openssh
+            pkgs.procps
+            pkgs.util-linux
+          ];
+          src = ./.;
+        } ''
+        export HOME="$TMPDIR/home"
+        cp -r "$src" source
+        chmod -R u+w source
+        cd source
+        patchShebangs .
+
+        export ALLOD_UNDER_TEST=${allod}/bin/allod
+        bash tests/allod-change.sh
+        bash tests/allod-patch.sh
+        bash tests/pr-explain/components.sh
+        bash tests/pr-explain/validation.sh
+        bash tests/pr-explain/command.sh
+
+        touch "$out"
+      '';
     in
     {
       packages.${system} = {
-        inherit forge;
+        inherit allod forge;
         default = forge;
       };
 
       checks.${system} = {
-        inherit forge;
+        inherit allod forge;
+        allod-parity = allodParity;
         go-checks = goChecks;
       };
 

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-ALLOD="$ROOT/allod"
+ALLOD="${ALLOD_UNDER_TEST:-$ROOT/allod}"
 TEST_TMP=$(mktemp -d)
 CAPTURE_OUTPUT=""
 CAPTURE_STATUS=0
@@ -242,8 +242,9 @@ install_forge_mock() {
 # independently placed instances to distinguish PATH from an explicit override.
 write_forge_mock_script() {
   local destination="$1"
-  cat > "$destination" <<'EOF'
-#!/usr/bin/env bash
+  {
+    printf '#!%s\n' "$(command -v bash)"
+    cat <<'EOF'
 set -euo pipefail
 
 # Self-identifying: dropped beside whichever copy of this script actually
@@ -370,6 +371,7 @@ case " $invocation " in
     ;;
 esac
 EOF
+  } > "$destination"
   chmod +x "$destination"
 }
 
@@ -385,8 +387,9 @@ make_fake_source_checkout() {
 }
 
 install_runner_mocks() {
-  cat > "$TEST_TMP/bin/pr-explain-runner" <<'EOF'
-#!/usr/bin/env bash
+  {
+    printf '#!%s\n' "$(command -v bash)"
+    cat <<'EOF'
 set -euo pipefail
 
 runner=$(basename "$0")
@@ -595,6 +598,7 @@ case "$mode" in
     ;;
 esac
 EOF
+  } > "$TEST_TMP/bin/pr-explain-runner"
   chmod +x "$TEST_TMP/bin/pr-explain-runner"
   ln -s pr-explain-runner "$TEST_TMP/bin/codex"
   ln -s pr-explain-runner "$TEST_TMP/bin/claude"
