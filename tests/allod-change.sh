@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-ALLOD="${ALLOD_UNDER_TEST:-$ROOT/allod}"
+ALLOD="${ALLOD_UNDER_TEST:-$(command -v allod)}"
 REAL_GIT=$(command -v git)
 TMP=$(mktemp -d)
 RUN_ID="t$$"

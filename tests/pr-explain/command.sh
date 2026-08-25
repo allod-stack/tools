@@ -1137,7 +1137,7 @@ assert_contains "$(cat "$MOCK_RUNNER_DIR/codex.5.stdin")" "the only file you may
 # binary from PATH.
 
 new_case forge-resolution-source-checkout-uses-path
-fake_checkout="$CASE_DIR/tools-root"
+fake_checkout="$HOME/work/allod/tools"
 make_fake_source_checkout "$fake_checkout"
 path_forge="$CASE_DIR/forge-path/forge"
 mkdir -p "$(dirname -- "$path_forge")"
@@ -1159,7 +1159,7 @@ assert_file_exists "$(dirname -- "$path_forge")/.invoked" \
   "uses the separately packaged forge from PATH"
 
 new_case forge-resolution-explicit-override-wins
-fake_checkout="$CASE_DIR/tools-root"
+fake_checkout="$HOME/work/allod/tools"
 make_fake_source_checkout "$fake_checkout"
 override_forge="$CASE_DIR/override-forge/forge"
 mkdir -p "$(dirname -- "$override_forge")"

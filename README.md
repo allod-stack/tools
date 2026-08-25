@@ -1,14 +1,14 @@
 # allod/tools
 
 Command-line tools for managing a multi-repo NixOS dev environment. Shell tools
-are packaged with `pkgs.writeShellApplication`; `forge` is a standard-library-only
-Go binary built with `pkgs.buildGoModule`. Dev VMs and the host install them through
-their Nix composition, with no manual installation after `nixos-rebuild switch`.
+are packaged with `pkgs.writeShellApplication`; `forge` and `allod` are
+standard-library-only Go binaries built with `pkgs.buildGoModule`. Dev VMs and the
+host install them through their Nix composition, with no manual installation after
+`nixos-rebuild switch`.
 
 ## Layout
 
 ```
-allod                     Bash compatibility oracle for the main CLI
 cmd/allod/                Go main CLI (change, patch, pr, pm)
 cmd/forge/                Forgejo CLI Go command
 internal/forgeapi/        in-process Forgejo API client
@@ -53,7 +53,7 @@ lib/                      shared shell libraries
 ## Shared Library
 
 `lib/workspace.sh` provides repo discovery and default-branch helpers used by
-`allod`, `pull-all`, `work-diff`, `flake-status`, and `flake-update-cascade`.
+`pull-all`, `work-diff`, `flake-status`, and `flake-update-cascade`.
 It also sets `WORK_DIR` (defaults to `~/work/`, overridable via the environment).
 
 `workspace_collect_repos` returns exactly the checkouts under `WORK_DIR`, which

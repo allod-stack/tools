@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-ALLOD="${ALLOD_UNDER_TEST:-$ROOT/allod}"
+ALLOD="${ALLOD_UNDER_TEST:-$(command -v allod)}"
 TEST_TMP=$(mktemp -d)
 CAPTURE_OUTPUT=""
 CAPTURE_STATUS=0
@@ -375,15 +375,17 @@ EOF
   chmod +x "$destination"
 }
 
-# A source checkout laid out like the real repository after Bash forge
-# retirement: `allod`/`lib`/`pr-explain` point at this repository's own
+# A source checkout laid out like the real repository after the CLI moved to
+# Go: Go `allod` falls back to resolving pr-explain from $WORK_DIR/allod/tools,
+# so the fake checkout must live there. `allod` is the separately built Go
+# binary, `lib` and `pr-explain` point at this repository's own
 # implementation, and no `forge` executable sits beside them.
 make_fake_source_checkout() {
   local destination="$1"
   mkdir -p "$destination"
-  ln -s "$ROOT/allod" "$destination/allod"
-  ln -s "$ROOT/lib" "$destination/lib"
-  ln -s "$ROOT/pr-explain" "$destination/pr-explain"
+  ln -sf "$ALLOD" "$destination/allod"
+  ln -sf "$ROOT/lib" "$destination/lib"
+  ln -sf "$ROOT/pr-explain" "$destination/pr-explain"
 }
 
 install_runner_mocks() {
