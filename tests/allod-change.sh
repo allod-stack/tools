@@ -616,6 +616,41 @@ printf 'unpushed\n' > "$path/tracked.txt"
 git -C "$path" commit -qam "unpushed"
 assert_list_matches_cleanup "$repo" "$path" unpushed "a worktree with unpushed commits"
 
+# git cherry compares non-merge patches. A merge commit absent from the base
+# must still block deletion even when both of its parents are already there.
+repo="$HOME/work/list-state-merge"
+init_repo "$repo" master
+printf 'second base\n' > "$repo/tracked.txt"
+git -C "$repo" commit -qam "second base"
+git -C "$repo" push -q origin master
+desc="${RUN_ID}-state-merge"
+path=$(begin_worktree "$desc" "$repo")
+base_commit=$(git -C "$path" rev-parse HEAD)
+base_parent=$(git -C "$path" rev-parse HEAD^)
+base_tree=$(git -C "$path" rev-parse 'HEAD^{tree}')
+merge_commit=$(printf 'local merge\n' | git -C "$path" commit-tree "$base_tree" -p "$base_commit" -p "$base_parent")
+git -C "$path" reset -q --hard "$merge_commit"
+assert_list_matches_cleanup "$repo" "$path" unpushed "a worktree with an unpushed merge commit"
+
+# A missing comparison base is not evidence that the branch is safe to delete.
+repo="$HOME/work/list-state-unknown"
+init_repo_no_remote "$repo" master
+desc="${RUN_ID}-state-unknown"
+path="$HOME/changes/list-state-unknown-${desc}"
+git -C "$repo" worktree add -q -b "agent/$desc" "$path"
+WORKTREES+=("$path")
+printf 'local only\n' > "$path/tracked.txt"
+git -C "$path" commit -qam "local-only commit"
+assert_list_matches_cleanup "$repo" "$path" unknown "a worktree with no remote comparison base"
+[[ -d "$path" ]] && pass "unknown cleanup refusal preserves the worktree" ||
+  fail "unknown cleanup refusal preserves the worktree" "missing: $path"
+[[ -n "$(git -C "$repo" branch --list "agent/$desc")" ]] &&
+  pass "unknown cleanup refusal preserves the branch" ||
+  fail "unknown cleanup refusal preserves the branch"
+assert_contains "$CAPTURE_OUTPUT" "no origin remote" \
+  "unknown cleanup refusal names why comparison failed"
+
+repo="$HOME/work/list-states"
 desc="${RUN_ID}-state-detached"
 path=$(begin_worktree "$desc" "$repo")
 git -C "$path" checkout -q --detach
@@ -937,6 +972,18 @@ remote_has_branch "$repo" no-upstream &&
   pass "record no-upstream retry pushes current branch" ||
   fail "record no-upstream retry pushes current branch"
 
+repo="$HOME/work/record-unknown"
+init_repo_no_remote "$repo" master
+git -C "$repo" checkout -q -b local-only
+printf 'local\n' > "$repo/tracked.txt"
+git -C "$repo" commit -qam "local-only commit"
+capture record_in_repo "$repo" -m "must not be used"
+assert_status 4 "record distinguishes an unknown remote comparison from no unpushed commits"
+assert_contains "$CAPTURE_OUTPUT" "cannot determine whether commits are unpushed" \
+  "record reports the unknown comparison honestly"
+assert_contains "$CAPTURE_OUTPUT" "no origin remote" \
+  "record names why the comparison is unknown"
+
 repo="$HOME/work/record-message-file"
 init_repo "$repo" master
 git -C "$repo" checkout -q -b message-file
@@ -1091,6 +1138,24 @@ git -C "$path" commit -qam "unpushed"
 capture bash "$ALLOD" change cleanup "$path"
 [[ "$CAPTURE_STATUS" -ne 0 ]] || fail "cleanup refuses unpushed worktree" "$CAPTURE_OUTPUT"
 assert_contains "$CAPTURE_OUTPUT" "unpushed" "cleanup unpushed failure is actionable"
+
+# Patch relay rewrites commit IDs, so cleanup compares patch identity rather
+# than requiring the worktree's exact SHA to appear on the remote branch.
+repo="$HOME/work/cleanup-relayed"
+init_repo "$repo" master
+desc="${RUN_ID}-cleanup-relayed"
+path=$(begin_worktree "$desc" "$repo")
+printf 'relayed\n' > "$path/tracked.txt"
+git -C "$path" commit -qam "relayed change"
+source_sha=$(git -C "$path" rev-parse HEAD)
+patch_file="$TMP/relayed.patch"
+git -C "$path" format-patch -1 --stdout > "$patch_file"
+GIT_COMMITTER_DATE='2030-01-01T00:00:00Z' git -C "$repo" am -q "$patch_file"
+relayed_sha=$(git -C "$repo" rev-parse HEAD)
+[[ "$source_sha" != "$relayed_sha" ]] && pass "relay fixture rewrites the commit ID" ||
+  fail "relay fixture rewrites the commit ID" "both commits: $source_sha"
+git -C "$repo" push -q origin master
+assert_list_matches_cleanup "$repo" "$path" clean "a patch-equivalent relayed worktree"
 
 repo="$HOME/work/cleanup-regular"
 init_repo "$repo" master

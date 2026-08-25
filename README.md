@@ -112,6 +112,7 @@ dead agent from a working one.
 | `submodule` | a populated submodule is present, which `git worktree remove` refuses | deinit the submodules, then reassess |
 | `dirty` | uncommitted changes | commit or discard them |
 | `unpushed` | commits that exist nowhere else | `allod change record`, or handle them |
+| `unknown` | the tool cannot prove whether the commits exist on a remote | inspect the branch and repair its remote/base before cleanup |
 | `clean` | nothing to lose | `allod change cleanup <path>` |
 
 Exactly one word is reported: the strongest blocker. `clean` is reported if and

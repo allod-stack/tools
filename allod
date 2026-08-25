@@ -49,7 +49,7 @@ is the in-place flow for committing to a repo's default branch.
 
 'list' prints one tab-separated row per linked worktree — repo, path, branch,
 state — where the state is the one thing standing between that worktree and
-'cleanup': prunable, locked, detached, submodule, dirty, unpushed, or clean.
+'cleanup': prunable, locked, detached, submodule, dirty, unpushed, unknown, or clean.
 
 '--files' takes one or more paths and may be repeated, so '--files a b' and
 '--files a --files b' both stage a and b. It stops at the next option, so it
@@ -220,12 +220,23 @@ default_remote_branch_for_dir() {
   workspace_repo_default_branch "$dir"
 }
 
+UNPUSHED_DETAIL=""
+
+# Return 0 when HEAD contains patches absent from the best available remote
+# base, 1 when every patch is represented there, and 2 when no trustworthy
+# comparison can be made. Callers must handle all three because this result
+# guards branch deletion as well as status reporting.
 has_unpushed_commits() {
   local dir="$1"
-  local branch upstream base default_branch count
+  local branch upstream base default_branch cherry_output merge_output
+
+  UNPUSHED_DETAIL=""
 
   branch=$(git -C "$dir" branch --show-current 2>/dev/null || true)
-  [[ -n "$branch" ]] || return 1
+  if [[ -z "$branch" ]]; then
+    UNPUSHED_DETAIL="HEAD is detached"
+    return 2
+  fi
 
   upstream=$(git -C "$dir" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)
   if [[ -n "$upstream" ]]; then
@@ -233,18 +244,40 @@ has_unpushed_commits() {
   elif git -C "$dir" rev-parse --verify --quiet "refs/remotes/origin/${branch}^{commit}" >/dev/null; then
     base="refs/remotes/origin/${branch}"
   elif git -C "$dir" remote get-url origin >/dev/null 2>&1; then
-    default_branch=$(default_remote_branch_for_dir "$dir")
+    if ! default_branch=$(default_remote_branch_for_dir "$dir"); then
+      UNPUSHED_DETAIL="the default branch of origin cannot be resolved"
+      return 2
+    fi
     if git -C "$dir" rev-parse --verify --quiet "refs/remotes/origin/${default_branch}^{commit}" >/dev/null; then
       base="refs/remotes/origin/${default_branch}"
     else
-      return 1
+      UNPUSHED_DETAIL="origin/$default_branch cannot be resolved"
+      return 2
     fi
   else
-    return 1
+    UNPUSHED_DETAIL="the repository has no origin remote"
+    return 2
   fi
 
-  count=$(git -C "$dir" rev-list --count "${base}..HEAD" 2>/dev/null || printf '0')
-  [[ "$count" =~ ^[0-9]+$ && "$count" -gt 0 ]]
+  if ! merge_output=$(git -C "$dir" rev-list --merges "$base..HEAD" 2>/dev/null); then
+    UNPUSHED_DETAIL="git could not compare HEAD with $base"
+    return 2
+  fi
+  # Patch identity has no faithful answer for a merge commit. A merge absent
+  # from the base is therefore treated conservatively as unpushed.
+  if [[ -n "$merge_output" ]]; then
+    return 0
+  fi
+
+  if ! cherry_output=$(git -C "$dir" cherry "$base" HEAD 2>/dev/null); then
+    UNPUSHED_DETAIL="git could not compare HEAD with $base"
+    return 2
+  fi
+
+  if [[ "$cherry_output" == +* || "$cherry_output" == *$'\n+'* ]]; then
+    return 0
+  fi
+  return 1
 }
 
 refuse_protected_branch_record() {
@@ -458,7 +491,7 @@ worktree_has_populated_submodule() {
 # but would otherwise be reported here as 'clean'.
 change_worktree_state() {
   local path="$1" prunable="$2" locked="$3" detached="$4"
-  local state
+  local state unpushed_status
 
   if [[ "$prunable" == true ]]; then
     state=prunable
@@ -470,10 +503,15 @@ change_worktree_state() {
     state=submodule
   elif [[ -n "$(git -C "$path" status --porcelain 2>/dev/null)" ]]; then
     state=dirty
-  elif has_unpushed_commits "$path"; then
-    state=unpushed
   else
-    state=clean
+    unpushed_status=0
+    has_unpushed_commits "$path" || unpushed_status=$?
+    case "$unpushed_status" in
+      0) state=unpushed ;;
+      1) state=clean ;;
+      2) state=unknown ;;
+      *) die 1 "internal error while checking worktree commits" ;;
+    esac
   fi
 
   printf '%s\n' "$state"
@@ -516,7 +554,7 @@ change_list() {
 
 change_record() {
   local repo branch message="" message_set=false message_file="" message_tmp=""
-  local should_commit=true commit_sha
+  local should_commit=true commit_sha unpushed_status
   local -a files=()
 
   while [[ $# -gt 0 ]]; do
@@ -581,11 +619,14 @@ change_record() {
   fi
 
   if git -C "$repo" diff --cached --quiet; then
-    if has_unpushed_commits "$repo"; then
-      should_commit=false
-    else
-      die 4 "nothing to commit and no unpushed commits to push"
-    fi
+    unpushed_status=0
+    has_unpushed_commits "$repo" || unpushed_status=$?
+    case "$unpushed_status" in
+      0) should_commit=false ;;
+      1) die 4 "nothing to commit and no unpushed commits to push" ;;
+      2) die 4 "nothing to commit; cannot determine whether commits are unpushed: $UNPUSHED_DETAIL" ;;
+      *) die 1 "internal error while checking unpushed commits" ;;
+    esac
   fi
 
   if [[ "$should_commit" == true ]]; then
@@ -710,7 +751,7 @@ change_submit() {
 }
 
 change_cleanup() {
-  local path="${1:-}" extra="${2:-}" repo branch git_dir common_dir main_repo
+  local path="${1:-}" extra="${2:-}" repo branch git_dir common_dir main_repo unpushed_status
 
   [[ -n "$path" && -z "$extra" ]] ||
     die 1 "usage: allod change cleanup <worktree-path>"
@@ -723,16 +764,23 @@ change_cleanup() {
   fi
 
   branch=$(current_branch_or_die "$repo")
+  main_repo=$(dirname "$common_dir")
 
   if [[ -n "$(git -C "$repo" status --porcelain)" ]]; then
     die 1 "worktree '$repo' is dirty; clean it before cleanup"
   fi
 
-  if has_unpushed_commits "$repo"; then
-    die 1 "worktree '$repo' has unpushed commits; push or handle them before cleanup"
-  fi
+  unpushed_status=0
+  has_unpushed_commits "$repo" || unpushed_status=$?
+  case "$unpushed_status" in
+    0) die 1 "worktree '$repo' has unpushed commits; push or handle them before cleanup" ;;
+    1) ;;
+    2)
+      die 1 "cannot determine whether worktree '$repo' has unpushed commits: $UNPUSHED_DETAIL; inspect it before deliberately removing it with standard git"
+      ;;
+    *) die 1 "internal error while checking unpushed commits" ;;
+  esac
 
-  main_repo=$(dirname "$common_dir")
   git -C "$main_repo" worktree remove "$repo"
   if [[ "$branch" == agent/* ]]; then
     git -C "$main_repo" branch -D "$branch"
