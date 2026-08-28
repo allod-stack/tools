@@ -46,6 +46,8 @@ Rules the tool enforces mechanically before any section pass runs:
 
 Use `notes` for what you learned that the plan cannot carry: file paths worth reading per section, representative values you traced, review corrections that changed the design, claims you verified and how. Later passes read it; the reader never sees it.
 
+Plan this report's figures here as well. For each section, `notes` names the relationships worth drawing, or records that none are. A relationship is worth drawing when the reader would otherwise have to work something out that a picture lets them see: containment, correspondence between two paths, divergence at a test, or a claim anchored to a line of code. Prose already handles sequence well, so plan a flow only where the order itself is the difficulty. This pass is the only one that sees the whole report, so it is the only one that can spend figures where they are worth the most — a section pass deciding alone tends to reach for a diagram to fill the space. Naming no figures for a section is a normal plan.
+
 ## The front matter fragment
 
 The front-matter fragment runs from the skip link through the objectives block, filling every placeholder from `report-contract.json`, `triage.json`, and the evidence:
