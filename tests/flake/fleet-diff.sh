@@ -9,8 +9,9 @@ export HOME="$TMP/home"
 mkdir -p "$HOME" "$TMP/bin"
 
 # A composition root whose lock has a transitive input (archetypes/vm), a direct
-# input (inventory), and a root-level follows (nixpkgs). Only the graph shape
-# matters — nix never reads it, the tool's override check does.
+# input (inventory), a root-level follows (nixpkgs), and one input whose source
+# is not a git remote (pinned). Only the graph shape and each node's recorded
+# source matter — nix never reads this, the tool's override resolution does.
 DEPLOY="$TMP/deploy"
 mkdir -p "$DEPLOY"
 : > "$DEPLOY/flake.nix"
@@ -21,19 +22,48 @@ cat > "$DEPLOY/flake.lock" <<'EOF'
       "inputs": {
         "archetypes": "archetypes",
         "inventory": "inventory",
-        "nixpkgs": ["archetypes", "nixpkgs"]
+        "nixpkgs": ["archetypes", "nixpkgs"],
+        "pinned": "pinned"
       }
     },
     "archetypes": {
       "inputs": {"vm": "vm", "nixpkgs": ["archetypes", "vm", "nixpkgs"]},
-      "locked": {"rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+      "locked": {
+        "type": "git",
+        "url": "https://forge.example/allod/archetypes.git",
+        "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
     },
     "vm": {
       "inputs": {"nixpkgs": "nixpkgs"},
-      "locked": {"rev": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+      "locked": {
+        "type": "git",
+        "url": "https://forge.example/allod/vm.git",
+        "rev": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
     },
-    "nixpkgs": {"locked": {"rev": "cccccccccccccccccccccccccccccccccccccccc"}},
-    "inventory": {"locked": {"rev": "dddddddddddddddddddddddddddddddddddddddd"}}
+    "nixpkgs": {
+      "locked": {
+        "type": "github",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "cccccccccccccccccccccccccccccccccccccccc"
+      }
+    },
+    "inventory": {
+      "locked": {
+        "type": "git",
+        "url": "https://forge.example/allod/inventory.git",
+        "rev": "dddddddddddddddddddddddddddddddddddddddd"
+      }
+    },
+    "pinned": {
+      "locked": {
+        "type": "path",
+        "path": "/nix/store/eeee-source",
+        "narHash": "sha256-eeee"
+      }
+    }
   }
 }
 EOF
@@ -96,23 +126,38 @@ echo "unexpected nix eval attribute: $attr" >&2
 exit 1
 EOF
 
+# git answers two questions: whether the checkout's lock is dirty, and what refs
+# a remote has.
+#   MOCK_DIRTY          working tree has an uncommitted flake.lock
+#   MOCK_LSREMOTE       ls-remote listing, tab-separated sha and ref per line
+#   MOCK_LSREMOTE_FAIL  the remote cannot be reached
 cat > "$TMP/bin/git" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "$1" == "-C" ]] || { echo "unexpected git invocation: $*" >&2; exit 1; }
-shift 2
 printf 'git\t%s\n' "$*" >> "$MOCK_LOG"
 
-case "$*" in
-  "status --porcelain -- flake.nix flake.lock")
-    [[ "${MOCK_DIRTY:-}" == true ]] && printf ' M flake.lock\n'
+case "$1" in
+  -C)
+    shift 2
+    case "$*" in
+      "status --porcelain -- flake.nix flake.lock")
+        [[ "${MOCK_DIRTY:-}" == true ]] && printf ' M flake.lock\n'
+        exit 0
+        ;;
+    esac
+    ;;
+  ls-remote)
+    if [[ "${MOCK_LSREMOTE_FAIL:-}" == true ]]; then
+      echo "fatal: could not read from remote repository" >&2
+      exit 128
+    fi
+    printf '%s' "${MOCK_LSREMOTE:-}"
     exit 0
     ;;
-  *)
-    echo "unexpected git invocation: $*" >&2
-    exit 1
-    ;;
 esac
+
+echo "unexpected git invocation: $*" >&2
+exit 1
 EOF
 
 chmod +x "$TMP/bin/nix" "$TMP/bin/git"
@@ -122,6 +167,23 @@ export MOCK_MACHINES="allod-canary allod-dev allod-work"
 export MOCK_CHANGED=""
 export MOCK_FAIL=""
 export MOCK_DIRTY=false
+export MOCK_LSREMOTE_FAIL=false
+
+# One listing serves every remote the fixture names. It carries the shapes that
+# matter: a plain branch tip, a commit that is the tip of both a branch and a
+# tag, an annotated tag whose commit only appears on the peeled entry, and two
+# commits sharing a seven-character prefix.
+MOCK_LSREMOTE=$(printf '%s\n' \
+  $'0123456789abcdef0123456789abcdef01234567\tHEAD' \
+  $'0123456789abcdef0123456789abcdef01234567\trefs/heads/master' \
+  $'89abcdef0123456789abcdef0123456789abcdef\trefs/heads/agent/split' \
+  $'7777777777777777777777777777777777777777\trefs/tags/release' \
+  $'7777777777777777777777777777777777777777\trefs/heads/agent/tagged' \
+  $'1111111111111111111111111111111111111111\trefs/tags/v1' \
+  $'fedcba9876543210fedcba9876543210fedcba98\trefs/tags/v1^{}' \
+  $'abc1234000000000000000000000000000000000\trefs/heads/collide-one' \
+  $'abc1234fffffffffffffffffffffffffffffffff\trefs/heads/collide-two')
+export MOCK_LSREMOTE
 
 OVERRIDE='archetypes/vm=git+https://forge.example/allod/vm.git?ref=refs/heads/agent/split&rev=0123456789abcdef0123456789abcdef01234567'
 
@@ -203,6 +265,8 @@ assert_equal "$(grep -c 'flake check' "$MOCK_LOG" || true)" "0" \
 assert_contains "$(cat "$MOCK_LOG")" \
   "--override-input archetypes/vm git+https://forge.example/allod/vm.git?ref=refs/heads/agent/split&rev=0123456789abcdef0123456789abcdef01234567" \
   "passes the override URL to nix as a single quoted argument"
+assert_equal "$(grep -c 'ls-remote' "$MOCK_LOG" || true)" "0" \
+  "a whole flake URL is passed through without consulting the remote"
 
 # --- One machine changes ---
 
@@ -297,6 +361,131 @@ assert_contains "$OUTPUT" "the baseline is the working tree, not the committed l
   "warns that an uncommitted lock moves the baseline"
 export MOCK_DIRTY=false
 
+# --- Short-form overrides: a revision, and the lock says where it lives ---
+#
+# The long form makes a human retype a URL the lock already records. Only the
+# revision is theirs to know.
+
+run "$DEPLOY" --override archetypes/vm=89abcde --expect-none
+assert_equal "$STATUS" "0" "an abbreviated revision is accepted in place of a URL"
+assert_contains "$(cat "$MOCK_LOG")" \
+  "ls-remote --quiet https://forge.example/allod/vm.git" \
+  "asks the repository the lock records for that input, not one the caller typed"
+assert_contains "$(cat "$MOCK_LOG")" \
+  "--override-input archetypes/vm git+https://forge.example/allod/vm.git?rev=89abcdef0123456789abcdef0123456789abcdef" \
+  "expands the abbreviation into the whole revision it pins"
+assert_contains "$OUTPUT" \
+  "override:     archetypes/vm=89abcde → git+https://forge.example/allod/vm.git?rev=89abcdef0123456789abcdef0123456789abcdef  (refs/heads/agent/split)" \
+  "shows what the abbreviation resolved to and where it was found, so the pinned commit is on the receipt"
+
+run "$DEPLOY" --override archetypes/vm=89ABCDE --expect-none
+assert_equal "$STATUS" "0" "an uppercase revision is accepted"
+assert_contains "$(cat "$MOCK_LOG")" \
+  "rev=89abcdef0123456789abcdef0123456789abcdef" \
+  "matches a revision case-insensitively"
+
+run "$DEPLOY" --override archetypes/vm=fedcba9 --expect-none
+assert_equal "$STATUS" "0" "a commit reached only through an annotated tag resolves"
+assert_contains "$(cat "$MOCK_LOG")" \
+  "?rev=fedcba9876543210fedcba9876543210fedcba98" \
+  "reads the peeled tag entry, which is where the commit hash lives"
+assert_contains "$OUTPUT" "(refs/tags/v1)" \
+  "names the tag rather than the tag object"
+
+run "$DEPLOY" --override archetypes/vm=7777777 --expect-none
+assert_equal "$STATUS" "0" "a commit carried by both a branch and a tag resolves"
+assert_contains "$OUTPUT" "(refs/tags/release, refs/heads/agent/tagged)" \
+  "names every ref carrying the commit rather than picking one"
+
+run "$DEPLOY" --override nixpkgs=89abcde --expect-none
+assert_equal "$STATUS" "0" "a github-locked input resolves by revision too"
+assert_contains "$(cat "$MOCK_LOG")" \
+  "ls-remote --quiet https://github.com/NixOS/nixpkgs.git" \
+  "derives the github remote from the lock's owner and repo"
+assert_contains "$(cat "$MOCK_LOG")" \
+  "--override-input nixpkgs github:NixOS/nixpkgs/89abcdef0123456789abcdef0123456789abcdef" \
+  "writes a github input back in its own flakeref form"
+
+# A whole revision is already the thing nix wants. Asking the remote to confirm
+# it would refuse a commit that is nobody's ref tip and would have worked.
+run "$DEPLOY" --override archetypes/vm=89abcdef0123456789abcdef0123456789abcdef --expect-none
+assert_equal "$STATUS" "0" "a whole 40-character revision is accepted in the same place"
+assert_equal "$(grep -c 'ls-remote' "$MOCK_LOG" || true)" "0" \
+  "asks the remote nothing about a revision that needs no expanding"
+assert_contains "$(cat "$MOCK_LOG")" \
+  "--override-input archetypes/vm git+https://forge.example/allod/vm.git?rev=89abcdef0123456789abcdef0123456789abcdef" \
+  "pins the whole revision it was given"
+
+run "$DEPLOY" --override archetypes/vm=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef --expect-none
+assert_equal "$STATUS" "0" "a whole revision that is no ref's tip is still accepted"
+assert_contains "$(cat "$MOCK_LOG")" \
+  "--override-input archetypes/vm git+https://forge.example/allod/vm.git?rev=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" \
+  "pins a commit deeper in history than any branch tip"
+
+# Sabotage 4: an abbreviation that names two commits must not silently pin one.
+run "$DEPLOY" --override archetypes/vm=abc1234 --expect-none
+assert_equal "$STATUS" "1" "an ambiguous abbreviation fails instead of pinning a guess"
+assert_contains "$OUTPUT" "abc1234 names 2 commits" \
+  "says how many commits the abbreviation matched"
+assert_contains "$OUTPUT" "abc1234000000000000000000000000000000000" \
+  "names one colliding commit"
+assert_contains "$OUTPUT" "abc1234fffffffffffffffffffffffffffffffff" \
+  "names the other colliding commit"
+assert_contains "$OUTPUT" "give more characters" \
+  "says what to do about a collision"
+assert_not_contains "$OUTPUT" "machines change." \
+  "evaluates nothing once an abbreviation is known ambiguous"
+
+run "$DEPLOY" --override archetypes/vm=9999999 --expect-none
+assert_equal "$STATUS" "1" "an abbreviation on no ref of the remote is refused"
+assert_contains "$OUTPUT" "no ref of https://forge.example/allod/vm.git carries a commit starting with 9999999" \
+  "names the remote it asked and the revision it could not find"
+assert_contains "$OUTPUT" "whole 40-character revision" \
+  "points at the escape hatch for a commit that is no ref's tip"
+assert_not_contains "$OUTPUT" "machines change." \
+  "evaluates nothing once an abbreviation is known unresolvable"
+
+run "$DEPLOY" --override archetypes/vm=89abc --expect-none
+assert_equal "$STATUS" "1" "a revision shorter than the minimum is a usage error"
+assert_contains "$OUTPUT" "a revision needs at least 7 characters, got 5" \
+  "says how many characters a revision needs, and how many it got"
+assert_equal "$(grep -c 'ls-remote' "$MOCK_LOG" || true)" "0" \
+  "does not consult the remote for a revision it has already rejected"
+
+run "$DEPLOY" --override pinned=89abcde --expect-none
+assert_equal "$STATUS" "1" "an input with no git remote cannot take a revision"
+assert_contains "$OUTPUT" "cannot name a repository for pinned" \
+  "names the input whose source it cannot resolve"
+assert_contains "$OUTPUT" "'path' source" \
+  "names the source type recorded in the lock"
+assert_contains "$OUTPUT" "give the whole flake URL" \
+  "points at the escape hatch"
+
+export MOCK_LSREMOTE_FAIL=true
+run "$DEPLOY" --override archetypes/vm=89abcde --expect-none
+assert_equal "$STATUS" "1" "an unreachable remote is a precondition error, not an evaluation one"
+assert_contains "$OUTPUT" "could not list the refs of https://forge.example/allod/vm.git" \
+  "names the remote it could not reach"
+assert_contains "$OUTPUT" "could not read from remote repository" \
+  "passes git's own diagnostic through"
+export MOCK_LSREMOTE_FAIL=false
+
+# A bad override path is refused before any revision is resolved, so a typo
+# costs no network round trip.
+run "$DEPLOY" --override archetypse/vm=89abcde --expect-none
+assert_equal "$STATUS" "1" "a mistyped path with a revision value still fails on the path"
+assert_equal "$(grep -c 'ls-remote' "$MOCK_LOG" || true)" "0" \
+  "checks every override path before consulting any remote"
+
+run "$DEPLOY" --override archetypes/vm=89abcde --override inventory=fedcba9 --expect-none
+assert_equal "$STATUS" "0" "revisions and their remotes are resolved per override"
+assert_contains "$(cat "$MOCK_LOG")" \
+  "ls-remote --quiet https://forge.example/allod/inventory.git" \
+  "asks each override's own remote"
+assert_contains "$(cat "$MOCK_LOG")" \
+  "--override-input inventory git+https://forge.example/allod/inventory.git?rev=fedcba9876543210fedcba9876543210fedcba98" \
+  "resolves the second override independently of the first"
+
 # --- Argument handling ---
 
 run "$DEPLOY" --override "$OVERRIDE" --override 'inventory=git+https://forge.example/allod/inventory.git?rev=dddd'
@@ -349,7 +538,7 @@ assert_contains "$OUTPUT" "--override names inputs absent from" \
   "explains that the override matched no input"
 assert_contains "$OUTPUT" "archetypse/vm" \
   "names the override path it could not resolve"
-assert_contains "$OUTPUT" "direct inputs: archetypes inventory nixpkgs" \
+assert_contains "$OUTPUT" "direct inputs: archetypes inventory nixpkgs pinned" \
   "lists the direct inputs so a path mistake is obvious"
 assert_not_contains "$OUTPUT" "machines change." \
   "does not evaluate anything once an override is known bad"
@@ -366,13 +555,13 @@ assert_contains "$OUTPUT" "not a directory: $TMP/absent" \
 
 run "$DEPLOY" --override 'archetypes/vm'
 assert_equal "$STATUS" "1" "an override without = is a usage error"
-assert_contains "$OUTPUT" "--override needs <input>=<url>" \
+assert_contains "$OUTPUT" "--override needs <input>=<rev>" \
   "explains the override format"
 
 run "$DEPLOY" --override 'archetypes/vm='
-assert_equal "$STATUS" "1" "an override with an empty url is a usage error"
-assert_contains "$OUTPUT" "--override has an empty url" \
-  "explains an empty override url"
+assert_equal "$STATUS" "1" "an override with an empty value is a usage error"
+assert_contains "$OUTPUT" "--override has an empty value" \
+  "explains an empty override value"
 
 run "$DEPLOY" --override 'arche types=git+https://forge.example/x.git'
 assert_equal "$STATUS" "1" "an override with an invalid input name is a usage error"

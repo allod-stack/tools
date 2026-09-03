@@ -154,8 +154,7 @@ either direction exits 2.
 
 ```bash
 cd ~/work/allod/deploy
-fleet-diff --override 'archetypes/vm=git+https://forge.anarch.diy/allod/vm.git?rev=<40-char-rev>' \
-  --expect-none
+fleet-diff --override archetypes/vm=1a2b3c4 --expect-none
 ```
 
 ### Reviewing a PR
