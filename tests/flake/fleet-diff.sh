@@ -422,6 +422,23 @@ assert_contains "$(cat "$MOCK_LOG")" \
   "--override-input archetypes/vm git+https://forge.example/allod/vm.git?rev=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" \
   "pins a commit deeper in history than any branch tip"
 
+run "$DEPLOY" --override archetypes/vm=0123456 --expect-none
+assert_equal "$STATUS" "0" "the default branch tip resolves"
+assert_contains "$OUTPUT" "(refs/heads/master)" \
+  "names the branch rather than the symbolic HEAD that duplicates it"
+assert_not_contains "$OUTPUT" "HEAD" \
+  "never reports HEAD as a ref carrying a commit"
+
+run "$DEPLOY" --override archetypes/vm=89abcdef0123456789abcdef0123456789abcdefff --expect-none
+assert_equal "$STATUS" "1" "a hex string longer than a revision is a usage error"
+assert_contains "$OUTPUT" "a revision is at most 40 characters, got 42" \
+  "says the revision is too long rather than too short"
+
+run "$DEPLOY" --override archetypes/vm=89abcde --override archetypes/vm=fedcba9 --expect-none
+assert_equal "$STATUS" "1" "the same input overridden twice is a usage error"
+assert_contains "$OUTPUT" "names archetypes/vm twice" \
+  "refuses rather than printing a receipt for an override nix would discard"
+
 # Sabotage 4: an abbreviation that names two commits must not silently pin one.
 run "$DEPLOY" --override archetypes/vm=abc1234 --expect-none
 assert_equal "$STATUS" "1" "an ambiguous abbreviation fails instead of pinning a guess"

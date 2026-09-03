@@ -103,6 +103,12 @@ add_override() {
     die_usage "invalid input name in --override: ${input}"
   fi
   [[ -n "$value" ]] || die_usage "--override has an empty value: ${spec}"
+  # nix keeps only the last --override-input for a given input, so a second
+  # one would print a receipt line for something that did not apply.
+  for existing in ${OVERRIDE_INPUTS[@]+"${OVERRIDE_INPUTS[@]}"}; do
+    [[ "$existing" != "$input" ]] \
+      || die_usage "--override names ${input} twice; nix would keep only the last"
+  done
   OVERRIDE_INPUTS+=("$input")
   OVERRIDE_VALUES+=("$value")
 }
@@ -230,7 +236,7 @@ lock_node_source() {
     | if $l == null then ["", "", "", ""]
       elif $l.type == "git" then [$l.type, ($l.url // ""), "", ""]
       elif $l.type == "github" then
-        [$l.type, "https://github.com/\($l.owner)/\($l.repo).git", $l.owner, $l.repo]
+        [$l.type, "https://\($l.host // "github.com")/\($l.owner)/\($l.repo).git", $l.owner, $l.repo]
       else [$l.type, "", "", ""]
       end
     | @tsv
@@ -251,8 +257,8 @@ is_whole_revision() {
   [[ "$1" =~ ^[0-9a-fA-F]{40}$ ]]
 }
 
-looks_like_short_revision() {
-  [[ "$1" =~ ^[0-9a-fA-F]+$ ]] && ! is_revision "$1"
+is_hex() {
+  [[ "$1" =~ ^[0-9a-fA-F]+$ ]]
 }
 
 # Expand an abbreviated revision against the remote's refs, which is the only
@@ -264,7 +270,7 @@ REV=""
 REFS=""
 resolve_revision() {
   local url="$1" want="${2,,}" listing line
-  if ! listing=$(git ls-remote --quiet "$url" 2>&1); then
+  if ! listing=$(GIT_TERMINAL_PROMPT=0 git ls-remote --quiet "$url" 2>&1); then
     echo "fleet-diff: could not list the refs of ${url}" >&2
     printf '%s\n' "$listing" | sed 's/^/  /' >&2
     exit "$EXIT_USAGE"
@@ -346,8 +352,11 @@ for i in "${!OVERRIDE_INPUTS[@]}"; do
   input="${OVERRIDE_INPUTS[$i]}"
   value="${OVERRIDE_VALUES[$i]}"
 
-  if looks_like_short_revision "$value"; then
-    die_usage "a revision needs at least ${REV_MIN_CHARS} characters, got ${#value}: ${input}=${value}"
+  if is_hex "$value" && ! is_revision "$value"; then
+    if [[ ${#value} -lt $REV_MIN_CHARS ]]; then
+      die_usage "a revision needs at least ${REV_MIN_CHARS} characters, got ${#value}: ${input}=${value}"
+    fi
+    die_usage "a revision is at most 40 characters, got ${#value}: ${input}=${value}"
   fi
 
   if ! is_revision "$value"; then

@@ -174,7 +174,7 @@ told which branch carries it — checked against a cold fetcher cache, on a comm
 that is not on the default branch — so naming a ref would add a second thing
 that has to stay true for no gain.
 
-A source `flake.lock` cannot turn back into a git remote takes a whole flake URL
+A source that `flake.lock` cannot turn back into a git remote takes a whole flake URL
 in the same place:
 
 ```bash
