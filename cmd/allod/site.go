@@ -318,16 +318,16 @@ func nixBuild(root string) (string, int) {
 	return strings.TrimRight(out.String(), "\n"), status
 }
 
-func rcloneSync(args []string) int {
-	return runCommand("", nil, stdout, stderr, "rclone", args...)
+func rcloneSync(config rcloneConfigSelection, args []string) int {
+	return runCommand("", nil, stdout, stderr, "rclone", config.rcloneArgs(args...)...)
 }
 
 // rcloneListRemotes returns what 'rclone listremotes' prints: one configured
 // remote per line, each with a trailing colon. Stderr is passed through so an
 // unreadable configuration file explains itself in rclone's own words.
-func rcloneListRemotes() (string, int) {
+func rcloneListRemotes(config rcloneConfigSelection) (string, int) {
 	var out bytes.Buffer
-	cmd := exec.Command("rclone", "listremotes")
+	cmd := exec.Command("rclone", config.rcloneArgs("listremotes")...)
 	cmd.Stdout = &out
 	cmd.Stderr = stderr
 	// The run has to finish before the buffer is read. Returning both in one
@@ -356,8 +356,8 @@ func hasRemote(listing, remote string) bool {
 // unconfigured machine used to report that fact only once the whole site had
 // been built — as an rclone complaint about a missing config section, minutes
 // after the operator asked for a deploy and with nothing to show for the wait.
-func requireSiteRemote() {
-	listing, status := siteRemotes()
+func requireSiteRemote(config rcloneConfigSelection) {
+	listing, status := siteRemotes(config)
 	if status != 0 {
 		die(status, "'rclone listremotes' failed; the rclone configuration on this machine is unreadable")
 	}
@@ -392,7 +392,12 @@ func probeSite(url string) (int, error) {
 
 func siteDeploy(args []string) {
 	dryRun := false
+	var configSelection rcloneConfigSelection
 	for len(args) > 0 {
+		if rest, consumed := configSelection.consume(args, "deploy"); consumed {
+			args = rest
+			continue
+		}
 		switch args[0] {
 		case "--dry-run":
 			dryRun, args = true, args[1:]
@@ -420,9 +425,18 @@ func siteDeploy(args []string) {
 	if _, err := exec.LookPath("rclone"); err != nil {
 		die(1, "'rclone' not found on PATH")
 	}
+	if err := configSelection.requireReadable(); err != nil {
+		if os.IsNotExist(err) {
+			fmt.Fprintf(stderr, "allod: named rclone configuration does not exist: %q\n", configSelection.path)
+			fmt.Fprintln(stderr, "allod: while resolving: the hosting credential selected by --config")
+			fmt.Fprintln(stderr, "allod: to fix: materialise the credential at that path, or omit --config to use rclone's configuration")
+			exit(1)
+		}
+		die(1, "named rclone configuration is not readable: %q: %s", configSelection.path, err)
+	}
 	// Before the build, not after it: building a site is minutes of work, and
 	// none of it is any use without somewhere to send the result.
-	requireSiteRemote()
+	requireSiteRemote(configSelection)
 
 	storePath, status := siteBuild(root)
 	if status != 0 {
@@ -455,7 +469,7 @@ func siteDeploy(args []string) {
 	if dryRun {
 		syncArgs = append(syncArgs, "--dry-run")
 	}
-	if status := siteSync(syncArgs); status != 0 {
+	if status := siteSync(configSelection, syncArgs); status != 0 {
 		// A dry run writes nothing, so reporting it as a possibly partial
 		// update sends the reader looking for damage that cannot exist.
 		if dryRun {
@@ -480,8 +494,8 @@ func siteDeploy(args []string) {
 }
 
 const siteUsageText = `Usage:
-  allod site deploy [--dry-run]
-  allod site config [--force]
+  allod site deploy [--config <path>] [--dry-run]
+  allod site config [--config <path>] [--force]
 
 Commands:
   deploy   Build the site repo and sync the result to its shared-hosting docroot
@@ -493,6 +507,16 @@ site repository root, builds that repo with 'nix build --no-link
 shared:domains/<domain>/public_html. 'shared' is an rclone remote configured
 once per machine; deploy never handles a credential, and checks that the remote
 exists before it starts the build rather than discovering it afterwards.
+
+'--config <path>' selects one rclone configuration file for either command. An
+explicit path takes precedence over RCLONE_CONFIG, rclone's reported path,
+XDG_CONFIG_HOME, and HOME. Deploy requires the named path to be an existing,
+readable regular file before it builds, and passes it to every rclone call.
+Config may create a missing named file and writes it at mode 0600. Without the
+flag, deploy leaves resolution entirely to rclone and config keeps asking
+rclone for its configuration file before falling back to the XDG/HOME default.
+The hosting config is machine-wide; it does not belong in site.toml or a site
+repository.
 
 The docroot is derived from the 'domain' key in site.toml and from nothing
 else. No flag, argument, or environment variable can point a deploy at another
