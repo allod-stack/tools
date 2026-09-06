@@ -129,10 +129,14 @@ func TestSiteConfigWritesTheStanza(t *testing.T) {
 	}
 
 	for _, want := range []string{"Remote: shared\n", "Type: ftp\n", "Host: " + testHost + "\n",
-		"User: " + testUser + "\n", "Config: " + stub.configFile + "\n"} {
+		"User: " + testUser + "\n", "Config: " + stub.configFile + "\n",
+		"The next deploy will check this remote before building.\n"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("stdout does not contain %q\ngot: %q", want, out)
 		}
+	}
+	if strings.Contains(out, "rclone lsd") {
+		t.Errorf("stdout tells the operator to run an unavailable command: %q", out)
 	}
 }
 
@@ -274,6 +278,70 @@ func writeExistingConfig(t *testing.T, path, text string) {
 
 // --- Where the file lives ---
 
+// An explicit location is authoritative: config neither asks rclone where its
+// default lives nor writes the path rclone would have reported. Unlike deploy,
+// config may create a missing named file because creating the credential is its
+// purpose.
+func TestSiteConfigUsesExplicitPathWithoutResolvingRcloneDefault(t *testing.T) {
+	stub := answeringStub(t)
+	useConfigStub(t, stub)
+	namedPath := filepath.Join(t.TempDir(), "declarative staging", "rclone.conf")
+
+	out, errText, code := runAllod(t, "site", "config", "--config="+namedPath)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0\nstderr: %s", code, errText)
+	}
+	if !strings.Contains(readFile(t, namedPath), "[shared]\n") {
+		t.Errorf("%s does not hold the remote", namedPath)
+	}
+	if _, err := os.Stat(stub.configFile); !os.IsNotExist(err) {
+		t.Errorf("rclone's reported default was touched (err = %v)", err)
+	}
+	for _, call := range stub.runs {
+		if strings.Join(call.args, " ") == "config file" {
+			t.Errorf("explicit --config still ran 'rclone config file': %+v", stub.runs)
+		}
+	}
+	if !strings.Contains(out, "Config: "+namedPath+"\n") {
+		t.Errorf("stdout does not report the named path\ngot: %q", out)
+	}
+}
+
+func TestSiteConfigRejectsUnreadableNamedFileBeforePrompting(t *testing.T) {
+	stub := answeringStub(t)
+	useConfigStub(t, stub)
+	namedPath := filepath.Join(t.TempDir(), "unreadable.conf")
+	existing := "[shared]\npass = secret\n"
+	writeExistingConfig(t, namedPath, existing)
+	if err := os.Chmod(namedPath, 0000); err != nil {
+		t.Fatalf("could not make named config unreadable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(namedPath, 0600) })
+	if file, err := os.Open(namedPath); err == nil {
+		file.Close()
+		t.Skip("test account can still open a mode-000 file")
+	}
+
+	_, errText, code := runAllod(t, "site", "config", "--config", namedPath)
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(errText, "could not read "+namedPath) {
+		t.Errorf("stderr does not identify the unreadable named path\ngot: %q", errText)
+	}
+	if strings.Contains(errText, existing) {
+		t.Errorf("stderr contains config contents: %q", errText)
+	}
+	if stub.askCalls != 0 {
+		t.Errorf("the operator was asked %d times before the refusal, want 0", stub.askCalls)
+	}
+	for _, call := range stub.runs {
+		if strings.Join(call.args, " ") == "config file" || strings.Join(call.args, " ") == "obscure -" {
+			t.Errorf("rclone ran before the unreadable-file refusal: %+v", stub.runs)
+		}
+	}
+}
+
 // When rclone cannot say where its configuration is — an old rclone, or one
 // that fails because there is none yet — the XDG default is used, which is
 // where rclone itself would create one.
@@ -340,6 +408,10 @@ func TestSiteConfigRejectsUnexpectedArguments(t *testing.T) {
 	}{
 		{[]string{"site", "config", "--remote", "other"}, "unknown option for site config"},
 		{[]string{"site", "config", "shared"}, "unexpected argument for site config"},
+		{[]string{"site", "config", "--config"}, "--config requires a path for site config"},
+		{[]string{"site", "config", "--config="}, "--config requires a non-empty path for site config"},
+		{[]string{"site", "config", "--config=/run/credential\nallod: forged"}, "--config path must be one line"},
+		{[]string{"site", "config", "--config", "/one", "--config", "/two"}, "--config may only be specified once"},
 	}
 	for _, test := range tests {
 		t.Run(strings.Join(test.args[2:], " "), func(t *testing.T) {

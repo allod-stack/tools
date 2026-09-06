@@ -28,31 +28,24 @@ import (
 
 // --- Harness ---
 
-// configuredRemotes is what 'rclone listremotes' prints on a machine that can
-// deploy: the remote the command needs, and nothing else it cares about.
-const configuredRemotes = "shared:\n"
-
 // deployStub records what the command asked the world to do and answers with
 // whatever the test set up.
 type deployStub struct {
-	// remotes is what 'rclone listremotes' answers. The zero value stands for
-	// configuredRemotes, because a configured machine is what every test but
-	// the pre-check's own needs; a test of the unconfigured machine sets it to
-	// a listing that does not name 'shared'.
-	remotes       string
-	remotesStatus int
-	remotesCalls  int
-	buildDir      string
-	buildCalls    int
-	storePath     string
-	buildStatus   int
-	syncArgs      []string
-	syncCalls     int
-	syncStatus    int
-	verifyURL     string
-	verifyCalls   int
-	verifyStatus  int
-	verifyErr     error
+	remoteResult     siteRemoteCheckResult
+	remoteConfigPath string
+	remoteCalls      int
+	buildDir         string
+	buildCalls       int
+	storePath        string
+	buildStatus      int
+	syncArgs         []string
+	syncCalls        int
+	syncStatus       int
+	syncConfigPath   string
+	verifyURL        string
+	verifyCalls      int
+	verifyStatus     int
+	verifyErr        error
 }
 
 // useDeployStub installs the stub over the four seams in site.go and puts stub
@@ -65,21 +58,18 @@ func useDeployStub(t *testing.T, stub *deployStub) string {
 	// stub. Keeping the default explicit makes the suite independent of the
 	// environment from which `go test` was launched.
 	t.Setenv(siteHostingProfileEnv, "")
-	previousRemotes, previousBuild := siteRemotes, siteBuild
+	previousRemoteCheck, previousBuild := siteRemoteCheck, siteBuild
 	previousSync, previousVerify := siteSync, siteVerify
-	siteRemotes = func() (string, int) {
-		stub.remotesCalls++
-		if stub.remotes == "" {
-			return configuredRemotes, stub.remotesStatus
-		}
-		return stub.remotes, stub.remotesStatus
+	siteRemoteCheck = func(configPath string) siteRemoteCheckResult {
+		stub.remoteConfigPath, stub.remoteCalls = configPath, stub.remoteCalls+1
+		return stub.remoteResult
 	}
 	siteBuild = func(root string) (string, int) {
 		stub.buildDir, stub.buildCalls = root, stub.buildCalls+1
 		return stub.storePath, stub.buildStatus
 	}
-	siteSync = func(args []string) int {
-		stub.syncArgs, stub.syncCalls = args, stub.syncCalls+1
+	siteSync = func(configPath string, args []string) int {
+		stub.syncConfigPath, stub.syncArgs, stub.syncCalls = configPath, args, stub.syncCalls+1
 		return stub.syncStatus
 	}
 	siteVerify = func(url string) (int, error) {
@@ -87,7 +77,7 @@ func useDeployStub(t *testing.T, stub *deployStub) string {
 		return stub.verifyStatus, stub.verifyErr
 	}
 	t.Cleanup(func() {
-		siteRemotes, siteBuild = previousRemotes, previousBuild
+		siteRemoteCheck, siteBuild = previousRemoteCheck, previousBuild
 		siteSync, siteVerify = previousSync, previousVerify
 	})
 	return stubTools(t, "nix", "rclone")
@@ -163,11 +153,11 @@ func TestSiteUsage(t *testing.T) {
 		errIsEmpty bool
 	}{
 		{"namespace listed in top-level usage", []string{}, 1, "site     Deploy a static site", "", true},
-		{"no command prints usage to stderr", []string{"site"}, 1, "", "allod site deploy [--dry-run]", false},
-		{"--help prints usage to stdout", []string{"site", "--help"}, 0, "allod site deploy [--dry-run]", "", true},
-		{"-h prints usage to stdout", []string{"site", "-h"}, 0, "allod site config [--force]", "", true},
-		{"deploy --help prints usage to stdout", []string{"site", "deploy", "--help"}, 0, "allod site deploy [--dry-run]", "", true},
-		{"config --help prints usage to stdout", []string{"site", "config", "--help"}, 0, "allod site config [--force]", "", true},
+		{"no command prints usage to stderr", []string{"site"}, 1, "", "allod site deploy [--config <path>] [--dry-run]", false},
+		{"--help prints usage to stdout", []string{"site", "--help"}, 0, "allod site deploy [--config <path>] [--dry-run]", "", true},
+		{"-h prints usage to stdout", []string{"site", "-h"}, 0, "allod site config [--config <path>] [--force]", "", true},
+		{"deploy --help prints usage to stdout", []string{"site", "deploy", "--help"}, 0, "allod site deploy [--config <path>] [--dry-run]", "", true},
+		{"config --help prints usage to stdout", []string{"site", "config", "--help"}, 0, "allod site config [--config <path>] [--force]", "", true},
 		{"unknown command", []string{"site", "publish"}, 1, "", "unknown site command: publish", false},
 	}
 
@@ -203,6 +193,10 @@ func TestSiteDeployTakesNoTarget(t *testing.T) {
 		{"site", "deploy", "--target", "other.example"},
 		{"site", "deploy", "other.example"},
 		{"site", "deploy", "shared:domains/other.example/public_html"},
+		{"site", "deploy", "--config"},
+		{"site", "deploy", "--config="},
+		{"site", "deploy", "--config=/run/credential\nallod: forged"},
+		{"site", "deploy", "--config", "/one", "--config", "/two"},
 	}
 
 	for _, args := range rejected {
@@ -429,6 +423,9 @@ func TestSiteDeployDirectAdminDefaultIsUnchanged(t *testing.T) {
 	if stub.syncCalls != 1 {
 		t.Fatalf("rclone ran %d times, want 1", stub.syncCalls)
 	}
+	if stub.remoteConfigPath != "" || stub.syncConfigPath != "" {
+		t.Errorf("default deploy selected an explicit rclone config: preflight=%q sync=%q", stub.remoteConfigPath, stub.syncConfigPath)
+	}
 
 	filter := argAfter(t, stub.syncArgs, "--filter-from")
 	want := []string{
@@ -469,6 +466,123 @@ func TestSiteDeployDirectAdminDefaultIsUnchanged(t *testing.T) {
 	}
 }
 
+// A named config is one machine-wide credential source for the whole deploy:
+// the preflight and the sync must not resolve different rclone defaults.
+func TestSiteDeployUsesNamedRcloneConfigThroughout(t *testing.T) {
+	stub := &deployStub{storePath: "/nix/store/aaa-site", verifyStatus: 200}
+	useDeployStub(t, stub)
+	useSiteRepo(t, "domain = \"example.com\"\n")
+
+	configPath := filepath.Join(t.TempDir(), "runtime credentials", "rclone.conf")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0700); err != nil {
+		t.Fatalf("could not create config directory: %v", err)
+	}
+	secret := "pass = plaintext-equivalent-test-value\n"
+	if err := os.WriteFile(configPath, []byte("[shared]\n"+secret), 0400); err != nil {
+		t.Fatalf("could not write named config: %v", err)
+	}
+
+	out, errText, code := runAllod(t, "site", "deploy", "--dry-run", "--config", configPath)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0\nstderr: %s", code, errText)
+	}
+	for operation, selectedPath := range map[string]string{
+		"preflight": stub.remoteConfigPath,
+		"sync":      stub.syncConfigPath,
+	} {
+		if selectedPath != configPath {
+			t.Errorf("%s config = %q, want %q", operation, selectedPath, configPath)
+		}
+	}
+	for stream, text := range map[string]string{"stdout": out, "stderr": errText} {
+		if strings.Contains(text, "plaintext-equivalent-test-value") {
+			t.Errorf("%s contains the credential from the named file: %q", stream, text)
+		}
+	}
+}
+
+// A missing declarative credential is a setup failure, not an rclone failure
+// after a build. The message names both ways forward and no child operation
+// starts.
+func TestSiteDeployRejectsMissingNamedRcloneConfig(t *testing.T) {
+	stub := &deployStub{storePath: "/nix/store/aaa-site", verifyStatus: 200}
+	useDeployStub(t, stub)
+	useSiteRepo(t, "domain = \"example.com\"\n")
+	configPath := filepath.Join(t.TempDir(), "not-materialised.conf")
+
+	_, errText, code := runAllod(t, "site", "deploy", "--config", configPath)
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	for _, want := range []string{"does not exist", configPath, "materialise", "omit --config"} {
+		if !strings.Contains(errText, want) {
+			t.Errorf("stderr does not contain %q\ngot: %q", want, errText)
+		}
+	}
+	if stub.remoteCalls != 0 || stub.buildCalls != 0 || stub.syncCalls != 0 {
+		t.Errorf("work ran with a missing named config: remote-check=%d build=%d sync=%d",
+			stub.remoteCalls, stub.buildCalls, stub.syncCalls)
+	}
+}
+
+func TestSiteDeployRejectsUnreadableNamedRcloneConfig(t *testing.T) {
+	stub := &deployStub{storePath: "/nix/store/aaa-site", verifyStatus: 200}
+	useDeployStub(t, stub)
+	useSiteRepo(t, "domain = \"example.com\"\n")
+	configPath := filepath.Join(t.TempDir(), "unreadable.conf")
+	if err := os.WriteFile(configPath, []byte("[shared]\npass = secret\n"), 0600); err != nil {
+		t.Fatalf("could not write named config: %v", err)
+	}
+	if err := os.Chmod(configPath, 0000); err != nil {
+		t.Fatalf("could not make named config unreadable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(configPath, 0600) })
+	if file, err := os.Open(configPath); err == nil {
+		file.Close()
+		t.Skip("test account can still open a mode-000 file")
+	}
+
+	_, errText, code := runAllod(t, "site", "deploy", "--config", configPath)
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	for _, want := range []string{"not readable", configPath} {
+		if !strings.Contains(errText, want) {
+			t.Errorf("stderr does not contain %q\ngot: %q", want, errText)
+		}
+	}
+	if strings.Contains(errText, "pass = secret") {
+		t.Errorf("stderr contains config contents: %q", errText)
+	}
+	if stub.remoteCalls != 0 || stub.buildCalls != 0 || stub.syncCalls != 0 {
+		t.Errorf("work ran with an unreadable named config: remote-check=%d build=%d sync=%d",
+			stub.remoteCalls, stub.buildCalls, stub.syncCalls)
+	}
+}
+
+func TestRcloneConfigSelectionBuildsChildArguments(t *testing.T) {
+	command := []string{"sync", "/source with spaces", "shared:target"}
+	tests := []struct {
+		name       string
+		configPath string
+		want       []string
+	}{
+		{"rclone resolves its default", "", command},
+		{
+			"explicit path is one argv value",
+			"-runtime config/rclone.conf",
+			[]string{"--config", "-runtime config/rclone.conf", "sync", "/source with spaces", "shared:target"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := fmt.Sprint(rcloneArgs(test.configPath, command...)); got != fmt.Sprint(test.want) {
+				t.Errorf("rclone args = %s, want %s", got, fmt.Sprint(test.want))
+			}
+		})
+	}
+}
+
 // TestSiteDeployWritesTheFilter proves the list rclone reads is this command's
 // list, not one the site repository supplied.
 func TestSiteDeployWritesTheFilter(t *testing.T) {
@@ -476,8 +590,8 @@ func TestSiteDeployWritesTheFilter(t *testing.T) {
 	stub := &deployStub{storePath: "/nix/store/aaa-site", verifyStatus: 200}
 	useDeployStub(t, stub)
 	previousSync := siteSync
-	siteSync = func(args []string) int {
-		stub.syncArgs, stub.syncCalls = args, stub.syncCalls+1
+	siteSync = func(configPath string, args []string) int {
+		stub.syncConfigPath, stub.syncArgs, stub.syncCalls = configPath, args, stub.syncCalls+1
 		data, err := os.ReadFile(argAfter(t, args, "--filter-from"))
 		if err != nil {
 			t.Errorf("could not read the filter file: %v", err)
@@ -505,8 +619,12 @@ func TestSiteDeployPublicHTMLProfile(t *testing.T) {
 	useDeployStub(t, stub)
 	t.Setenv(siteHostingProfileEnv, "public-html")
 	useSiteRepo(t, "domain = \"example.com\"\nhosting_profile = \"directadmin\"\n")
+	configPath := filepath.Join(t.TempDir(), "hosting.conf")
+	if err := os.WriteFile(configPath, []byte("[shared]\n"), 0600); err != nil {
+		t.Fatalf("could not write named rclone config: %v", err)
+	}
 
-	out, errText, code := runAllod(t, "site", "deploy")
+	out, errText, code := runAllod(t, "site", "deploy", "--config", configPath)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0\nstderr: %s", code, errText)
 	}
@@ -520,6 +638,9 @@ func TestSiteDeployPublicHTMLProfile(t *testing.T) {
 	}
 	if hasArg(stub.syncArgs, "--filter-from") {
 		t.Errorf("rclone got --filter-from for a profile with no exclusions: %v", stub.syncArgs)
+	}
+	if stub.remoteConfigPath != configPath || stub.syncConfigPath != configPath {
+		t.Errorf("named config paths: preflight=%q sync=%q, want %q", stub.remoteConfigPath, stub.syncConfigPath, configPath)
 	}
 	if !strings.Contains(out, "Target: shared:public_html/example.com\n") {
 		t.Errorf("stdout does not name the selected target\ngot: %q", out)
@@ -556,8 +677,8 @@ func TestSiteDeployRejectsBadHostingProfileBeforeEffects(t *testing.T) {
 					t.Errorf("stderr does not contain %q\ngot: %q", want, errText)
 				}
 			}
-			if stub.remotesCalls != 0 || stub.buildCalls != 0 || stub.syncCalls != 0 || stub.verifyCalls != 0 {
-				t.Errorf("effects after rejected profile: remote=%d build=%d sync=%d verify=%d", stub.remotesCalls, stub.buildCalls, stub.syncCalls, stub.verifyCalls)
+			if stub.remoteCalls != 0 || stub.buildCalls != 0 || stub.syncCalls != 0 || stub.verifyCalls != 0 {
+				t.Errorf("effects after rejected profile: remote=%d build=%d sync=%d verify=%d", stub.remoteCalls, stub.buildCalls, stub.syncCalls, stub.verifyCalls)
 			}
 		})
 	}
@@ -636,6 +757,12 @@ func TestSiteDeploySyncFailure(t *testing.T) {
 	}
 	if !strings.Contains(errText, "rclone sync failed") {
 		t.Errorf("stderr does not contain %q\ngot: %q", "rclone sync failed", errText)
+	}
+	if !strings.Contains(errText, "deployment to shared:domains/example.com/public_html did not complete") {
+		t.Errorf("stderr does not say the deployment did not complete\ngot: %q", errText)
+	}
+	if strings.Contains(errText, "partially updated") {
+		t.Errorf("sync failure claims a partial update that may not have happened\ngot: %q", errText)
 	}
 	if stub.verifyCalls != 0 {
 		t.Errorf("verification ran %d times after a failed sync, want 0", stub.verifyCalls)
@@ -779,73 +906,120 @@ func TestSiteNamespaceIsRegistered(t *testing.T) {
 	}
 }
 
-func TestHasRemote(t *testing.T) {
+func TestClassifySiteRemoteProblem(t *testing.T) {
 	tests := []struct {
-		name    string
-		listing string
-		want    bool
+		name       string
+		diagnostic string
+		want       siteRemoteProblem
 	}{
-		{"the listing rclone prints", "shared:\n", true},
-		{"no trailing newline", "shared:", true},
-		{"among others", "backup:\nshared:\nscratch:\n", true},
-		{"bare name, as older rclone printed it", "shared\n", true},
-		{"padded", "  shared:  \n", true},
-		{"nothing configured", "", false},
-		{"an empty listing with a newline in it", "\n", false},
-		{"other remotes only", "backup:\nscratch:\n", false},
-		{"a longer name that starts the same way", "shared-staging:\n", false},
-		{"a name that only contains it", "not-shared:\n", false},
+		{
+			"remote missing",
+			`CRITICAL: Failed to create file system for "shared:": didn't find section in config file ("shared")`,
+			siteRemoteMissing,
+		},
+		{
+			"config unreadable",
+			`CRITICAL: Failed to load config file "/run/credentials/rclone.conf": permission denied`,
+			siteRemoteConfigUnreadable,
+		},
+		{
+			"credential rejected",
+			`NewFs: failed to make FTP connection to "host.example:21": 530 Login authentication failed`,
+			siteRemoteCredentialRejected,
+		},
+		{
+			"host unreachable",
+			`NewFs: failed to make FTP connection to "missing.example:21": dial tcp: lookup missing.example: no such host`,
+			siteRemoteHostUnreachable,
+		},
+		{"unknown rclone failure", "CRITICAL: an unfamiliar backend failure", siteRemoteUnknown},
 	}
+
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := hasRemote(test.listing, siteRemoteName); got != test.want {
-				t.Errorf("hasRemote(%q, %q) = %v, want %v", test.listing, siteRemoteName, got, test.want)
+			if got := classifySiteRemoteProblem(test.diagnostic); got != test.want {
+				t.Errorf("classifySiteRemoteProblem(%q) = %d, want %d", test.diagnostic, got, test.want)
 			}
 		})
 	}
 }
 
-// TestSiteDeployRequiresTheSharedRemoteBeforeBuilding pins the order, which is
-// the whole value of the check: an unconfigured machine learns that it is
-// unconfigured immediately, not after a full site build it then throws away.
-// The proof is that nix build never ran.
-func TestSiteDeployRequiresTheSharedRemoteBeforeBuilding(t *testing.T) {
-	listings := map[string]string{
-		"no remotes at all":  "\n",
-		"other remotes only": "backup:\nscratch:\n",
+// Every remote failure stops before the expensive build and produces one
+// sentence naming the cause and its remedy. Exact stderr checks also prove
+// that no raw rclone diagnostic leaks through the shared reporter.
+func TestSiteDeployReportsRemoteFailuresBeforeBuilding(t *testing.T) {
+	tests := []struct {
+		name   string
+		result siteRemoteCheckResult
+		code   int
+		want   string
+	}{
+		{
+			"remote missing",
+			siteRemoteCheckResult{problem: siteRemoteMissing, status: 2},
+			2,
+			"allod: no 'shared' rclone remote is configured; run 'allod site config' to create it\n",
+		},
+		{
+			"config unreadable",
+			siteRemoteCheckResult{problem: siteRemoteConfigUnreadable, status: 3},
+			3,
+			"allod: the rclone configuration is unreadable; check its path and permissions\n",
+		},
+		{
+			"credential rejected",
+			siteRemoteCheckResult{problem: siteRemoteCredentialRejected, status: 4},
+			4,
+			"allod: the stored username or password for 'shared' was rejected; run 'allod site config --force' to replace it\n",
+		},
+		{
+			"host unreachable",
+			siteRemoteCheckResult{problem: siteRemoteHostUnreachable, status: 5},
+			5,
+			"allod: the host for 'shared' is unreachable; check its address, the network connection, and the hosting service\n",
+		},
+		{
+			"unknown failure",
+			siteRemoteCheckResult{problem: siteRemoteUnknown, status: 6},
+			6,
+			"allod: the 'shared' hosting remote could not be checked (rclone exited 6)\n",
+		},
 	}
-	for name, listing := range listings {
-		t.Run(name, func(t *testing.T) {
-			stub := &deployStub{remotes: listing, storePath: "/nix/store/aaa-site", verifyStatus: 200}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stub := &deployStub{
+				remoteResult: test.result,
+				storePath:    "/nix/store/aaa-site",
+				verifyStatus: 200,
+			}
 			useDeployStub(t, stub)
 			useSiteRepo(t, "domain = \"example.com\"\n")
 
 			_, errText, code := runAllod(t, "site", "deploy")
-			if code != 1 {
-				t.Errorf("exit code = %d, want 1", code)
+			if code != test.code {
+				t.Errorf("exit code = %d, want %d", code, test.code)
 			}
-			if stub.remotesCalls != 1 {
-				t.Errorf("the remote was checked %d times, want 1", stub.remotesCalls)
+			if errText != test.want {
+				t.Errorf("stderr = %q, want %q", errText, test.want)
+			}
+			if stub.remoteCalls != 1 {
+				t.Errorf("the remote was checked %d times, want 1", stub.remoteCalls)
+			}
+			if stub.remoteConfigPath != "" {
+				t.Errorf("remote config path = %q, want the rclone default", stub.remoteConfigPath)
 			}
 			if stub.buildCalls != 0 {
-				t.Errorf("nix build ran %d times without a remote to deploy to, want 0", stub.buildCalls)
+				t.Errorf("nix build ran %d times after the remote failed, want 0", stub.buildCalls)
 			}
 			if stub.syncCalls != 0 {
-				t.Errorf("rclone ran %d times, want 0", stub.syncCalls)
-			}
-			// The message has to name the remedy: the failure it replaces was
-			// an rclone complaint about a missing config section, which says
-			// nothing about what to do next.
-			for _, want := range []string{"no 'shared' rclone remote", "to fix:", "allod site config"} {
-				if !strings.Contains(errText, want) {
-					t.Errorf("stderr does not contain %q\ngot: %q", want, errText)
-				}
+				t.Errorf("rclone sync ran %d times after the remote failed, want 0", stub.syncCalls)
 			}
 		})
 	}
 }
 
-// A configured machine gets past the check, and pays for exactly one listing.
+// A working credential gets past the check, and pays for exactly one probe.
 func TestSiteDeployChecksTheRemoteOnce(t *testing.T) {
 	stub := &deployStub{storePath: "/nix/store/aaa-site", verifyStatus: 200}
 	useDeployStub(t, stub)
@@ -854,64 +1028,59 @@ func TestSiteDeployChecksTheRemoteOnce(t *testing.T) {
 	if _, errText, code := runAllod(t, "site", "deploy"); code != 0 {
 		t.Fatalf("exit code = %d, want 0\nstderr: %s", code, errText)
 	}
-	if stub.remotesCalls != 1 {
-		t.Errorf("the remote was checked %d times, want 1", stub.remotesCalls)
+	if stub.remoteCalls != 1 {
+		t.Errorf("the remote was checked %d times, want 1", stub.remoteCalls)
 	}
 	if stub.buildCalls != 1 {
 		t.Errorf("nix build ran %d times, want 1", stub.buildCalls)
 	}
 }
 
-// An rclone that cannot answer is not the same as an rclone that answers "no
-// such remote": the configuration is unreadable, and its exit status carries.
-func TestSiteDeployRemoteListingFailure(t *testing.T) {
-	stub := &deployStub{remotesStatus: 4, storePath: "/nix/store/aaa-site", verifyStatus: 200}
-	useDeployStub(t, stub)
-	useSiteRepo(t, "domain = \"example.com\"\n")
-
-	_, errText, code := runAllod(t, "site", "deploy")
-	if code != 4 {
-		t.Errorf("exit code = %d, want 4", code)
-	}
-	if !strings.Contains(errText, "'rclone listremotes' failed") {
-		t.Errorf("stderr does not contain %q\ngot: %q", "'rclone listremotes' failed", errText)
-	}
-	if stub.buildCalls != 0 {
-		t.Errorf("nix build ran %d times, want 0", stub.buildCalls)
-	}
-}
-
-// TestRcloneListRemotes exercises the real function rather than the seam,
-// because the one thing it has to get right — reading the child's output only
-// after the child has produced it — is a property of the plumbing that no
-// stubbed test touches. This function had that bug: returning out.String()
-// and cmd.Run() in one statement reads the buffer first, since the operands of
-// a return are evaluated left to right, and every stubbed test above still
-// passed.
-func TestRcloneListRemotes(t *testing.T) {
+// TestRcloneSiteRemoteCheck exercises the real process boundary. It pins the
+// exact read-only, authenticating argv, proves stdout and raw diagnostics stay
+// suppressed, and keeps an explicit config path available for the named-path
+// credential work without changing today's default invocation.
+func TestRcloneSiteRemoteCheck(t *testing.T) {
 	if _, err := os.Stat("/bin/sh"); err != nil {
 		t.Skip("no /bin/sh to write a stub rclone with")
 	}
 	binDir := t.TempDir()
-	script := "#!/bin/sh\nprintf 'shared:\\nbackup:\\n'\nexit ${STUB_STATUS:-0}\n"
+	record := filepath.Join(t.TempDir(), "rclone-call")
+	script := "#!/bin/sh\n" +
+		"printf 'config=%s\\n' \"$RCLONE_CONFIG\" >\"$STUB_RECORD\"\n" +
+		"for arg do printf 'arg=%s\\n' \"$arg\" >>\"$STUB_RECORD\"; done\n" +
+		"printf 'directory listing that must stay hidden\\n'\n" +
+		"printf '%s' \"$STUB_DIAGNOSTIC\" >&2\n" +
+		"exit ${STUB_STATUS:-0}\n"
 	if err := os.WriteFile(filepath.Join(binDir, "rclone"), []byte(script), 0755); err != nil {
 		t.Fatalf("could not write the stub rclone: %v", err)
 	}
 	t.Setenv("PATH", binDir)
+	t.Setenv("STUB_RECORD", record)
+	t.Setenv("RCLONE_CONFIG", "/environment/rclone.conf")
 
-	listing, status := rcloneListRemotes()
-	if status != 0 {
-		t.Errorf("status = %d, want 0", status)
+	result := rcloneSiteRemoteCheck("")
+	if result != (siteRemoteCheckResult{problem: siteRemoteReady}) {
+		t.Errorf("result = %+v, want ready", result)
 	}
-	if listing != "shared:\nbackup:\n" {
-		t.Errorf("listing = %q, want the child's output", listing)
-	}
-	if !hasRemote(listing, siteRemoteName) {
-		t.Errorf("hasRemote(%q) = false; a configured machine would not deploy", listing)
+	if got := readFile(t, record); got != "config=/environment/rclone.conf\narg=lsd\narg=shared:\n" {
+		t.Errorf("rclone call = %q, want one 'lsd shared:' using the inherited config", got)
 	}
 
-	t.Setenv("STUB_STATUS", "3")
-	if _, status := rcloneListRemotes(); status != 3 {
-		t.Errorf("status = %d, want 3", status)
+	t.Setenv("STUB_STATUS", "7")
+	t.Setenv("STUB_DIAGNOSTIC", "530 Login authentication failed")
+	result = rcloneSiteRemoteCheck("")
+	if result != (siteRemoteCheckResult{problem: siteRemoteCredentialRejected, status: 7}) {
+		t.Errorf("result = %+v, want rejected credential with status 7", result)
+	}
+
+	t.Setenv("STUB_STATUS", "0")
+	t.Setenv("STUB_DIAGNOSTIC", "")
+	result = rcloneSiteRemoteCheck("/run/credentials/rclone.conf")
+	if result != (siteRemoteCheckResult{problem: siteRemoteReady}) {
+		t.Errorf("result = %+v, want ready", result)
+	}
+	if got := readFile(t, record); got != "config=/environment/rclone.conf\narg=--config\narg=/run/credentials/rclone.conf\narg=lsd\narg=shared:\n" {
+		t.Errorf("rclone call with config = %q, want one explicit-config 'lsd shared:'", got)
 	}
 }

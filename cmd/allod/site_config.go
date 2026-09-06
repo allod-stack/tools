@@ -56,9 +56,102 @@ var (
 	siteAsk = askRemoteCredentials
 )
 
+// rcloneConfigSelection is the one config-file selector shared by every site
+// command that reads or writes the hosting credential. Keeping the parser and
+// rclone argv construction here gives later credential lifecycle commands the
+// same --config contract without each command inventing its own precedence.
+//
+// With no explicit path, rclone resolves RCLONE_CONFIG and its platform default
+// itself. An explicit path is passed as --config and therefore wins over both.
+type rcloneConfigSelection struct {
+	path     string
+	explicit bool
+}
+
+// consume parses the shared --config option at the front of args. It accepts
+// both conventional spellings, leaves every other argument for the command's
+// own parser, and refuses ambiguity from naming the option twice.
+func (selection *rcloneConfigSelection) consume(args []string, command string) ([]string, bool) {
+	if len(args) == 0 {
+		return args, false
+	}
+
+	var path string
+	switch {
+	case args[0] == "--config":
+		if len(args) < 2 {
+			die(1, "--config requires a path for site %s", command)
+		}
+		path, args = args[1], args[2:]
+	case strings.HasPrefix(args[0], "--config="):
+		path, args = strings.TrimPrefix(args[0], "--config="), args[1:]
+	default:
+		return args, false
+	}
+
+	if path == "" {
+		die(1, "--config requires a non-empty path for site %s", command)
+	}
+	if !validConfigValue(path) {
+		die(1, "--config path must be one line of printable text for site %s", command)
+	}
+	if selection.explicit {
+		die(1, "--config may only be specified once for site %s", command)
+	}
+	selection.path, selection.explicit = path, true
+	return args, true
+}
+
+// configPath is the contract used by commands that hand the selection to
+// rclone: an empty value means rclone resolves its own configuration.
+func (selection rcloneConfigSelection) configPath() string {
+	if !selection.explicit {
+		return ""
+	}
+	return selection.path
+}
+
+// rcloneArgs is the only place that turns a selected path into child argv. The
+// explicit flag is placed before the command name, where rclone treats it as a
+// global option. An empty path adds no flag, preserving rclone's own resolution.
+func rcloneArgs(configPath string, args ...string) []string {
+	if configPath == "" {
+		return append([]string(nil), args...)
+	}
+	return append([]string{"--config", configPath}, args...)
+}
+
+// requireReadable checks a declaratively supplied config before a deploy does
+// any expensive work. It opens rather than reads the file: that proves the
+// caller can read it without bringing a plaintext-equivalent credential into
+// this process. Non-regular files are refused so a FIFO cannot block the
+// preflight and a directory cannot reach rclone as if it were a config file.
+func (selection rcloneConfigSelection) requireReadable() error {
+	if !selection.explicit {
+		return nil
+	}
+	info, err := os.Stat(selection.path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("not a regular file")
+	}
+	file, err := os.Open(selection.path)
+	if err != nil {
+		return err
+	}
+	return file.Close()
+}
+
 func siteConfigure(args []string) {
 	force := false
+	var configSelection rcloneConfigSelection
 	for len(args) > 0 {
+		if rest, consumed := configSelection.consume(args, "config"); consumed {
+			args = rest
+			continue
+		}
 		switch args[0] {
 		case "--force":
 			force, args = true, args[1:]
@@ -80,7 +173,7 @@ func siteConfigure(args []string) {
 		die(1, "'rclone' not found on PATH")
 	}
 
-	path, err := rcloneConfigPath()
+	path, err := rcloneConfigPath(configSelection)
 	if err != nil {
 		die(1, "could not determine where rclone keeps its configuration: %s", err)
 	}
@@ -127,7 +220,7 @@ func siteConfigure(args []string) {
 	// Everything printed here is safe to read over a shoulder or paste into an
 	// issue. The password and its obscured form are not, and are not printed.
 	fmt.Fprintf(stdout, "Remote: %s\nType: ftp\nHost: %s\nUser: %s\nConfig: %s\n", siteRemoteName, host, user, path)
-	fmt.Fprintf(stdout, "Check it with: rclone lsd %s:\n", siteRemoteName)
+	fmt.Fprintln(stdout, "The next deploy will check this remote before building.")
 }
 
 // runCapture runs a command with input on its stdin and returns its trimmed
@@ -194,14 +287,18 @@ func validConfigValue(value string) bool {
 	return true
 }
 
-// rcloneConfigPath asks rclone where its configuration lives, because the
-// answer depends on the build, on RCLONE_CONFIG, and on XDG_CONFIG_HOME, and
-// a stanza written to the wrong file is a remote rclone never reads. 'rclone
-// config file' prints a sentence and then the path, so the path is the last
-// non-blank line. If rclone cannot answer — it is old, or it fails because
-// there is no configuration yet — the XDG default is used, which is where
-// rclone itself would create one.
-func rcloneConfigPath() (string, error) {
+// rcloneConfigPath returns an explicit selection unchanged. Otherwise it asks
+// rclone where its configuration lives, because the answer depends on the
+// build, on RCLONE_CONFIG, and on XDG_CONFIG_HOME, and a stanza written to the
+// wrong file is a remote rclone never reads. 'rclone config file' prints a
+// sentence and then the path, so the path is the last non-blank line. If
+// rclone cannot answer — it is old, or it fails because there is no
+// configuration yet — the XDG default is used, which is where rclone itself
+// would create one.
+func rcloneConfigPath(selection rcloneConfigSelection) (string, error) {
+	if selection.explicit {
+		return selection.path, nil
+	}
 	if out, status := siteRun("", "rclone", "config", "file"); status == 0 {
 		if path := lastNonBlankLine(out); filepath.IsAbs(path) {
 			return path, nil
