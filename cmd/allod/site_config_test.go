@@ -129,10 +129,14 @@ func TestSiteConfigWritesTheStanza(t *testing.T) {
 	}
 
 	for _, want := range []string{"Remote: shared\n", "Type: ftp\n", "Host: " + testHost + "\n",
-		"User: " + testUser + "\n", "Config: " + stub.configFile + "\n"} {
+		"User: " + testUser + "\n", "Config: " + stub.configFile + "\n",
+		"The next deploy will check this remote before building.\n"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("stdout does not contain %q\ngot: %q", want, out)
 		}
+	}
+	if strings.Contains(out, "rclone lsd") {
+		t.Errorf("stdout tells the operator to run an unavailable command: %q", out)
 	}
 }
 

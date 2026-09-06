@@ -99,14 +99,23 @@ func (selection *rcloneConfigSelection) consume(args []string, command string) (
 	return args, true
 }
 
-// rcloneArgs applies the selection to a command. The explicit flag is placed
-// before the command name, where rclone treats it as a global option. No flag
-// at all is added for the default case, preserving rclone's own resolution.
-func (selection rcloneConfigSelection) rcloneArgs(args ...string) []string {
+// configPath is the contract used by commands that hand the selection to
+// rclone: an empty value means rclone resolves its own configuration.
+func (selection rcloneConfigSelection) configPath() string {
 	if !selection.explicit {
+		return ""
+	}
+	return selection.path
+}
+
+// rcloneArgs is the only place that turns a selected path into child argv. The
+// explicit flag is placed before the command name, where rclone treats it as a
+// global option. An empty path adds no flag, preserving rclone's own resolution.
+func rcloneArgs(configPath string, args ...string) []string {
+	if configPath == "" {
 		return append([]string(nil), args...)
 	}
-	return append([]string{"--config", selection.path}, args...)
+	return append([]string{"--config", configPath}, args...)
 }
 
 // requireReadable checks a declaratively supplied config before a deploy does
@@ -208,7 +217,7 @@ func siteConfigure(args []string) {
 	// Everything printed here is safe to read over a shoulder or paste into an
 	// issue. The password and its obscured form are not, and are not printed.
 	fmt.Fprintf(stdout, "Remote: %s\nType: ftp\nHost: %s\nUser: %s\nConfig: %s\n", siteRemoteName, host, user, path)
-	fmt.Fprintf(stdout, "Check it with: rclone lsd %s:\n", siteRemoteName)
+	fmt.Fprintln(stdout, "The next deploy will check this remote before building.")
 }
 
 // runCapture runs a command with input on its stdin and returns its trimmed
