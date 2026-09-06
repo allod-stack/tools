@@ -632,3 +632,27 @@ func TestSiteDeployMissingTools(t *testing.T) {
 		})
 	}
 }
+
+// A failed dry run must not claim the docroot may be partially updated. A dry
+// run writes nothing, so that wording sends the reader looking for damage that
+// cannot exist -- which is exactly what it did the first time a missing rclone
+// remote made the sync fail.
+func TestSiteDeployDryRunFailureDoesNotClaimPartialUpdate(t *testing.T) {
+	stub := &deployStub{storePath: "/nix/store/aaa-site", syncStatus: 1, verifyStatus: 200}
+	useDeployStub(t, stub)
+	useSiteRepo(t, "domain = \"hashpool.dev\"\n")
+
+	_, errText, code := runAllod(t, "site", "deploy", "--dry-run")
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	if strings.Contains(errText, "partially updated") {
+		t.Errorf("dry-run failure claims a partial update\ngot: %q", errText)
+	}
+	if !strings.Contains(errText, "was not modified") {
+		t.Errorf("stderr does not contain %q\ngot: %q", "was not modified", errText)
+	}
+	if stub.verifyCalls != 0 {
+		t.Errorf("verification ran %d times after a failed dry run, want 0", stub.verifyCalls)
+	}
+}

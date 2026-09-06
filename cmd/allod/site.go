@@ -376,6 +376,11 @@ func siteDeploy(args []string) {
 		syncArgs = append(syncArgs, "--dry-run")
 	}
 	if status := siteSync(syncArgs); status != 0 {
+		// A dry run writes nothing, so reporting it as a possibly partial
+		// update sends the reader looking for damage that cannot exist.
+		if dryRun {
+			die(status, "rclone dry run failed; %s was not modified", docroot)
+		}
 		die(status, "rclone sync failed; %s may be partially updated", docroot)
 	}
 	if dryRun {
