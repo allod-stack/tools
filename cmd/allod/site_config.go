@@ -92,6 +92,9 @@ func (selection *rcloneConfigSelection) consume(args []string, command string) (
 	if path == "" {
 		die(1, "--config requires a non-empty path for site %s", command)
 	}
+	if !validConfigValue(path) {
+		die(1, "--config path must be one line of printable text for site %s", command)
+	}
 	if selection.explicit {
 		die(1, "--config may only be specified once for site %s", command)
 	}

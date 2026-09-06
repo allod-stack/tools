@@ -182,6 +182,7 @@ func TestSiteDeployTakesNoTarget(t *testing.T) {
 		{"site", "deploy", "shared:domains/other.example/public_html"},
 		{"site", "deploy", "--config"},
 		{"site", "deploy", "--config="},
+		{"site", "deploy", "--config=/run/credential\nallod: forged"},
 		{"site", "deploy", "--config", "/one", "--config", "/two"},
 	}
 

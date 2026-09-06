@@ -410,6 +410,7 @@ func TestSiteConfigRejectsUnexpectedArguments(t *testing.T) {
 		{[]string{"site", "config", "shared"}, "unexpected argument for site config"},
 		{[]string{"site", "config", "--config"}, "--config requires a path for site config"},
 		{[]string{"site", "config", "--config="}, "--config requires a non-empty path for site config"},
+		{[]string{"site", "config", "--config=/run/credential\nallod: forged"}, "--config path must be one line"},
 		{[]string{"site", "config", "--config", "/one", "--config", "/two"}, "--config may only be specified once"},
 	}
 	for _, test := range tests {
