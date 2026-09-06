@@ -9,7 +9,7 @@ host install them through their Nix composition, with no manual installation aft
 ## Layout
 
 ```
-cmd/allod/                Go main CLI (change, patch, pr, pm)
+cmd/allod/                Go main CLI (change, patch, site, pr, pm)
 cmd/forge/                Forgejo CLI Go command
 internal/forgeapi/        in-process Forgejo API client
 internal/gitremote/       Git remote parsing shared by Go commands
