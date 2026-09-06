@@ -79,10 +79,10 @@ const siteVerifyExit = 7
 // daemon, a configured rclone remote, or a network. 'site config' has two
 // seams of its own; see site_config.go.
 var (
-	siteRemotes = rcloneListRemotes
-	siteBuild   = nixBuild
-	siteSync    = rcloneSync
-	siteVerify  = probeSite
+	siteRemoteCheck = rcloneSiteRemoteCheck
+	siteBuild       = nixBuild
+	siteSync        = rcloneSync
+	siteVerify      = probeSite
 )
 
 // init is what makes the namespace exist, and it runs only in a build that
@@ -322,52 +322,137 @@ func rcloneSync(args []string) int {
 	return runCommand("", nil, stdout, stderr, "rclone", args...)
 }
 
-// rcloneListRemotes returns what 'rclone listremotes' prints: one configured
-// remote per line, each with a trailing colon. Stderr is passed through so an
-// unreadable configuration file explains itself in rclone's own words.
-func rcloneListRemotes() (string, int) {
-	var out bytes.Buffer
-	cmd := exec.Command("rclone", "listremotes")
-	cmd.Stdout = &out
-	cmd.Stderr = stderr
-	// The run has to finish before the buffer is read. Returning both in one
-	// statement would read an empty buffer: the operands of a return are
-	// evaluated left to right, so out.String() would run before cmd.Run().
-	status := commandExitCode(cmd.Run())
-	return out.String(), status
+// siteRemoteProblem is the operator action selected from an rclone probe. The
+// distinction matters because all four expected failures have different
+// remedies, while rclone reports each one as a failed filesystem creation.
+type siteRemoteProblem uint8
+
+const (
+	siteRemoteReady siteRemoteProblem = iota
+	siteRemoteMissing
+	siteRemoteConfigUnreadable
+	siteRemoteCredentialRejected
+	siteRemoteHostUnreachable
+	siteRemoteUnknown
+)
+
+type siteRemoteCheckResult struct {
+	problem siteRemoteProblem
+	status  int
 }
 
-// hasRemote reports whether listing names remote. The trailing colon is
-// optional on the way in: current rclone prints 'shared:' and older versions
-// printed the bare name. This answer decides whether a deploy runs at all, so
-// it accepts both rather than reading a listing it half understands as "not
-// configured".
-func hasRemote(listing, remote string) bool {
-	for _, line := range strings.Split(listing, "\n") {
-		if strings.TrimSuffix(strings.TrimSpace(line), ":") == remote {
-			return true
-		}
+// rcloneSiteRemoteCheck opens the remote rather than merely asking rclone for
+// its name. 'lsd shared:' logs in and reads the hosting account's root without
+// changing it, so one successful call proves the stanza, credential, host and
+// service all work. Output is captured because the CLI owns the diagnosis:
+// rclone deliberately is not installed on the operator's PATH.
+func rcloneSiteRemoteCheck(configPath string) siteRemoteCheckResult {
+	var diagnostic bytes.Buffer
+	args := []string{"lsd", siteRemoteName + ":"}
+	if configPath != "" {
+		args = append([]string{"--config", configPath}, args...)
 	}
-	return false
+	cmd := exec.Command("rclone", args...)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = &diagnostic
+	status := commandExitCode(cmd.Run())
+	if status == 0 {
+		return siteRemoteCheckResult{problem: siteRemoteReady}
+	}
+	return siteRemoteCheckResult{
+		problem: classifySiteRemoteProblem(diagnostic.String()),
+		status:  status,
+	}
+}
+
+// classifySiteRemoteProblem translates the stable substance of rclone's FTP
+// errors rather than exposing its timestamped, implementation-shaped log
+// lines. Authentication is checked before reachability because rclone wraps a
+// rejected login in "failed to make FTP connection", just as it does a DNS or
+// socket failure.
+func classifySiteRemoteProblem(diagnostic string) siteRemoteProblem {
+	message := strings.ToLower(diagnostic)
+	containsAny := func(parts ...string) bool {
+		for _, part := range parts {
+			if strings.Contains(message, part) {
+				return true
+			}
+		}
+		return false
+	}
+
+	if containsAny("didn't find section in config file", "did not find section in config file") {
+		return siteRemoteMissing
+	}
+	if containsAny(
+		"failed to load config file",
+		"failed to read config file",
+		"error reading config file",
+		"could not read config file",
+		"cannot read config file",
+	) {
+		return siteRemoteConfigUnreadable
+	}
+	if containsAny(
+		" 530 ",
+		"530 login",
+		"530 not logged in",
+		"authentication failed",
+		"authentication rejected",
+		"login failed",
+		"login incorrect",
+	) {
+		return siteRemoteCredentialRejected
+	}
+	if containsAny(
+		"dial tcp",
+		"temporary failure in name resolution",
+		"connection refused",
+		"connection reset by peer",
+		"network is unreachable",
+		"no route to host",
+		"no such host",
+		"i/o timeout",
+		"operation timed out",
+	) {
+		return siteRemoteHostUnreachable
+	}
+	return siteRemoteUnknown
+}
+
+// reportSiteRemoteFailure is shared CLI wording rather than deploy wording so
+// a command that checks the credential without deploying can use the same
+// probe and the same diagnoses. Callers retain control of success output and
+// exit flow.
+func reportSiteRemoteFailure(result siteRemoteCheckResult) {
+	switch result.problem {
+	case siteRemoteMissing:
+		fmt.Fprintf(stderr, "allod: no '%s' rclone remote is configured; run 'allod site config' to create it\n", siteRemoteName)
+	case siteRemoteConfigUnreadable:
+		fmt.Fprintln(stderr, "allod: the rclone configuration is unreadable; check its path and permissions")
+	case siteRemoteCredentialRejected:
+		fmt.Fprintf(stderr, "allod: the stored username or password for '%s' was rejected; run 'allod site config --force' to replace it\n", siteRemoteName)
+	case siteRemoteHostUnreachable:
+		fmt.Fprintf(stderr, "allod: the host for '%s' is unreachable; check its address, the network connection, and the hosting service\n", siteRemoteName)
+	default:
+		fmt.Fprintf(stderr, "allod: the '%s' hosting remote could not be checked (rclone exited %d)\n", siteRemoteName, result.status)
+	}
 }
 
 // requireSiteRemote fails before the build rather than after it. The remote is
-// the one thing a deploy needs that the site repository cannot supply, and an
-// unconfigured machine used to report that fact only once the whole site had
-// been built — as an rclone complaint about a missing config section, minutes
-// after the operator asked for a deploy and with nothing to show for the wait.
-func requireSiteRemote() {
-	listing, status := siteRemotes()
-	if status != 0 {
-		die(status, "'rclone listremotes' failed; the rclone configuration on this machine is unreadable")
-	}
-	if hasRemote(listing, siteRemoteName) {
+// the one thing a deploy needs that the site repository cannot supply, and a
+// bad credential used to report itself only once the whole site had been
+// built, minutes after the operator asked for a deploy.
+func requireSiteRemote(configPath string) {
+	result := siteRemoteCheck(configPath)
+	if result.problem == siteRemoteReady {
 		return
 	}
-	fmt.Fprintf(stderr, "allod: no '%s' rclone remote is configured on this machine\n", siteRemoteName)
-	fmt.Fprintf(stderr, "allod: while resolving: the deploy destination %s:domains/<domain>/public_html\n", siteRemoteName)
-	fmt.Fprintln(stderr, "allod: to fix: run 'allod site config', which creates the remote from a host, a user, and a password")
-	exit(1)
+	reportSiteRemoteFailure(result)
+	if result.status == 0 {
+		exit(1)
+	}
+	exit(result.status)
 }
 
 // probeSite reports the status of https://<domain>/ itself. Redirects are not
@@ -422,7 +507,7 @@ func siteDeploy(args []string) {
 	}
 	// Before the build, not after it: building a site is minutes of work, and
 	// none of it is any use without somewhere to send the result.
-	requireSiteRemote()
+	requireSiteRemote("")
 
 	storePath, status := siteBuild(root)
 	if status != 0 {
@@ -461,7 +546,7 @@ func siteDeploy(args []string) {
 		if dryRun {
 			die(status, "rclone dry run failed; %s was not modified", docroot)
 		}
-		die(status, "rclone sync failed; %s may be partially updated", docroot)
+		die(status, "rclone sync failed; deployment to %s did not complete", docroot)
 	}
 	if dryRun {
 		fmt.Fprintf(stdout, "Dry run: %s was not modified\n", docroot)
@@ -492,7 +577,8 @@ site repository root, builds that repo with 'nix build --no-link
 --print-out-paths', and syncs the resulting store path to
 shared:domains/<domain>/public_html. 'shared' is an rclone remote configured
 once per machine; deploy never handles a credential, and checks that the remote
-exists before it starts the build rather than discovering it afterwards.
+can authenticate before it starts the build rather than discovering a rejected
+login afterwards.
 
 The docroot is derived from the 'domain' key in site.toml and from nothing
 else. No flag, argument, or environment variable can point a deploy at another

@@ -127,7 +127,7 @@ func siteConfigure(args []string) {
 	// Everything printed here is safe to read over a shoulder or paste into an
 	// issue. The password and its obscured form are not, and are not printed.
 	fmt.Fprintf(stdout, "Remote: %s\nType: ftp\nHost: %s\nUser: %s\nConfig: %s\n", siteRemoteName, host, user, path)
-	fmt.Fprintf(stdout, "Check it with: rclone lsd %s:\n", siteRemoteName)
+	fmt.Fprintln(stdout, "The next deploy will check this remote before building.")
 }
 
 // runCapture runs a command with input on its stdin and returns its trimmed
