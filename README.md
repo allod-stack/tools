@@ -9,7 +9,7 @@ host install them through their Nix composition, with no manual installation aft
 ## Layout
 
 ```
-cmd/allod/                Go main CLI (change, patch, site, pr, pm)
+cmd/allod/                Go main CLI (change, patch, pr, pm; site opt-in)
 cmd/forge/                Forgejo CLI Go command
 internal/forgeapi/        in-process Forgejo API client
 internal/gitremote/       Git remote parsing shared by Go commands
@@ -39,6 +39,23 @@ git-hooks/                git hook policy and setup
 lib/                      shared shell libraries
   workspace.sh            repo, worktree, and default-branch helpers
 ```
+
+### Optional namespaces
+
+`allod site` is behind the `site` build tag. A machine that publishes no site
+has no rclone remote to publish through, so it does not carry the command at
+all: `allod site` there is an unknown namespace, exactly like any other word
+the CLI does not know. A machine that does deploy opts in when it builds:
+
+```nix
+buildGoModule {
+  subPackages = [ "cmd/allod" ];
+  tags = [ "site" ];
+}
+```
+
+Both `go test ./...` and `go test -tags site ./...` are required, and the flake
+check runs both: each compiles code and tests the other does not.
 
 ## Documentation
 

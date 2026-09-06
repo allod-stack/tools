@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
 var (
@@ -25,6 +26,53 @@ func die(code int, format string, args ...any) {
 	exit(code)
 }
 
+// A namespace is one top-level command group: the word that selects it, the
+// line that describes it in the usage text, and the function that runs it.
+type namespace struct {
+	name    string
+	summary string
+	main    func(args []string)
+}
+
+// namespaces is the dispatch table, and it is the whole of it: a namespace
+// that is not in this slice does not exist. The core four are here; an
+// optional namespace appends itself from the init() of a file its build tag
+// selects, so a build that does not opt in carries neither the code nor the
+// word. That is the point of the arrangement. 'allod site' on a machine that
+// deploys nothing fails the way 'allod frobnicate' does — the capability is
+// absent — rather than dispatching into a command that was never going to
+// work and failing several minutes later for a reason the operator has to
+// decode.
+//
+// Package-level variables are initialised before any init() runs, so the core
+// namespaces are always registered first and an optional one always lists
+// last, whatever the compiler's file order happens to be.
+var namespaces = []namespace{
+	{"change", "Manage code changes (begin, list, record, submit, cleanup)", changeMain},
+	{"patch", "Transfer patches between environments (fetch, apply, receive)", patchMain},
+	{"pr", "Work with pull requests (explain)", delegatePR},
+	{"pm", "Manage the PM board overlay in the private state repo", delegatePM},
+}
+
+// registerNamespace adds one namespace to the dispatch table. It panics on a
+// duplicate because that is a mistake in the program, not in its input: two
+// files claiming one word would otherwise make dispatch depend on file order.
+func registerNamespace(entry namespace) {
+	if _, exists := lookupNamespace(entry.name); exists {
+		panic("duplicate command namespace: " + entry.name)
+	}
+	namespaces = append(namespaces, entry)
+}
+
+func lookupNamespace(name string) (namespace, bool) {
+	for _, entry := range namespaces {
+		if entry.name == name {
+			return entry, true
+		}
+	}
+	return namespace{}, false
+}
+
 func main() { os.Exit(run(os.Args[1:])) }
 
 func run(args []string) (code int) {
@@ -39,38 +87,34 @@ func run(args []string) (code int) {
 	}()
 
 	if len(args) == 0 {
-		fmt.Fprint(stdout, usageText)
+		fmt.Fprint(stdout, usageText())
 		return 1
 	}
 
+	if entry, ok := lookupNamespace(args[0]); ok {
+		entry.main(args[1:])
+		return 0
+	}
+
 	switch args[0] {
-	case "change":
-		changeMain(args[1:])
-	case "patch":
-		patchMain(args[1:])
-	case "site":
-		siteMain(args[1:])
-	case "pr":
-		delegatePR(args[1:])
-	case "pm":
-		delegatePM(args[1:])
 	case "-h", "--help":
-		fmt.Fprint(stdout, usageText)
+		fmt.Fprint(stdout, usageText())
 	default:
 		die(1, "unknown command namespace: %s", args[0])
 	}
 	return 0
 }
 
-const usageText = `Usage: allod <namespace> <command> [options]
-
-Namespaces:
-  change   Manage code changes (begin, list, record, submit, cleanup)
-  patch    Transfer patches between environments (fetch, apply, receive)
-  site     Deploy a static site to shared hosting (deploy)
-  pr       Work with pull requests (explain)
-  pm       Manage the PM board overlay in the private state repo
-`
+// usageText renders the top-level usage from the dispatch table, so a build
+// advertises exactly the namespaces it carries and no others.
+func usageText() string {
+	var text strings.Builder
+	text.WriteString("Usage: allod <namespace> <command> [options]\n\nNamespaces:\n")
+	for _, entry := range namespaces {
+		fmt.Fprintf(&text, "  %-8s %s\n", entry.name, entry.summary)
+	}
+	return text.String()
+}
 
 const changeUsageText = `Usage:
   allod change begin [-d <description>] [<repo-path>]
@@ -102,39 +146,4 @@ Commands:
   fetch    Fetch patches from a remote source repo via SSH
   apply    Apply fetched patches to a local destination repo
   receive  Fetch and apply patches in one step
-`
-
-const siteUsageText = `Usage: allod site deploy [--dry-run]
-
-Commands:
-  deploy   Build the site repo and sync the result to its shared-hosting docroot
-
-'deploy' walks up from the current directory to the site.toml that marks the
-site repository root, builds that repo with 'nix build --no-link
---print-out-paths', and syncs the resulting store path to
-shared:domains/<domain>/public_html. 'shared' is an rclone remote configured
-once per machine; this command never handles a credential.
-
-The docroot is derived from the 'domain' key in site.toml and from nothing
-else. No flag, argument, or environment variable can point a deploy at another
-site, because one hosting account owns every docroot on the server and a
-redirected sync would delete a sibling site.
-
-The exclusion filter belongs to this command rather than to the site repo. It
-is written to a temporary file per run and passed as --filter-from, so every
-site gets the same list and no repo can quietly lose the /.well-known/** entry
-that certificate renewal depends on. Replaced and deleted files are moved to
-shared:deploy-trash/<domain> rather than destroyed.
-
-site.toml today has exactly one key:
-
-  domain = "example.com"
-
-Unknown keys are ignored, so a file written for a later version still deploys.
-
-'--dry-run' passes --dry-run to rclone: the build still runs and rclone reports
-the changes it would make, but the docroot is untouched and the HTTPS check is
-skipped. Without it, deploy checks that https://<domain>/ answers 200 and exits
-7 if it does not, which distinguishes a site that did not deploy from one that
-deployed and is not serving.
 `

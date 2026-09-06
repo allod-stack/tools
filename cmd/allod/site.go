@@ -1,3 +1,5 @@
+//go:build site
+
 package main
 
 // The site namespace deploys a static site to shared hosting.
@@ -13,6 +15,14 @@ package main
 //
 // The same reasoning explains why there is no way to name the target: see
 // siteDeploy.
+//
+// The whole namespace is behind the 'site' build tag. A machine that publishes
+// no site has no rclone remote and no business carrying a command that syncs
+// to one, so it does not carry it: the init() below is the only thing that
+// puts 'site' in the dispatch table, and an untagged build never compiles this
+// file. There, 'allod site' is an unknown namespace — which is true, and is
+// what an absent capability should look like. A command that is present and
+// permanently broken says something false about the machine.
 
 import (
 	"bytes"
@@ -32,6 +42,11 @@ const (
 	siteConfigName = "site.toml"
 	siteDomainKey  = "domain"
 )
+
+// siteRemoteName is the rclone remote every deploy targets. It is configured
+// once per machine — by 'allod site config', or by hand — and nothing in a
+// site repository can name a different one.
+const siteRemoteName = "shared"
 
 // deployFilterRules is the exclusion list, in rclone --filter-from syntax. It
 // belongs to this command and is deliberately not configurable per site.
@@ -60,13 +75,25 @@ const siteVerifyTimeout = 15 * time.Second
 const siteVerifyExit = 7
 
 // Test seams. Every effect this command has outside the process goes through
-// one of these three, so the tests can drive the whole command without a nix
-// daemon, a configured rclone remote, or a network.
+// one of these four, so the tests can drive the whole command without a nix
+// daemon, a configured rclone remote, or a network. 'site config' has two
+// seams of its own; see site_config.go.
 var (
-	siteBuild  = nixBuild
-	siteSync   = rcloneSync
-	siteVerify = probeSite
+	siteRemotes = rcloneListRemotes
+	siteBuild   = nixBuild
+	siteSync    = rcloneSync
+	siteVerify  = probeSite
 )
+
+// init is what makes the namespace exist, and it runs only in a build that
+// asked for this file with -tags site.
+func init() {
+	registerNamespace(namespace{
+		name:    "site",
+		summary: "Deploy a static site to shared hosting (deploy, config)",
+		main:    siteMain,
+	})
+}
 
 func siteMain(args []string) {
 	if len(args) == 0 {
@@ -77,6 +104,8 @@ func siteMain(args []string) {
 	switch command {
 	case "deploy":
 		siteDeploy(args)
+	case "config":
+		siteConfigure(args)
 	case "-h", "--help":
 		fmt.Fprint(stdout, siteUsageText)
 	default:
@@ -293,6 +322,54 @@ func rcloneSync(args []string) int {
 	return runCommand("", nil, stdout, stderr, "rclone", args...)
 }
 
+// rcloneListRemotes returns what 'rclone listremotes' prints: one configured
+// remote per line, each with a trailing colon. Stderr is passed through so an
+// unreadable configuration file explains itself in rclone's own words.
+func rcloneListRemotes() (string, int) {
+	var out bytes.Buffer
+	cmd := exec.Command("rclone", "listremotes")
+	cmd.Stdout = &out
+	cmd.Stderr = stderr
+	// The run has to finish before the buffer is read. Returning both in one
+	// statement would read an empty buffer: the operands of a return are
+	// evaluated left to right, so out.String() would run before cmd.Run().
+	status := commandExitCode(cmd.Run())
+	return out.String(), status
+}
+
+// hasRemote reports whether listing names remote. The trailing colon is
+// optional on the way in: current rclone prints 'shared:' and older versions
+// printed the bare name. This answer decides whether a deploy runs at all, so
+// it accepts both rather than reading a listing it half understands as "not
+// configured".
+func hasRemote(listing, remote string) bool {
+	for _, line := range strings.Split(listing, "\n") {
+		if strings.TrimSuffix(strings.TrimSpace(line), ":") == remote {
+			return true
+		}
+	}
+	return false
+}
+
+// requireSiteRemote fails before the build rather than after it. The remote is
+// the one thing a deploy needs that the site repository cannot supply, and an
+// unconfigured machine used to report that fact only once the whole site had
+// been built — as an rclone complaint about a missing config section, minutes
+// after the operator asked for a deploy and with nothing to show for the wait.
+func requireSiteRemote() {
+	listing, status := siteRemotes()
+	if status != 0 {
+		die(status, "'rclone listremotes' failed; the rclone configuration on this machine is unreadable")
+	}
+	if hasRemote(listing, siteRemoteName) {
+		return
+	}
+	fmt.Fprintf(stderr, "allod: no '%s' rclone remote is configured on this machine\n", siteRemoteName)
+	fmt.Fprintf(stderr, "allod: while resolving: the deploy destination %s:domains/<domain>/public_html\n", siteRemoteName)
+	fmt.Fprintln(stderr, "allod: to fix: run 'allod site config', which creates the remote from a host, a user, and a password")
+	exit(1)
+}
+
 // probeSite reports the status of https://<domain>/ itself. Redirects are not
 // followed on purpose: a docroot that answers 301 has not been deployed to the
 // place the check is asking about, and following the hop would report the 200
@@ -343,6 +420,9 @@ func siteDeploy(args []string) {
 	if _, err := exec.LookPath("rclone"); err != nil {
 		die(1, "'rclone' not found on PATH")
 	}
+	// Before the build, not after it: building a site is minutes of work, and
+	// none of it is any use without somewhere to send the result.
+	requireSiteRemote()
 
 	storePath, status := siteBuild(root)
 	if status != 0 {
@@ -360,7 +440,7 @@ func siteDeploy(args []string) {
 		die(1, "nix build printed an unusable output path: %s", storePath)
 	}
 
-	docroot := "shared:domains/" + config.domain + "/public_html"
+	docroot := siteRemoteName + ":domains/" + config.domain + "/public_html"
 	filter := writeDeployFilter()
 	defer os.Remove(filter)
 
@@ -369,7 +449,7 @@ func siteDeploy(args []string) {
 	syncArgs := []string{
 		"sync", storePath, docroot,
 		"--filter-from", filter,
-		"--backup-dir", "shared:deploy-trash/" + config.domain,
+		"--backup-dir", siteRemoteName + ":deploy-trash/" + config.domain,
 		"--verbose",
 	}
 	if dryRun {
@@ -398,3 +478,49 @@ func siteDeploy(args []string) {
 	}
 	fmt.Fprintf(stdout, "Verified: %s returned %d\n", url, code)
 }
+
+const siteUsageText = `Usage:
+  allod site deploy [--dry-run]
+  allod site config [--force]
+
+Commands:
+  deploy   Build the site repo and sync the result to its shared-hosting docroot
+  config   Create the 'shared' rclone remote every deploy goes through
+
+'deploy' walks up from the current directory to the site.toml that marks the
+site repository root, builds that repo with 'nix build --no-link
+--print-out-paths', and syncs the resulting store path to
+shared:domains/<domain>/public_html. 'shared' is an rclone remote configured
+once per machine; deploy never handles a credential, and checks that the remote
+exists before it starts the build rather than discovering it afterwards.
+
+The docroot is derived from the 'domain' key in site.toml and from nothing
+else. No flag, argument, or environment variable can point a deploy at another
+site, because one hosting account owns every docroot on the server and a
+redirected sync would delete a sibling site.
+
+The exclusion filter belongs to this command rather than to the site repo. It
+is written to a temporary file per run and passed as --filter-from, so every
+site gets the same list and no repo can quietly lose the /.well-known/** entry
+that certificate renewal depends on. Replaced and deleted files are moved to
+shared:deploy-trash/<domain> rather than destroyed.
+
+site.toml today has exactly one key:
+
+  domain = "example.com"
+
+Unknown keys are ignored, so a file written for a later version still deploys.
+
+'--dry-run' passes --dry-run to rclone: the build still runs and rclone reports
+the changes it would make, but the docroot is untouched and the HTTPS check is
+skipped. Without it, deploy checks that https://<domain>/ answers 200 and exits
+7 if it does not, which distinguishes a site that did not deploy from one that
+deployed and is not serving.
+
+'config' asks for an FTP host, user, and password on the terminal and writes
+the 'shared' remote to rclone's own configuration file, so nobody has to drive
+'rclone config' by hand or invent the stanza from memory. The password is not
+echoed as it is typed, never appears in a command line, and is stored the only
+way rclone accepts a stored password: obscured, by rclone itself. An existing
+'shared' remote is left alone unless --force is passed.
+`

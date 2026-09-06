@@ -75,6 +75,13 @@
         go vet ./...
         go test ./...
 
+        # The site namespace is behind the 'site' build tag, so an untagged run
+        # compiles neither the command nor the half of its tests that asserts
+        # the namespace exists. Both directions are checked, or the tagged code
+        # would rot unnoticed on every machine that does not opt in.
+        go vet -tags site ./...
+        go test -tags site ./...
+
         touch "$out"
       '';
 

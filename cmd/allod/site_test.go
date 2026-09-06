@@ -1,19 +1,23 @@
+//go:build site
+
 package main
 
-// Tests for the site namespace, in the shape cmd/forge/harness_test.go
-// established: the CLI is run in process with the stdout/stderr seams swapped
-// for buffers, and every effect on the outside world is replaced by a stub.
+// Tests for the site namespace. They run the CLI in process through runAllod
+// from main_test.go, with every effect on the outside world replaced by a
+// stub:
 //
 //	out, errText, code := runAllod(t, "site", "deploy", "--dry-run")
+//
+// This file is compiled only with -tags site, so it is also half the proof
+// that the namespace exists exactly in the builds that asked for it; the other
+// half is site_absent_test.go.
 //
 // The package-level seams these helpers swap are shared mutable state, so no
 // test here calls t.Parallel.
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -24,47 +28,50 @@ import (
 
 // --- Harness ---
 
-func swapStreams(out, errOut io.Writer) func() {
-	previousOut, previousErr := stdout, stderr
-	stdout, stderr = out, errOut
-	return func() { stdout, stderr = previousOut, previousErr }
-}
-
-// runAllod runs the CLI with the given arguments and returns everything it
-// printed plus its exit status. Nothing reaches the test process's own streams.
-func runAllod(t *testing.T, args ...string) (stdoutText, stderrText string, code int) {
-	t.Helper()
-	var outBuffer, errBuffer bytes.Buffer
-	restore := swapStreams(&outBuffer, &errBuffer)
-	code = run(args)
-	restore()
-	return outBuffer.String(), errBuffer.String(), code
-}
+// configuredRemotes is what 'rclone listremotes' prints on a machine that can
+// deploy: the remote the command needs, and nothing else it cares about.
+const configuredRemotes = "shared:\n"
 
 // deployStub records what the command asked the world to do and answers with
 // whatever the test set up.
 type deployStub struct {
-	buildDir     string
-	storePath    string
-	buildStatus  int
-	syncArgs     []string
-	syncCalls    int
-	syncStatus   int
-	verifyURL    string
-	verifyCalls  int
-	verifyStatus int
-	verifyErr    error
+	// remotes is what 'rclone listremotes' answers. The zero value stands for
+	// configuredRemotes, because a configured machine is what every test but
+	// the pre-check's own needs; a test of the unconfigured machine sets it to
+	// a listing that does not name 'shared'.
+	remotes       string
+	remotesStatus int
+	remotesCalls  int
+	buildDir      string
+	buildCalls    int
+	storePath     string
+	buildStatus   int
+	syncArgs      []string
+	syncCalls     int
+	syncStatus    int
+	verifyURL     string
+	verifyCalls   int
+	verifyStatus  int
+	verifyErr     error
 }
 
-// useDeployStub installs the stub over the three seams in site.go and puts
-// stub 'nix' and 'rclone' executables on PATH so the LookPath preflight passes
+// useDeployStub installs the stub over the four seams in site.go and puts stub
+// 'nix' and 'rclone' executables on PATH so the LookPath preflight passes
 // without a nix daemon or an rclone installation. It returns the directory
 // PATH was set to, which is the whole of PATH for the rest of the test.
 func useDeployStub(t *testing.T, stub *deployStub) string {
 	t.Helper()
-	previousBuild, previousSync, previousVerify := siteBuild, siteSync, siteVerify
+	previousRemotes, previousBuild := siteRemotes, siteBuild
+	previousSync, previousVerify := siteSync, siteVerify
+	siteRemotes = func() (string, int) {
+		stub.remotesCalls++
+		if stub.remotes == "" {
+			return configuredRemotes, stub.remotesStatus
+		}
+		return stub.remotes, stub.remotesStatus
+	}
 	siteBuild = func(root string) (string, int) {
-		stub.buildDir = root
+		stub.buildDir, stub.buildCalls = root, stub.buildCalls+1
 		return stub.storePath, stub.buildStatus
 	}
 	siteSync = func(args []string) int {
@@ -75,10 +82,20 @@ func useDeployStub(t *testing.T, stub *deployStub) string {
 		stub.verifyURL, stub.verifyCalls = url, stub.verifyCalls+1
 		return stub.verifyStatus, stub.verifyErr
 	}
-	t.Cleanup(func() { siteBuild, siteSync, siteVerify = previousBuild, previousSync, previousVerify })
+	t.Cleanup(func() {
+		siteRemotes, siteBuild = previousRemotes, previousBuild
+		siteSync, siteVerify = previousSync, previousVerify
+	})
+	return stubTools(t, "nix", "rclone")
+}
 
+// stubTools puts unusable executables of the given names on an otherwise empty
+// PATH, so the LookPath preflights pass and anything that actually ran one of
+// them would fail loudly. It returns the directory PATH was set to.
+func stubTools(t *testing.T, names ...string) string {
+	t.Helper()
 	binDir := t.TempDir()
-	for _, name := range []string{"nix", "rclone"} {
+	for _, name := range names {
 		path := filepath.Join(binDir, name)
 		if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 1\n"), 0755); err != nil {
 			t.Fatalf("could not write stub %s: %v", name, err)
@@ -133,10 +150,11 @@ func TestSiteUsage(t *testing.T) {
 		errIsEmpty bool
 	}{
 		{"namespace listed in top-level usage", []string{}, 1, "site     Deploy a static site", "", true},
-		{"no command prints usage to stderr", []string{"site"}, 1, "", "Usage: allod site deploy", false},
-		{"--help prints usage to stdout", []string{"site", "--help"}, 0, "Usage: allod site deploy", "", true},
-		{"-h prints usage to stdout", []string{"site", "-h"}, 0, "Usage: allod site deploy", "", true},
-		{"deploy --help prints usage to stdout", []string{"site", "deploy", "--help"}, 0, "Usage: allod site deploy", "", true},
+		{"no command prints usage to stderr", []string{"site"}, 1, "", "allod site deploy [--dry-run]", false},
+		{"--help prints usage to stdout", []string{"site", "--help"}, 0, "allod site deploy [--dry-run]", "", true},
+		{"-h prints usage to stdout", []string{"site", "-h"}, 0, "allod site config [--force]", "", true},
+		{"deploy --help prints usage to stdout", []string{"site", "deploy", "--help"}, 0, "allod site deploy [--dry-run]", "", true},
+		{"config --help prints usage to stdout", []string{"site", "config", "--help"}, 0, "allod site config [--force]", "", true},
 		{"unknown command", []string{"site", "publish"}, 1, "", "unknown site command: publish", false},
 	}
 
@@ -178,7 +196,7 @@ func TestSiteDeployTakesNoTarget(t *testing.T) {
 		t.Run(strings.Join(args[2:], " "), func(t *testing.T) {
 			stub := &deployStub{storePath: "/nix/store/aaa-site", verifyStatus: 200}
 			useDeployStub(t, stub)
-			useSiteRepo(t, "domain = \"hashpool.dev\"\n")
+			useSiteRepo(t, "domain = \"example.com\"\n")
 
 			_, errText, code := runAllod(t, args...)
 			if code == 0 {
@@ -249,26 +267,26 @@ func TestParseSiteConfig(t *testing.T) {
 		domain string
 		errHas string
 	}{
-		{"the one key", "domain = \"hashpool.dev\"\n", "hashpool.dev", ""},
-		{"no trailing newline", "domain = \"hashpool.dev\"", "hashpool.dev", ""},
-		{"no spaces around equals", "domain=\"hashpool.dev\"\n", "hashpool.dev", ""},
-		{"leading whitespace", "\t  domain = \"hashpool.dev\"\n", "hashpool.dev", ""},
-		{"comments and blank lines", "# the site\n\ndomain = \"hashpool.dev\" # inline\n\n", "hashpool.dev", ""},
-		{"literal string", "domain = 'hashpool.dev'\n", "hashpool.dev", ""},
+		{"the one key", "domain = \"example.com\"\n", "example.com", ""},
+		{"no trailing newline", "domain = \"example.com\"", "example.com", ""},
+		{"no spaces around equals", "domain=\"example.com\"\n", "example.com", ""},
+		{"leading whitespace", "\t  domain = \"example.com\"\n", "example.com", ""},
+		{"comments and blank lines", "# the site\n\ndomain = \"example.com\" # inline\n\n", "example.com", ""},
+		{"literal string", "domain = 'example.com'\n", "example.com", ""},
 		// Forward compatibility: a file written for a later version of this
 		// command still deploys with this one.
-		{"unknown scalar key", "domain = \"hashpool.dev\"\nredirect_www = true\n", "hashpool.dev", ""},
-		{"unknown key before domain", "cache_seconds = 300\ndomain = \"hashpool.dev\"\n", "hashpool.dev", ""},
-		{"unknown key with an array value", "domain = \"hashpool.dev\"\nheaders = [\"a\", \"b\"]\n", "hashpool.dev", ""},
-		{"unknown table", "domain = \"hashpool.dev\"\n\n[redirects]\nold = \"new\"\n", "hashpool.dev", ""},
-		{"unknown table with its own domain", "domain = \"hashpool.dev\"\n\n[staging]\ndomain = \"staging.hashpool.dev\"\n", "hashpool.dev", ""},
+		{"unknown scalar key", "domain = \"example.com\"\nredirect_www = true\n", "example.com", ""},
+		{"unknown key before domain", "cache_seconds = 300\ndomain = \"example.com\"\n", "example.com", ""},
+		{"unknown key with an array value", "domain = \"example.com\"\nheaders = [\"a\", \"b\"]\n", "example.com", ""},
+		{"unknown table", "domain = \"example.com\"\n\n[redirects]\nold = \"new\"\n", "example.com", ""},
+		{"unknown table with its own domain", "domain = \"example.com\"\n\n[staging]\ndomain = \"staging.example.com\"\n", "example.com", ""},
 		// Errors, all about the one key that is read.
 		{"empty file", "", "", "no domain key"},
 		{"only comments", "# nothing here\n", "", "no domain key"},
-		{"domain only under a table", "[staging]\ndomain = \"staging.hashpool.dev\"\n", "", "no domain key"},
-		{"unquoted", "domain = hashpool.dev\n", "", "must be a quoted string"},
-		{"unterminated", "domain = \"hashpool.dev\n", "", "must be a quoted string"},
-		{"trailing junk after the string", "domain = \"hashpool.dev\" oops\n", "", "must be a quoted string"},
+		{"domain only under a table", "[staging]\ndomain = \"staging.example.com\"\n", "", "no domain key"},
+		{"unquoted", "domain = example.com\n", "", "must be a quoted string"},
+		{"unterminated", "domain = \"example.com\n", "", "must be a quoted string"},
+		{"trailing junk after the string", "domain = \"example.com\" oops\n", "", "must be a quoted string"},
 		{"set twice", "domain = \"a.example\"\ndomain = \"b.example\"\n", "", "set more than once"},
 	}
 
@@ -298,8 +316,8 @@ func TestParseSiteConfig(t *testing.T) {
 // somewhere other than its own docroot.
 func TestValidDomain(t *testing.T) {
 	valid := []string{
-		"hashpool.dev",
-		"www.hashpool.dev",
+		"example.com",
+		"www.example.com",
 		"a-b.example.co.uk",
 		"xn--80ak6aa92e.com",
 		"123.example",
@@ -307,20 +325,20 @@ func TestValidDomain(t *testing.T) {
 	invalid := []string{
 		"",
 		"localhost",
-		"hashpool.dev/../other.example",
-		"hashpool.dev/public_html",
+		"example.com/../other.example",
+		"example.com/public_html",
 		"../other.example",
 		"..",
 		"shared:domains/other.example",
-		"hashpool..dev",
-		".hashpool.dev",
-		"hashpool.dev.",
-		"-hashpool.dev",
-		"hashpool-.dev",
+		"example..com",
+		".example.com",
+		"example.com.",
+		"-example.com",
+		"example-.com",
 		"hash pool.dev",
-		"hashpool.dev\nother.example",
-		"hashpool.dev\x00",
-		"*.hashpool.dev",
+		"example.com\nother.example",
+		"example.com\x00",
+		"*.example.com",
 		strings.Repeat("a", 64) + ".dev",
 		strings.Repeat("a.", 130) + "dev",
 	}
@@ -340,7 +358,7 @@ func TestValidDomain(t *testing.T) {
 func TestSiteDeployRejectsInvalidDomain(t *testing.T) {
 	stub := &deployStub{storePath: "/nix/store/aaa-site", verifyStatus: 200}
 	useDeployStub(t, stub)
-	useSiteRepo(t, "domain = \"hashpool.dev/../other.example\"\n")
+	useSiteRepo(t, "domain = \"example.com/../other.example\"\n")
 
 	_, errText, code := runAllod(t, "site", "deploy")
 	if code != 1 {
@@ -372,7 +390,7 @@ func TestDeployFilterText(t *testing.T) {
 func TestSiteDeploy(t *testing.T) {
 	stub := &deployStub{storePath: "/nix/store/aaa-site", verifyStatus: 200}
 	useDeployStub(t, stub)
-	root := useSiteRepo(t, "# hashpool\ndomain = \"hashpool.dev\"\n")
+	root := useSiteRepo(t, "# the site\ndomain = \"example.com\"\n")
 
 	out, errText, code := runAllod(t, "site", "deploy")
 	if code != 0 {
@@ -391,9 +409,9 @@ func TestSiteDeploy(t *testing.T) {
 
 	filter := argAfter(t, stub.syncArgs, "--filter-from")
 	want := []string{
-		"sync", "/nix/store/aaa-site", "shared:domains/hashpool.dev/public_html",
+		"sync", "/nix/store/aaa-site", "shared:domains/example.com/public_html",
 		"--filter-from", filter,
-		"--backup-dir", "shared:deploy-trash/hashpool.dev",
+		"--backup-dir", "shared:deploy-trash/example.com",
 		"--verbose",
 	}
 	if fmt.Sprint(stub.syncArgs) != fmt.Sprint(want) {
@@ -408,14 +426,14 @@ func TestSiteDeploy(t *testing.T) {
 	if stub.verifyCalls != 1 {
 		t.Errorf("verification ran %d times, want 1", stub.verifyCalls)
 	}
-	if stub.verifyURL != "https://hashpool.dev/" {
-		t.Errorf("verified %q, want %q", stub.verifyURL, "https://hashpool.dev/")
+	if stub.verifyURL != "https://example.com/" {
+		t.Errorf("verified %q, want %q", stub.verifyURL, "https://example.com/")
 	}
 	for _, want := range []string{
-		"Domain: hashpool.dev\n",
+		"Domain: example.com\n",
 		"Source: /nix/store/aaa-site\n",
-		"Target: shared:domains/hashpool.dev/public_html\n",
-		"Verified: https://hashpool.dev/ returned 200\n",
+		"Target: shared:domains/example.com/public_html\n",
+		"Verified: https://example.com/ returned 200\n",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("stdout does not contain %q\ngot: %q", want, out)
@@ -445,7 +463,7 @@ func TestSiteDeployWritesTheFilter(t *testing.T) {
 		return 0
 	}
 	t.Cleanup(func() { siteSync = previousSync })
-	useSiteRepo(t, "domain = \"hashpool.dev\"\n")
+	useSiteRepo(t, "domain = \"example.com\"\n")
 
 	if _, errText, code := runAllod(t, "site", "deploy"); code != 0 {
 		t.Fatalf("exit code = %d, want 0\nstderr: %s", code, errText)
@@ -458,7 +476,7 @@ func TestSiteDeployWritesTheFilter(t *testing.T) {
 func TestSiteDeployDryRun(t *testing.T) {
 	stub := &deployStub{storePath: "/nix/store/aaa-site", verifyStatus: 200}
 	useDeployStub(t, stub)
-	useSiteRepo(t, "domain = \"hashpool.dev\"\n")
+	useSiteRepo(t, "domain = \"example.com\"\n")
 
 	out, errText, code := runAllod(t, "site", "deploy", "--dry-run")
 	if code != 0 {
@@ -471,13 +489,13 @@ func TestSiteDeployDryRun(t *testing.T) {
 		t.Errorf("last rclone arg = %q, want %q\ngot: %v", last, "--dry-run", stub.syncArgs)
 	}
 	// The destination is the same one a real deploy would use.
-	if stub.syncArgs[2] != "shared:domains/hashpool.dev/public_html" {
-		t.Errorf("rclone destination = %q, want %q", stub.syncArgs[2], "shared:domains/hashpool.dev/public_html")
+	if stub.syncArgs[2] != "shared:domains/example.com/public_html" {
+		t.Errorf("rclone destination = %q, want %q", stub.syncArgs[2], "shared:domains/example.com/public_html")
 	}
 	if stub.verifyCalls != 0 {
 		t.Errorf("verification ran %d times on a dry run, want 0", stub.verifyCalls)
 	}
-	if !strings.Contains(out, "Dry run: shared:domains/hashpool.dev/public_html was not modified\n") {
+	if !strings.Contains(out, "Dry run: shared:domains/example.com/public_html was not modified\n") {
 		t.Errorf("stdout does not report the dry run\ngot: %q", out)
 	}
 }
@@ -501,7 +519,7 @@ func TestSiteDeployBuildFailures(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			stub := &deployStub{storePath: test.storePath, buildStatus: test.buildStatus, verifyStatus: 200}
 			useDeployStub(t, stub)
-			useSiteRepo(t, "domain = \"hashpool.dev\"\n")
+			useSiteRepo(t, "domain = \"example.com\"\n")
 
 			_, errText, code := runAllod(t, "site", "deploy")
 			if code != test.code {
@@ -520,7 +538,7 @@ func TestSiteDeployBuildFailures(t *testing.T) {
 func TestSiteDeploySyncFailure(t *testing.T) {
 	stub := &deployStub{storePath: "/nix/store/aaa-site", syncStatus: 3, verifyStatus: 200}
 	useDeployStub(t, stub)
-	useSiteRepo(t, "domain = \"hashpool.dev\"\n")
+	useSiteRepo(t, "domain = \"example.com\"\n")
 
 	_, errText, code := runAllod(t, "site", "deploy")
 	if code != 3 {
@@ -550,7 +568,7 @@ func TestSiteDeployVerificationFailure(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			stub := &deployStub{storePath: "/nix/store/aaa-site", verifyStatus: test.status, verifyErr: test.err}
 			useDeployStub(t, stub)
-			useSiteRepo(t, "domain = \"hashpool.dev\"\n")
+			useSiteRepo(t, "domain = \"example.com\"\n")
 
 			_, errText, code := runAllod(t, "site", "deploy")
 			if code != siteVerifyExit {
@@ -620,7 +638,7 @@ func TestSiteDeployMissingTools(t *testing.T) {
 			if err := os.Remove(filepath.Join(binDir, missing)); err != nil {
 				t.Fatalf("could not remove the stub %s: %v", missing, err)
 			}
-			useSiteRepo(t, "domain = \"hashpool.dev\"\n")
+			useSiteRepo(t, "domain = \"example.com\"\n")
 
 			_, errText, code := runAllod(t, "site", "deploy")
 			if code != 1 {
@@ -640,7 +658,7 @@ func TestSiteDeployMissingTools(t *testing.T) {
 func TestSiteDeployDryRunFailureDoesNotClaimPartialUpdate(t *testing.T) {
 	stub := &deployStub{storePath: "/nix/store/aaa-site", syncStatus: 1, verifyStatus: 200}
 	useDeployStub(t, stub)
-	useSiteRepo(t, "domain = \"hashpool.dev\"\n")
+	useSiteRepo(t, "domain = \"example.com\"\n")
 
 	_, errText, code := runAllod(t, "site", "deploy", "--dry-run")
 	if code != 1 {
@@ -654,5 +672,156 @@ func TestSiteDeployDryRunFailureDoesNotClaimPartialUpdate(t *testing.T) {
 	}
 	if stub.verifyCalls != 0 {
 		t.Errorf("verification ran %d times after a failed dry run, want 0", stub.verifyCalls)
+	}
+}
+
+// --- The rclone remote ---
+
+// TestSiteNamespaceIsRegistered is the tagged half of the build-tag proof; the
+// untagged half is in site_absent_test.go.
+func TestSiteNamespaceIsRegistered(t *testing.T) {
+	entry, ok := lookupNamespace("site")
+	if !ok {
+		t.Fatal("the site namespace is not registered in a build made with -tags site")
+	}
+	if entry.summary == "" {
+		t.Error("the site namespace has no usage summary")
+	}
+}
+
+func TestHasRemote(t *testing.T) {
+	tests := []struct {
+		name    string
+		listing string
+		want    bool
+	}{
+		{"the listing rclone prints", "shared:\n", true},
+		{"no trailing newline", "shared:", true},
+		{"among others", "backup:\nshared:\nscratch:\n", true},
+		{"bare name, as older rclone printed it", "shared\n", true},
+		{"padded", "  shared:  \n", true},
+		{"nothing configured", "", false},
+		{"an empty listing with a newline in it", "\n", false},
+		{"other remotes only", "backup:\nscratch:\n", false},
+		{"a longer name that starts the same way", "shared-staging:\n", false},
+		{"a name that only contains it", "not-shared:\n", false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := hasRemote(test.listing, siteRemoteName); got != test.want {
+				t.Errorf("hasRemote(%q, %q) = %v, want %v", test.listing, siteRemoteName, got, test.want)
+			}
+		})
+	}
+}
+
+// TestSiteDeployRequiresTheSharedRemoteBeforeBuilding pins the order, which is
+// the whole value of the check: an unconfigured machine learns that it is
+// unconfigured immediately, not after a full site build it then throws away.
+// The proof is that nix build never ran.
+func TestSiteDeployRequiresTheSharedRemoteBeforeBuilding(t *testing.T) {
+	listings := map[string]string{
+		"no remotes at all":  "\n",
+		"other remotes only": "backup:\nscratch:\n",
+	}
+	for name, listing := range listings {
+		t.Run(name, func(t *testing.T) {
+			stub := &deployStub{remotes: listing, storePath: "/nix/store/aaa-site", verifyStatus: 200}
+			useDeployStub(t, stub)
+			useSiteRepo(t, "domain = \"example.com\"\n")
+
+			_, errText, code := runAllod(t, "site", "deploy")
+			if code != 1 {
+				t.Errorf("exit code = %d, want 1", code)
+			}
+			if stub.remotesCalls != 1 {
+				t.Errorf("the remote was checked %d times, want 1", stub.remotesCalls)
+			}
+			if stub.buildCalls != 0 {
+				t.Errorf("nix build ran %d times without a remote to deploy to, want 0", stub.buildCalls)
+			}
+			if stub.syncCalls != 0 {
+				t.Errorf("rclone ran %d times, want 0", stub.syncCalls)
+			}
+			// The message has to name the remedy: the failure it replaces was
+			// an rclone complaint about a missing config section, which says
+			// nothing about what to do next.
+			for _, want := range []string{"no 'shared' rclone remote", "to fix:", "allod site config"} {
+				if !strings.Contains(errText, want) {
+					t.Errorf("stderr does not contain %q\ngot: %q", want, errText)
+				}
+			}
+		})
+	}
+}
+
+// A configured machine gets past the check, and pays for exactly one listing.
+func TestSiteDeployChecksTheRemoteOnce(t *testing.T) {
+	stub := &deployStub{storePath: "/nix/store/aaa-site", verifyStatus: 200}
+	useDeployStub(t, stub)
+	useSiteRepo(t, "domain = \"example.com\"\n")
+
+	if _, errText, code := runAllod(t, "site", "deploy"); code != 0 {
+		t.Fatalf("exit code = %d, want 0\nstderr: %s", code, errText)
+	}
+	if stub.remotesCalls != 1 {
+		t.Errorf("the remote was checked %d times, want 1", stub.remotesCalls)
+	}
+	if stub.buildCalls != 1 {
+		t.Errorf("nix build ran %d times, want 1", stub.buildCalls)
+	}
+}
+
+// An rclone that cannot answer is not the same as an rclone that answers "no
+// such remote": the configuration is unreadable, and its exit status carries.
+func TestSiteDeployRemoteListingFailure(t *testing.T) {
+	stub := &deployStub{remotesStatus: 4, storePath: "/nix/store/aaa-site", verifyStatus: 200}
+	useDeployStub(t, stub)
+	useSiteRepo(t, "domain = \"example.com\"\n")
+
+	_, errText, code := runAllod(t, "site", "deploy")
+	if code != 4 {
+		t.Errorf("exit code = %d, want 4", code)
+	}
+	if !strings.Contains(errText, "'rclone listremotes' failed") {
+		t.Errorf("stderr does not contain %q\ngot: %q", "'rclone listremotes' failed", errText)
+	}
+	if stub.buildCalls != 0 {
+		t.Errorf("nix build ran %d times, want 0", stub.buildCalls)
+	}
+}
+
+// TestRcloneListRemotes exercises the real function rather than the seam,
+// because the one thing it has to get right — reading the child's output only
+// after the child has produced it — is a property of the plumbing that no
+// stubbed test touches. This function had that bug: returning out.String()
+// and cmd.Run() in one statement reads the buffer first, since the operands of
+// a return are evaluated left to right, and every stubbed test above still
+// passed.
+func TestRcloneListRemotes(t *testing.T) {
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("no /bin/sh to write a stub rclone with")
+	}
+	binDir := t.TempDir()
+	script := "#!/bin/sh\nprintf 'shared:\\nbackup:\\n'\nexit ${STUB_STATUS:-0}\n"
+	if err := os.WriteFile(filepath.Join(binDir, "rclone"), []byte(script), 0755); err != nil {
+		t.Fatalf("could not write the stub rclone: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+
+	listing, status := rcloneListRemotes()
+	if status != 0 {
+		t.Errorf("status = %d, want 0", status)
+	}
+	if listing != "shared:\nbackup:\n" {
+		t.Errorf("listing = %q, want the child's output", listing)
+	}
+	if !hasRemote(listing, siteRemoteName) {
+		t.Errorf("hasRemote(%q) = false; a configured machine would not deploy", listing)
+	}
+
+	t.Setenv("STUB_STATUS", "3")
+	if _, status := rcloneListRemotes(); status != 3 {
+		t.Errorf("status = %d, want 3", status)
 	}
 }
