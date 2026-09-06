@@ -61,6 +61,10 @@ type deployStub struct {
 // PATH was set to, which is the whole of PATH for the rest of the test.
 func useDeployStub(t *testing.T, stub *deployStub) string {
 	t.Helper()
+	// A caller that exercises another profile sets it after installing the
+	// stub. Keeping the default explicit makes the suite independent of the
+	// environment from which `go test` was launched.
+	t.Setenv(siteHostingProfileEnv, "")
 	previousRemotes, previousBuild := siteRemotes, siteBuild
 	previousSync, previousVerify := siteSync, siteVerify
 	siteRemotes = func() (string, int) {
@@ -136,6 +140,15 @@ func argAfter(t *testing.T, args []string, flag string) string {
 	}
 	t.Fatalf("%s not present in %v", flag, args)
 	return ""
+}
+
+func hasArg(args []string, want string) bool {
+	for _, arg := range args {
+		if arg == want {
+			return true
+		}
+	}
+	return false
 }
 
 // --- Dispatch and usage ---
@@ -374,20 +387,30 @@ func TestSiteDeployRejectsInvalidDomain(t *testing.T) {
 
 // --- The filter list ---
 
-// TestDeployFilterText pins the exclusion list itself. Losing an entry here is
-// the failure this command exists to prevent, and /.well-known/** is the one
-// whose loss shows up weeks later as an expired certificate rather than as a
-// broken deploy.
-func TestDeployFilterText(t *testing.T) {
+// TestDirectAdminProfileData pins both values in the default hosting profile.
+// Losing a filter entry is the failure this command exists to prevent, and
+// /.well-known/** is the one whose loss shows up weeks later as an expired
+// certificate rather than as a broken deploy.
+func TestDirectAdminProfileData(t *testing.T) {
+	t.Setenv(siteHostingProfileEnv, "")
+	profile := selectedSiteHostingProfile()
+	if profile.name != "directadmin" {
+		t.Fatalf("default profile = %q, want directadmin", profile.name)
+	}
+	if got, want := profile.docroot("example.com"), "shared:domains/example.com/public_html"; got != want {
+		t.Errorf("docroot = %q, want %q", got, want)
+	}
 	want := "- /.well-known/**\n- /.htaccess\n- /stats/**\n- /cgi-bin/**\n"
-	if got := deployFilterText(); got != want {
+	if got := deployFilterText(profile.deployFilterRules); got != want {
 		t.Errorf("filter text =\n%q\nwant\n%q", got, want)
 	}
 }
 
 // --- Deploying ---
 
-func TestSiteDeploy(t *testing.T) {
+// TestSiteDeployDirectAdminDefaultIsUnchanged is the generated-command
+// regression for deployments that do not select a profile.
+func TestSiteDeployDirectAdminDefaultIsUnchanged(t *testing.T) {
 	stub := &deployStub{storePath: "/nix/store/aaa-site", verifyStatus: 200}
 	useDeployStub(t, stub)
 	root := useSiteRepo(t, "# the site\ndomain = \"example.com\"\n")
@@ -468,8 +491,75 @@ func TestSiteDeployWritesTheFilter(t *testing.T) {
 	if _, errText, code := runAllod(t, "site", "deploy"); code != 0 {
 		t.Fatalf("exit code = %d, want 0\nstderr: %s", code, errText)
 	}
-	if contents != deployFilterText() {
-		t.Errorf("filter file =\n%q\nwant\n%q", contents, deployFilterText())
+	profile := selectedSiteHostingProfile()
+	if want := deployFilterText(profile.deployFilterRules); contents != want {
+		t.Errorf("filter file =\n%q\nwant\n%q", contents, want)
+	}
+}
+
+// The second profile changes both pieces of hosting data while leaving the
+// remote, backup directory, and verification behavior alone. The misleading
+// site.toml key is ignored: profile selection belongs to the deployment.
+func TestSiteDeployPublicHTMLProfile(t *testing.T) {
+	stub := &deployStub{storePath: "/nix/store/aaa-site", verifyStatus: 200}
+	useDeployStub(t, stub)
+	t.Setenv(siteHostingProfileEnv, "public-html")
+	useSiteRepo(t, "domain = \"example.com\"\nhosting_profile = \"directadmin\"\n")
+
+	out, errText, code := runAllod(t, "site", "deploy")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0\nstderr: %s", code, errText)
+	}
+	want := []string{
+		"sync", "/nix/store/aaa-site", "shared:public_html/example.com",
+		"--backup-dir", "shared:deploy-trash/example.com",
+		"--verbose",
+	}
+	if fmt.Sprint(stub.syncArgs) != fmt.Sprint(want) {
+		t.Errorf("rclone args =\n%v\nwant\n%v", stub.syncArgs, want)
+	}
+	if hasArg(stub.syncArgs, "--filter-from") {
+		t.Errorf("rclone got --filter-from for a profile with no exclusions: %v", stub.syncArgs)
+	}
+	if !strings.Contains(out, "Target: shared:public_html/example.com\n") {
+		t.Errorf("stdout does not name the selected target\ngot: %q", out)
+	}
+	if stub.verifyCalls != 1 || stub.verifyURL != "https://example.com/" {
+		t.Errorf("verification = %d calls to %q, want one call to https://example.com/", stub.verifyCalls, stub.verifyURL)
+	}
+}
+
+// A bad deployment selection must fail before even the remote preflight. A
+// silent DirectAdmin fallback here could sync to the wrong but valid path.
+func TestSiteDeployRejectsBadHostingProfileBeforeEffects(t *testing.T) {
+	tests := []struct {
+		name   string
+		value  string
+		errHas string
+	}{
+		{"unknown", "cpanel", "unknown hosting profile"},
+		{"malformed", "../public-html", "invalid hosting profile"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stub := &deployStub{storePath: "/nix/store/aaa-site", verifyStatus: 200}
+			useDeployStub(t, stub)
+			t.Setenv(siteHostingProfileEnv, test.value)
+			useSiteRepo(t, "domain = \"example.com\"\n")
+
+			_, errText, code := runAllod(t, "site", "deploy")
+			if code != 1 {
+				t.Errorf("exit code = %d, want 1", code)
+			}
+			for _, want := range []string{test.errHas, siteHostingProfileEnv, "directadmin or public-html"} {
+				if !strings.Contains(errText, want) {
+					t.Errorf("stderr does not contain %q\ngot: %q", want, errText)
+				}
+			}
+			if stub.remotesCalls != 0 || stub.buildCalls != 0 || stub.syncCalls != 0 || stub.verifyCalls != 0 {
+				t.Errorf("effects after rejected profile: remote=%d build=%d sync=%d verify=%d", stub.remotesCalls, stub.buildCalls, stub.syncCalls, stub.verifyCalls)
+			}
+		})
 	}
 }
 

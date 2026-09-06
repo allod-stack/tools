@@ -6,12 +6,11 @@ package main
 //
 // The whole point of the command is centralisation. One hosting account owns
 // every docroot on the server, and the exclusion list that keeps a deploy from
-// destroying /.well-known — where certificate renewal writes its challenge —
-// is one line long and easy to omit. If every site repository carried its own
-// copy of that list, one repository would eventually be missing it, and the
-// failure would arrive weeks later as an expired certificate rather than as a
-// broken deploy. So the list lives here, in the command, and is written to a
-// fresh temporary file on every run.
+// destroying host-owned paths is easy to omit. If every site repository
+// carried its own copy of that list, one repository would eventually be
+// missing it, and the failure could arrive weeks later as an expired
+// certificate rather than as a broken deploy. So hosting layouts live here as
+// named profiles selected once by the deployment, not in each site repository.
 //
 // The same reasoning explains why there is no way to name the target: see
 // siteDeploy.
@@ -39,8 +38,9 @@ import (
 // siteConfigName marks a site repository root, the way .git marks a git
 // repository root. siteDomainKey is the only key this version reads.
 const (
-	siteConfigName = "site.toml"
-	siteDomainKey  = "domain"
+	siteConfigName        = "site.toml"
+	siteDomainKey         = "domain"
+	siteDomainPlaceholder = "<domain>"
 )
 
 // siteRemoteName is the rclone remote every deploy targets. It is configured
@@ -48,21 +48,87 @@ const (
 // site repository can name a different one.
 const siteRemoteName = "shared"
 
-// deployFilterRules is the exclusion list, in rclone --filter-from syntax. It
-// belongs to this command and is deliberately not configurable per site.
+// The hosting profile is deployment configuration. A Nix wrapper can set the
+// environment variable once for every invocation on that machine; leaving it
+// unset keeps the original DirectAdmin behavior.
+const (
+	siteHostingProfileEnv     = "ALLOD_SITE_HOSTING_PROFILE"
+	defaultSiteHostingProfile = "directadmin"
+)
+
+// siteHostingProfile holds only the two facts that differ between the shared
+// hosting deployments this command serves. The rclone remote and backend are
+// intentionally not abstracted: every profile still deploys through 'shared'.
+type siteHostingProfile struct {
+	name              string
+	docrootPattern    string
+	deployFilterRules []string
+}
+
+// siteHostingProfiles is the central source of truth for hosting layouts. A
+// site.toml cannot add to or override it.
 //
+// DirectAdmin is the exact original behavior:
 //   - /.well-known/** holds ACME challenges. Deleting it breaks certificate
 //     renewal silently, weeks after the deploy that caused it.
 //   - /.htaccess is written by the hosting control panel, not by the build.
 //   - /stats/** and /cgi-bin/** are created and owned by the host.
 //
-// Excluding a path also protects it at the destination: rclone sync only
-// deletes what the filter admits, so these paths survive every deploy.
-var deployFilterRules = []string{
-	"- /.well-known/**",
-	"- /.htaccess",
-	"- /stats/**",
-	"- /cgi-bin/**",
+// The public-html layout is the concrete second deployment: its docroots sit
+// below public_html and ACME is served elsewhere, so it has nothing to exclude.
+var siteHostingProfiles = []siteHostingProfile{
+	{
+		name:           "directadmin",
+		docrootPattern: "domains/<domain>/public_html",
+		deployFilterRules: []string{
+			"- /.well-known/**",
+			"- /.htaccess",
+			"- /stats/**",
+			"- /cgi-bin/**",
+		},
+	},
+	{
+		name:           "public-html",
+		docrootPattern: "public_html/<domain>",
+	},
+}
+
+func validSiteHostingProfileName(name string) bool {
+	if name == "" || name[0] == '-' || name[len(name)-1] == '-' {
+		return false
+	}
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// selectedSiteHostingProfile resolves deployment configuration before any
+// remote check or build. An invalid value must not fall back to DirectAdmin:
+// that would aim a destructive sync at a plausible but wrong directory.
+func selectedSiteHostingProfile() siteHostingProfile {
+	name := os.Getenv(siteHostingProfileEnv)
+	if name == "" {
+		name = defaultSiteHostingProfile
+	}
+	if !validSiteHostingProfileName(name) {
+		die(1, "invalid hosting profile %q in %s; expected directadmin or public-html", name, siteHostingProfileEnv)
+		return siteHostingProfile{}
+	}
+	for _, profile := range siteHostingProfiles {
+		if profile.name == name {
+			return profile
+		}
+	}
+	die(1, "unknown hosting profile %q in %s; expected directadmin or public-html", name, siteHostingProfileEnv)
+	return siteHostingProfile{}
+}
+
+func (profile siteHostingProfile) docroot(domain string) string {
+	return siteRemoteName + ":" + strings.Replace(profile.docrootPattern, siteDomainPlaceholder, domain, 1)
 }
 
 // siteVerifyTimeout bounds the post-deploy HTTPS check.
@@ -285,20 +351,23 @@ func loadSiteConfig(root string) siteConfig {
 	return config
 }
 
-func deployFilterText() string {
-	return strings.Join(deployFilterRules, "\n") + "\n"
+func deployFilterText(rules []string) string {
+	if len(rules) == 0 {
+		return ""
+	}
+	return strings.Join(rules, "\n") + "\n"
 }
 
 // writeDeployFilter materialises the exclusion list for one run. The caller
 // removes it; die() and exit() unwind through defers, so a failure part way
 // through the deploy still cleans it up.
-func writeDeployFilter() string {
+func writeDeployFilter(rules []string) string {
 	file, err := os.CreateTemp("", "allod-site-filter-")
 	if err != nil {
 		die(1, "could not create temporary filter file")
 	}
 	name := file.Name()
-	if _, err := file.WriteString(deployFilterText()); err != nil || file.Close() != nil {
+	if _, err := file.WriteString(deployFilterText(rules)); err != nil || file.Close() != nil {
 		os.Remove(name)
 		die(1, "could not write temporary filter file")
 	}
@@ -356,7 +425,7 @@ func hasRemote(listing, remote string) bool {
 // unconfigured machine used to report that fact only once the whole site had
 // been built — as an rclone complaint about a missing config section, minutes
 // after the operator asked for a deploy and with nothing to show for the wait.
-func requireSiteRemote() {
+func requireSiteRemote(profile siteHostingProfile) {
 	listing, status := siteRemotes()
 	if status != 0 {
 		die(status, "'rclone listremotes' failed; the rclone configuration on this machine is unreadable")
@@ -365,7 +434,7 @@ func requireSiteRemote() {
 		return
 	}
 	fmt.Fprintf(stderr, "allod: no '%s' rclone remote is configured on this machine\n", siteRemoteName)
-	fmt.Fprintf(stderr, "allod: while resolving: the deploy destination %s:domains/<domain>/public_html\n", siteRemoteName)
+	fmt.Fprintf(stderr, "allod: while resolving: the deploy destination %s\n", profile.docroot(siteDomainPlaceholder))
 	fmt.Fprintln(stderr, "allod: to fix: run 'allod site config', which creates the remote from a host, a user, and a password")
 	exit(1)
 }
@@ -412,6 +481,7 @@ func siteDeploy(args []string) {
 		}
 	}
 
+	profile := selectedSiteHostingProfile()
 	root := resolveSiteRoot()
 	config := loadSiteConfig(root)
 	if _, err := exec.LookPath("nix"); err != nil {
@@ -422,7 +492,7 @@ func siteDeploy(args []string) {
 	}
 	// Before the build, not after it: building a site is minutes of work, and
 	// none of it is any use without somewhere to send the result.
-	requireSiteRemote()
+	requireSiteRemote(profile)
 
 	storePath, status := siteBuild(root)
 	if status != 0 {
@@ -440,18 +510,22 @@ func siteDeploy(args []string) {
 		die(1, "nix build printed an unusable output path: %s", storePath)
 	}
 
-	docroot := siteRemoteName + ":domains/" + config.domain + "/public_html"
-	filter := writeDeployFilter()
-	defer os.Remove(filter)
+	docroot := profile.docroot(config.domain)
 
 	fmt.Fprintf(stdout, "Domain: %s\nSource: %s\nTarget: %s\n", config.domain, storePath, docroot)
 
 	syncArgs := []string{
 		"sync", storePath, docroot,
-		"--filter-from", filter,
-		"--backup-dir", siteRemoteName + ":deploy-trash/" + config.domain,
-		"--verbose",
 	}
+	if len(profile.deployFilterRules) > 0 {
+		filter := writeDeployFilter(profile.deployFilterRules)
+		defer os.Remove(filter)
+		syncArgs = append(syncArgs, "--filter-from", filter)
+	}
+	syncArgs = append(syncArgs,
+		"--backup-dir", siteRemoteName+":deploy-trash/"+config.domain,
+		"--verbose",
+	)
 	if dryRun {
 		syncArgs = append(syncArgs, "--dry-run")
 	}
@@ -489,23 +563,25 @@ Commands:
 
 'deploy' walks up from the current directory to the site.toml that marks the
 site repository root, builds that repo with 'nix build --no-link
---print-out-paths', and syncs the resulting store path to
-shared:domains/<domain>/public_html. 'shared' is an rclone remote configured
-once per machine; deploy never handles a credential, and checks that the remote
+--print-out-paths', and syncs the resulting store path through the 'shared'
+rclone remote. Deploy never handles a credential, and checks that the remote
 exists before it starts the build rather than discovering it afterwards.
 
-The docroot is derived from the 'domain' key in site.toml and from nothing
-else. No flag, argument, or environment variable can point a deploy at another
-site, because one hosting account owns every docroot on the server and a
-redirected sync would delete a sibling site.
+The deployment selects one central hosting layout with
+ALLOD_SITE_HOSTING_PROFILE. An unset or empty value selects 'directadmin',
+whose docroot is shared:domains/<domain>/public_html and whose exclusion list
+is unchanged. 'public-html' selects shared:public_html/<domain> and no
+exclusions, for hosting where ACME is served elsewhere. Any other value fails
+before the remote check or build. This is per-machine deployment configuration,
+normally set by the wrapper that installs allod; it does not belong in a site
+repository.
 
-The exclusion filter belongs to this command rather than to the site repo. It
-is written to a temporary file per run and passed as --filter-from, so every
-site gets the same list and no repo can quietly lose the /.well-known/** entry
-that certificate renewal depends on. Replaced and deleted files are moved to
-shared:deploy-trash/<domain> rather than destroyed.
+Each profile's exclusion filter belongs to this command rather than to the site
+repo. A non-empty filter is written to a temporary file per run and passed as
+--filter-from, so every site on the deployment gets the same list. Replaced and
+deleted files are moved to shared:deploy-trash/<domain> rather than destroyed.
 
-site.toml today has exactly one key:
+site.toml still has exactly one key and cannot select the hosting profile:
 
   domain = "example.com"
 

@@ -54,6 +54,20 @@ buildGoModule {
 }
 ```
 
+The tagged binary defaults to the DirectAdmin hosting layout. A deployment
+whose docroots are instead at `public_html/<domain>` selects the built-in
+`public-html` profile once in its wrapper:
+
+```nix
+wrapProgram "$out/bin/allod" \
+  --set ALLOD_SITE_HOSTING_PROFILE public-html
+```
+
+`site.toml` remains domain-only; hosting layout and exclusions are deployment
+configuration, not values copied into every site repository. An unset or empty
+variable selects `directadmin`, and an unknown or malformed value stops before
+the deploy preflight or build.
+
 Both `go test ./...` and `go test -tags site ./...` are required, and the flake
 check runs both: each compiles code and tests the other does not.
 
