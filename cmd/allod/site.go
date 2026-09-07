@@ -33,6 +33,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // siteConfigName marks a site repository root, the way .git marks a git
@@ -48,13 +50,16 @@ const (
 // site repository can name a different one.
 const siteRemoteName = "shared"
 
-// The hosting profile is deployment configuration. A Nix wrapper can set the
-// environment variable once for every invocation on that machine; leaving it
-// unset keeps the original DirectAdmin behavior.
-const (
-	siteHostingProfileEnv     = "ALLOD_SITE_HOSTING_PROFILE"
-	defaultSiteHostingProfile = "directadmin"
-)
+const defaultSiteHostingProfile = "directadmin"
+
+// siteHostingProfileName is deployment-owned build configuration. A
+// site-enabled build can replace this string with:
+//
+//	-X main.siteHostingProfileName=public-html
+//
+// It deliberately has no flag or environment override: the repository being
+// deployed must not be able to redirect a destructive sync.
+var siteHostingProfileName = defaultSiteHostingProfile
 
 // siteHostingProfile holds only the two facts that differ between the shared
 // hosting deployments this command serves. The rclone remote and backend are
@@ -106,16 +111,97 @@ func validSiteHostingProfileName(name string) bool {
 	return true
 }
 
-// selectedSiteHostingProfile resolves deployment configuration before any
-// remote check or build. An invalid value must not fall back to DirectAdmin:
-// that would aim a destructive sync at a plausible but wrong directory.
-func selectedSiteHostingProfile() siteHostingProfile {
-	name := os.Getenv(siteHostingProfileEnv)
-	if name == "" {
-		name = defaultSiteHostingProfile
+func printableSingleLine(value string) bool {
+	if value == "" || !utf8.ValidString(value) {
+		return false
 	}
+	for _, r := range value {
+		if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' {
+			return false
+		}
+	}
+	return true
+}
+
+func validSiteDocrootPattern(pattern string) bool {
+	if !printableSingleLine(pattern) || strings.HasPrefix(pattern, "/") ||
+		strings.Count(pattern, siteDomainPlaceholder) != 1 {
+		return false
+	}
+	for _, segment := range strings.Split(pattern, "/") {
+		if segment == siteDomainPlaceholder {
+			continue
+		}
+		if segment == "" || segment == "." || segment == ".." {
+			return false
+		}
+		for _, r := range segment {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+				(r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
+				continue
+			}
+			return false
+		}
+	}
+	return true
+}
+
+func validDeployExclusionRule(rule string) bool {
+	return printableSingleLine(rule) && strings.TrimSpace(rule) == rule &&
+		strings.HasPrefix(rule, "- /") && len(rule) > len("- /")
+}
+
+// validateSiteHostingProfiles treats this source-owned table like input
+// because one malformed row can redirect or broaden a destructive sync. The
+// check runs before the selected profile reaches a remote check or build.
+func validateSiteHostingProfiles(profiles []siteHostingProfile) error {
+	if len(profiles) == 0 {
+		return fmt.Errorf("no profiles are defined")
+	}
+	seen := make(map[string]bool, len(profiles))
+	for _, profile := range profiles {
+		if !validSiteHostingProfileName(profile.name) {
+			return fmt.Errorf("invalid profile name %q", profile.name)
+		}
+		if seen[profile.name] {
+			return fmt.Errorf("profile name %q is defined more than once", profile.name)
+		}
+		seen[profile.name] = true
+		if !validSiteDocrootPattern(profile.docrootPattern) {
+			return fmt.Errorf("profile %q has an unsafe docroot pattern %q", profile.name, profile.docrootPattern)
+		}
+		for _, rule := range profile.deployFilterRules {
+			if !validDeployExclusionRule(rule) {
+				return fmt.Errorf("profile %q has an invalid exclusion rule %q", profile.name, rule)
+			}
+		}
+	}
+	if !seen[defaultSiteHostingProfile] {
+		return fmt.Errorf("default profile %q is not defined", defaultSiteHostingProfile)
+	}
+	return nil
+}
+
+func siteHostingProfileChoices() string {
+	names := make([]string, 0, len(siteHostingProfiles))
+	for _, profile := range siteHostingProfiles {
+		names = append(names, profile.name)
+	}
+	return strings.Join(names, " or ")
+}
+
+// selectedSiteHostingProfile resolves immutable deployment configuration
+// before any remote check or build. An invalid build value or table must not
+// fall back to DirectAdmin: that would aim a destructive sync at a plausible
+// but wrong directory.
+func selectedSiteHostingProfile() siteHostingProfile {
+	if err := validateSiteHostingProfiles(siteHostingProfiles); err != nil {
+		die(1, "invalid built-in hosting profile table: %s", err)
+		return siteHostingProfile{}
+	}
+	name := siteHostingProfileName
 	if !validSiteHostingProfileName(name) {
-		die(1, "invalid hosting profile %q in %s; expected directadmin or public-html", name, siteHostingProfileEnv)
+		die(1, "invalid build-time hosting profile %q; expected %s", name, siteHostingProfileChoices())
 		return siteHostingProfile{}
 	}
 	for _, profile := range siteHostingProfiles {
@@ -123,7 +209,7 @@ func selectedSiteHostingProfile() siteHostingProfile {
 			return profile
 		}
 	}
-	die(1, "unknown hosting profile %q in %s; expected directadmin or public-html", name, siteHostingProfileEnv)
+	die(1, "unknown build-time hosting profile %q; expected %s", name, siteHostingProfileChoices())
 	return siteHostingProfile{}
 }
 
@@ -674,14 +760,15 @@ rclone for its configuration file before falling back to the XDG/HOME default.
 The hosting config is machine-wide; it does not belong in site.toml or a site
 repository.
 
-The deployment selects one central hosting layout with
-ALLOD_SITE_HOSTING_PROFILE. An unset or empty value selects 'directadmin',
-whose docroot is shared:domains/<domain>/public_html and whose exclusion list
-is unchanged. 'public-html' selects shared:public_html/<domain> and no
-exclusions, for hosting where ACME is served elsewhere. Any other value fails
-before the remote check or build. This is per-machine deployment configuration,
-normally set by the wrapper that installs allod; it does not belong in a site
-repository.
+Each site-enabled binary has one deployment-owned hosting layout compiled in.
+Without a linker override it uses 'directadmin', whose docroot is
+shared:domains/<domain>/public_html and whose exclusion list is unchanged.
+A package can build with '-X main.siteHostingProfileName=public-html' to select
+shared:public_html/<domain> and no exclusions, for hosting where ACME is served
+elsewhere. An unknown or malformed build-time value fails before the remote
+check or build. No flag, environment variable, or site.toml key can change the
+installed binary's layout; rollback requires rebuilding the package with the
+default value.
 
 Each profile's exclusion filter belongs to this command rather than to the site
 repo. A non-empty filter is written to a temporary file per run and passed as

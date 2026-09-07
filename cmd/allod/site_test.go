@@ -55,9 +55,9 @@ type deployStub struct {
 func useDeployStub(t *testing.T, stub *deployStub) string {
 	t.Helper()
 	// A caller that exercises another profile sets it after installing the
-	// stub. Keeping the default explicit makes the suite independent of the
-	// environment from which `go test` was launched.
-	t.Setenv(siteHostingProfileEnv, "")
+	// stub. Keeping the default explicit makes the suite independent of linker
+	// flags used to build the test binary.
+	useSiteHostingProfile(t, defaultSiteHostingProfile)
 	previousRemoteCheck, previousBuild := siteRemoteCheck, siteBuild
 	previousSync, previousVerify := siteSync, siteVerify
 	siteRemoteCheck = func(configPath string) siteRemoteCheckResult {
@@ -81,6 +81,28 @@ func useDeployStub(t *testing.T, stub *deployStub) string {
 		siteSync, siteVerify = previousSync, previousVerify
 	})
 	return stubTools(t, "nix", "rclone")
+}
+
+func useSiteHostingProfile(t *testing.T, name string) {
+	t.Helper()
+	previous := siteHostingProfileName
+	siteHostingProfileName = name
+	t.Cleanup(func() { siteHostingProfileName = previous })
+}
+
+func useSiteHostingProfiles(t *testing.T, profiles []siteHostingProfile) {
+	t.Helper()
+	previous := siteHostingProfiles
+	siteHostingProfiles = profiles
+	t.Cleanup(func() { siteHostingProfiles = previous })
+}
+
+func cloneSiteHostingProfiles(profiles []siteHostingProfile) []siteHostingProfile {
+	clone := append([]siteHostingProfile(nil), profiles...)
+	for index := range clone {
+		clone[index].deployFilterRules = append([]string(nil), clone[index].deployFilterRules...)
+	}
+	return clone
 }
 
 // stubTools puts unusable executables of the given names on an otherwise empty
@@ -177,6 +199,25 @@ func TestSiteUsage(t *testing.T) {
 				t.Errorf("stderr = %q, want empty", errText)
 			}
 		})
+	}
+}
+
+func TestSiteUsageKeepsHostingSelectionAtBuildTime(t *testing.T) {
+	out, errText, code := runAllod(t, "site", "--help")
+	if code != 0 || errText != "" {
+		t.Fatalf("help: exit=%d stderr=%q, want success with empty stderr", code, errText)
+	}
+	for _, want := range []string{
+		"deployment-owned hosting layout compiled in",
+		"-X main.siteHostingProfileName=public-html",
+		"No flag, environment variable, or site.toml key",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("help does not contain %q\ngot: %q", want, out)
+		}
+	}
+	if strings.Contains(out, "ALLOD_SITE_HOSTING_PROFILE") {
+		t.Errorf("help still advertises runtime environment selection: %q", out)
 	}
 }
 
@@ -386,7 +427,7 @@ func TestSiteDeployRejectsInvalidDomain(t *testing.T) {
 // /.well-known/** is the one whose loss shows up weeks later as an expired
 // certificate rather than as a broken deploy.
 func TestDirectAdminProfileData(t *testing.T) {
-	t.Setenv(siteHostingProfileEnv, "")
+	useSiteHostingProfile(t, defaultSiteHostingProfile)
 	profile := selectedSiteHostingProfile()
 	if profile.name != "directadmin" {
 		t.Fatalf("default profile = %q, want directadmin", profile.name)
@@ -397,6 +438,91 @@ func TestDirectAdminProfileData(t *testing.T) {
 	want := "- /.well-known/**\n- /.htaccess\n- /stats/**\n- /cgi-bin/**\n"
 	if got := deployFilterText(profile.deployFilterRules); got != want {
 		t.Errorf("filter text =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// An inherited environment cannot change the destructive sync target. Profile
+// selection belongs to the package that built the site-enabled binary.
+func TestRuntimeEnvironmentCannotSelectHostingProfile(t *testing.T) {
+	useSiteHostingProfile(t, defaultSiteHostingProfile)
+	t.Setenv("ALLOD_SITE_HOSTING_PROFILE", "public-html")
+	if got := selectedSiteHostingProfile().name; got != "directadmin" {
+		t.Errorf("profile = %q, want directadmin", got)
+	}
+}
+
+func TestValidateSiteHostingProfiles(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func([]siteHostingProfile) []siteHostingProfile
+		errHas string
+	}{
+		{"built-ins", func(profiles []siteHostingProfile) []siteHostingProfile { return profiles }, ""},
+		{"empty table", func([]siteHostingProfile) []siteHostingProfile { return nil }, "no profiles are defined"},
+		{"invalid name", func(profiles []siteHostingProfile) []siteHostingProfile {
+			profiles[1].name = "public_html"
+			return profiles
+		}, "invalid profile name"},
+		{"duplicate name", func(profiles []siteHostingProfile) []siteHostingProfile {
+			profiles[1].name = profiles[0].name
+			return profiles
+		}, "defined more than once"},
+		{"missing default", func(profiles []siteHostingProfile) []siteHostingProfile {
+			profiles[0].name = "another"
+			return profiles
+		}, "default profile"},
+		{"missing placeholder", func(profiles []siteHostingProfile) []siteHostingProfile {
+			profiles[0].docrootPattern = "domains/public_html"
+			return profiles
+		}, "unsafe docroot pattern"},
+		{"two placeholders", func(profiles []siteHostingProfile) []siteHostingProfile {
+			profiles[0].docrootPattern = "domains/<domain>/<domain>"
+			return profiles
+		}, "unsafe docroot pattern"},
+		{"absolute docroot", func(profiles []siteHostingProfile) []siteHostingProfile {
+			profiles[0].docrootPattern = "/domains/<domain>"
+			return profiles
+		}, "unsafe docroot pattern"},
+		{"empty segment", func(profiles []siteHostingProfile) []siteHostingProfile {
+			profiles[0].docrootPattern = "domains//<domain>"
+			return profiles
+		}, "unsafe docroot pattern"},
+		{"dot segment", func(profiles []siteHostingProfile) []siteHostingProfile {
+			profiles[0].docrootPattern = "domains/./<domain>"
+			return profiles
+		}, "unsafe docroot pattern"},
+		{"parent segment", func(profiles []siteHostingProfile) []siteHostingProfile {
+			profiles[0].docrootPattern = "domains/../<domain>"
+			return profiles
+		}, "unsafe docroot pattern"},
+		{"docroot control", func(profiles []siteHostingProfile) []siteHostingProfile {
+			profiles[0].docrootPattern = "domains\n/<domain>"
+			return profiles
+		}, "unsafe docroot pattern"},
+		{"inclusion rule", func(profiles []siteHostingProfile) []siteHostingProfile {
+			profiles[0].deployFilterRules[0] = "+ /.well-known/**"
+			return profiles
+		}, "invalid exclusion rule"},
+		{"multiline exclusion", func(profiles []siteHostingProfile) []siteHostingProfile {
+			profiles[0].deployFilterRules[0] = "- /.well-known/**\n- /**"
+			return profiles
+		}, "invalid exclusion rule"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			profiles := test.mutate(cloneSiteHostingProfiles(siteHostingProfiles))
+			err := validateSiteHostingProfiles(profiles)
+			if test.errHas == "" {
+				if err != nil {
+					t.Fatalf("validateSiteHostingProfiles() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.errHas) {
+				t.Errorf("validateSiteHostingProfiles() = %v, want error containing %q", err, test.errHas)
+			}
+		})
 	}
 }
 
@@ -617,7 +743,7 @@ func TestSiteDeployWritesTheFilter(t *testing.T) {
 func TestSiteDeployPublicHTMLProfile(t *testing.T) {
 	stub := &deployStub{storePath: "/nix/store/aaa-site", verifyStatus: 200}
 	useDeployStub(t, stub)
-	t.Setenv(siteHostingProfileEnv, "public-html")
+	useSiteHostingProfile(t, "public-html")
 	useSiteRepo(t, "domain = \"example.com\"\nhosting_profile = \"directadmin\"\n")
 	configPath := filepath.Join(t.TempDir(), "hosting.conf")
 	if err := os.WriteFile(configPath, []byte("[shared]\n"), 0600); err != nil {
@@ -650,29 +776,29 @@ func TestSiteDeployPublicHTMLProfile(t *testing.T) {
 	}
 }
 
-// A bad deployment selection must fail before even the remote preflight. A
+// A bad build-time selection must fail before even the remote preflight. A
 // silent DirectAdmin fallback here could sync to the wrong but valid path.
-func TestSiteDeployRejectsBadHostingProfileBeforeEffects(t *testing.T) {
+func TestSiteDeployRejectsBadBuildTimeHostingProfileBeforeEffects(t *testing.T) {
 	tests := []struct {
 		name   string
 		value  string
 		errHas string
 	}{
-		{"unknown", "cpanel", "unknown hosting profile"},
-		{"malformed", "../public-html", "invalid hosting profile"},
+		{"unknown", "cpanel", "unknown build-time hosting profile"},
+		{"malformed", "../public-html", "invalid build-time hosting profile"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			stub := &deployStub{storePath: "/nix/store/aaa-site", verifyStatus: 200}
 			useDeployStub(t, stub)
-			t.Setenv(siteHostingProfileEnv, test.value)
+			useSiteHostingProfile(t, test.value)
 			useSiteRepo(t, "domain = \"example.com\"\n")
 
 			_, errText, code := runAllod(t, "site", "deploy")
 			if code != 1 {
 				t.Errorf("exit code = %d, want 1", code)
 			}
-			for _, want := range []string{test.errHas, siteHostingProfileEnv, "directadmin or public-html"} {
+			for _, want := range []string{test.errHas, "directadmin or public-html"} {
 				if !strings.Contains(errText, want) {
 					t.Errorf("stderr does not contain %q\ngot: %q", want, errText)
 				}
@@ -681,6 +807,32 @@ func TestSiteDeployRejectsBadHostingProfileBeforeEffects(t *testing.T) {
 				t.Errorf("effects after rejected profile: remote=%d build=%d sync=%d verify=%d", stub.remoteCalls, stub.buildCalls, stub.syncCalls, stub.verifyCalls)
 			}
 		})
+	}
+}
+
+// The profile table is code, but it still controls a destructive destination
+// and filter. Treat a malformed table as unsafe input and stop before any
+// authenticated remote check, build, sync, or verification.
+func TestSiteDeployRejectsInvalidHostingProfileTableBeforeEffects(t *testing.T) {
+	stub := &deployStub{storePath: "/nix/store/aaa-site", verifyStatus: 200}
+	useDeployStub(t, stub)
+	sabotaged := cloneSiteHostingProfiles(siteHostingProfiles)
+	sabotaged[1].name = sabotaged[0].name
+	useSiteHostingProfiles(t, sabotaged)
+	useSiteRepo(t, "domain = \"example.com\"\n")
+
+	_, errText, code := runAllod(t, "site", "deploy")
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	for _, want := range []string{"invalid built-in hosting profile table", "defined more than once"} {
+		if !strings.Contains(errText, want) {
+			t.Errorf("stderr does not contain %q\ngot: %q", want, errText)
+		}
+	}
+	if stub.remoteCalls != 0 || stub.buildCalls != 0 || stub.syncCalls != 0 || stub.verifyCalls != 0 {
+		t.Errorf("effects after rejected profile table: remote=%d build=%d sync=%d verify=%d",
+			stub.remoteCalls, stub.buildCalls, stub.syncCalls, stub.verifyCalls)
 	}
 }
 
