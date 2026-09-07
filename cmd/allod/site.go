@@ -595,6 +595,8 @@ func reportSiteRemoteFailure(result siteRemoteCheckResult, configPath string) {
 	case siteRemoteCredentialRejected:
 		if configPath == "" {
 			fmt.Fprintf(stderr, "allod: the stored username or password for '%s' was rejected; run 'allod site config update user' or 'allod site config update password'\n", siteRemoteName)
+		} else if selectedConfigIsSymlink(configPath) {
+			fmt.Fprintf(stderr, "allod: the stored username or password for '%s' in %q was rejected; update the source credential behind that read-only symlink, then run 'allod site check' again with the same --config path\n", siteRemoteName, configPath)
 		} else {
 			fmt.Fprintf(stderr, "allod: the stored username or password for '%s' in %q was rejected; run 'allod site config update user' or 'allod site config update password' with that same --config path\n", siteRemoteName, configPath)
 		}
@@ -607,6 +609,11 @@ func reportSiteRemoteFailure(result siteRemoteCheckResult, configPath string) {
 			fmt.Fprintf(stderr, "allod: the '%s' hosting remote using %q could not be checked (rclone exited %d)\n", siteRemoteName, configPath, result.status)
 		}
 	}
+}
+
+func selectedConfigIsSymlink(configPath string) bool {
+	info, err := os.Lstat(configPath)
+	return err == nil && info.Mode()&os.ModeSymlink != 0
 }
 
 // siteRemoteFailureExitCode preserves a useful child status except for 7,
@@ -824,9 +831,10 @@ login afterwards.
 explicit path takes precedence over RCLONE_CONFIG, rclone's reported path,
 XDG_CONFIG_HOME, and HOME. A path beginning with '-' uses --config=<path> so it
 cannot be mistaken for another option. Deploy, check, and config show accept a
-readable regular file or a symlink to one. Create, update, and replace may
-create a missing path and atomically replace a regular file at mode 0600, but
-refuse to replace a symlink or any other file type. Deploy passes the same path
+readable regular file or a symlink to one. Create and replace may create a
+missing path. Update requires an existing 'shared' stanza. All three mutable
+actions atomically replace a regular file at mode 0600, but refuse to replace a
+symlink or any other file type. Deploy passes the same path
 to the preflight and sync; rclone opens it separately for those calls, so
 activation or rotation during the build can make sync read newer contents than
 the preflight checked. Without the flag, deploy and check leave resolution to

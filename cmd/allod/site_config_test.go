@@ -293,6 +293,42 @@ func TestSiteConfigReplaceIsTheFullReplacementSpelling(t *testing.T) {
 	}
 }
 
+func TestSiteConfigReplaceRejectsDuplicateRemoteBeforePrompting(t *testing.T) {
+	commands := [][]string{
+		{"site", "config", "replace"},
+		{"site", "config", "--force"},
+	}
+	for _, command := range commands {
+		t.Run(strings.Join(command[2:], " "), func(t *testing.T) {
+			stub := answeringStub(t)
+			useConfigStub(t, stub)
+			existing := "[shared]\ntype = ftp\nhost = first.example\nuser = first\npass = FIRST-SECRET\nexplicit_tls = true\n" +
+				"[shared]\ntype = ftp\nhost = second.example\nuser = second\npass = SECOND-SECRET\nexplicit_tls = true\n"
+			writeExistingConfig(t, stub.configFile, existing)
+
+			args := append(append([]string(nil), command...), "--config", stub.configFile)
+			out, errText, code := runAllod(t, args...)
+			if code != 1 || !strings.Contains(errText, "more than one 'shared' rclone remote") {
+				t.Errorf("duplicate replacement: exit=%d stdout=%q stderr=%q", code, out, errText)
+			}
+			if got := readFile(t, stub.configFile); got != existing {
+				t.Errorf("duplicate replacement modified the config: %q", got)
+			}
+			if stub.askCalls != 0 || len(stub.fieldCalls) != 0 {
+				t.Errorf("duplicate replacement prompted: full=%d fields=%v", stub.askCalls, stub.fieldCalls)
+			}
+			if len(stub.runs) != 0 {
+				t.Errorf("duplicate replacement ran rclone: %+v", stub.runs)
+			}
+			for _, secret := range []string{"FIRST-SECRET", "SECOND-SECRET"} {
+				if strings.Contains(out+errText, secret) {
+					t.Errorf("duplicate replacement printed a stored password: stdout=%q stderr=%q", out, errText)
+				}
+			}
+		})
+	}
+}
+
 // Each update asks one question and replaces one value byte range. The fixture
 // deliberately uses CRLF, unusual spacing, comments, an unknown directive and
 // unrelated stanzas so a normalising rewrite cannot pass.
@@ -300,8 +336,8 @@ func TestSiteConfigUpdateChangesExactlyTheSelectedField(t *testing.T) {
 	const oldObscured = "OLD-OBSCURED-SECRET"
 	existing := "# keep this byte for byte\r\n" +
 		"[backup]\r\ntype = s3\r\nprovider = Other\r\n\r\n" +
-		"[shared]\r\ntype = ftp\r\nhost   = old.example.test  \r\n" +
-		"user = old-user\r\npass = " + oldObscured + "\r\n" +
+		"[shared]\r\ntype: ftp\r\nhost   : old.example.test  \r\n" +
+		"user = old-user\r\npass: " + oldObscured + "\r\n" +
 		"explicit_tls = true\r\nunknown = untouched\r\n\r\n" +
 		"[scratch]\r\ntype = local\r\n"
 
@@ -377,8 +413,8 @@ func TestSiteConfigShowPrintsOnlySafeFields(t *testing.T) {
 	stub := answeringStub(t)
 	useConfigStub(t, stub)
 	writeExistingConfig(t, stub.configFile,
-		"[shared]\ntype = ftp\nhost = "+testHost+"\nuser = "+testUser+
-			"\npass = "+testObscured+"\nexplicit_tls = true\n")
+		"[shared]\ntype: ftp\nhost = "+testHost+"\nuser: "+testUser+
+			"\npass = "+testObscured+"\nexplicit_tls: true\n")
 
 	out, errText, code := runAllod(t, "site", "config", "show")
 	if code != 0 {
@@ -407,7 +443,7 @@ func TestSiteConfigShowRejectsMissingOrDuplicateRequiredKeys(t *testing.T) {
 		want   string
 	}{
 		{"missing host", "type = ftp\nuser = u\npass = SECRET\nexplicit_tls = true\n", "no host key"},
-		{"duplicate user", "type = ftp\nhost = h\nuser = first\nuser = second\npass = SECRET\nexplicit_tls = true\n", "more than one user key"},
+		{"duplicate user", "type = ftp\nhost = h\nuser = first\nuser: second\npass = SECRET\nexplicit_tls = true\n", "more than one user key"},
 		{"missing password", "type = ftp\nhost = h\nuser = u\nexplicit_tls = true\n", "no pass key"},
 		{"duplicate remote", "type = ftp\nhost = h\nuser = u\npass = SECRET\nexplicit_tls = true\n[shared]\ntype = ftp\nhost = h2\nuser = u2\npass = SECRET2\nexplicit_tls = true\n", "more than one 'shared'"},
 		{"newline forges another host", "type = ftp\nhost = safe\nhost = FORGED\nuser = u\npass = SECRET\nexplicit_tls = true\n", "more than one host key"},

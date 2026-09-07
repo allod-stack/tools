@@ -272,6 +272,11 @@ func siteConfigure(args []string) {
 		printSiteCheckAdvice(configSelection)
 		return
 	}
+	if operation == remoteConfigReplace && hasStanza(existing, siteRemoteName) {
+		if _, err := rcloneRemoteEntries(existing, siteRemoteName); err != nil {
+			die(1, "refusing to replace %s in %s: %s", siteRemoteName, path, err)
+		}
+	}
 
 	// Asked before the prompts rather than after them: nobody should type a
 	// password only to be told the command was never going to store it.
@@ -370,9 +375,9 @@ func rcloneRemoteEntries(text, name string) ([]rcloneConfigEntry, error) {
 			continue
 		}
 		if inRemote && trimmed != "" && !strings.HasPrefix(trimmed, "#") && !strings.HasPrefix(trimmed, ";") {
-			if equals := strings.IndexByte(line, '='); equals >= 0 {
-				key := strings.TrimSpace(line[:equals])
-				valueStart, valueEnd := lineStart+equals+1, contentEnd
+			if separator := rcloneConfigSeparator(line); separator >= 0 {
+				key := strings.TrimSpace(line[:separator])
+				valueStart, valueEnd := lineStart+separator+1, contentEnd
 				for valueStart < valueEnd && (text[valueStart] == ' ' || text[valueStart] == '\t') {
 					valueStart++
 				}
@@ -388,6 +393,21 @@ func rcloneRemoteEntries(text, name string) ([]rcloneConfigEntry, error) {
 		return nil, fmt.Errorf("no '%s' rclone remote is configured", name)
 	}
 	return entries, nil
+}
+
+// rcloneConfigSeparator returns the first separator rclone's INI parser would
+// use. Rclone accepts both conventional key = value and key: value entries;
+// choosing the first delimiter keeps colons and equals signs in values intact.
+func rcloneConfigSeparator(line string) int {
+	equals, colon := strings.IndexByte(line, '='), strings.IndexByte(line, ':')
+	switch {
+	case equals < 0:
+		return colon
+	case colon < 0 || equals < colon:
+		return equals
+	default:
+		return colon
+	}
 }
 
 func uniqueRcloneConfigEntry(entries []rcloneConfigEntry, name, key string) (rcloneConfigEntry, error) {

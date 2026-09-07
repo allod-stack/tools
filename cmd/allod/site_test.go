@@ -184,6 +184,7 @@ func TestSiteUsage(t *testing.T) {
 		{"check --help prints usage to stdout", []string{"site", "check", "--help"}, 0, "allod site check [--config <path>]", "", true},
 		{"config --help prints usage to stdout", []string{"site", "config", "--help"}, 0, "allod site config [--config <path>] [--force]", "", true},
 		{"config help discovers updates", []string{"site", "config", "update", "--help"}, 0, "allod site config update {host|user|password}", "", true},
+		{"help states update needs a stanza", []string{"site", "--help"}, 0, "Update requires an existing 'shared' stanza", "", true},
 		{"unknown command", []string{"site", "publish"}, 1, "", "unknown site command: publish", false},
 	}
 
@@ -291,6 +292,40 @@ func TestSiteCheckReports530AsUsernameOrPassword(t *testing.T) {
 	}
 	if stub.buildCalls != 0 || stub.syncCalls != 0 || stub.verifyCalls != 0 {
 		t.Errorf("failed check had deploy effects: build=%d sync=%d verify=%d", stub.buildCalls, stub.syncCalls, stub.verifyCalls)
+	}
+}
+
+func TestSiteCheckRejectedSymlinkPointsToItsSourceCredential(t *testing.T) {
+	stub := &deployStub{remoteResult: siteRemoteCheckResult{problem: siteRemoteCredentialRejected, status: 4}}
+	useDeployStub(t, stub)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "generation-1.conf")
+	selected := filepath.Join(dir, "active.conf")
+	writeExistingConfig(t, target, "[shared]\npass = NEVER-PRINT-THIS\n")
+	if err := os.Symlink(target, selected); err != nil {
+		t.Fatalf("could not create config symlink: %v", err)
+	}
+
+	out, errText, code := runAllod(t, "site", "check", "--config", selected)
+	if code != 4 || out != "" {
+		t.Errorf("rejected symlink: exit=%d stdout=%q stderr=%q", code, out, errText)
+	}
+	for _, want := range []string{"source credential behind that read-only symlink", "allod site check", "same --config path"} {
+		if !strings.Contains(errText, want) {
+			t.Errorf("symlink remedy does not contain %q: %q", want, errText)
+		}
+	}
+	if strings.Contains(errText, "site config update") {
+		t.Errorf("symlink remedy recommends a refused mutation: %q", errText)
+	}
+	if strings.Contains(out+errText, "NEVER-PRINT-THIS") {
+		t.Errorf("symlink remedy exposed config content: stdout=%q stderr=%q", out, errText)
+	}
+	if stub.remoteCalls != 1 || stub.remoteConfigPath != selected {
+		t.Errorf("remote check calls=%d config=%q, want one probe with %q", stub.remoteCalls, stub.remoteConfigPath, selected)
+	}
+	if stub.buildCalls != 0 || stub.syncCalls != 0 || stub.verifyCalls != 0 {
+		t.Errorf("failed symlink check had deploy effects: build=%d sync=%d verify=%d", stub.buildCalls, stub.syncCalls, stub.verifyCalls)
 	}
 }
 
