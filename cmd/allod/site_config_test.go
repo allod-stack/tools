@@ -552,6 +552,40 @@ func TestSiteConfigRejectsUnexpectedArguments(t *testing.T) {
 	}
 }
 
+// An unsafe path is rejected by the shared option parser, before rclone path
+// resolution or any credential prompt. The diagnostic does not repeat the
+// hostile bytes, so none can become a forged terminal line.
+func TestSiteConfigRejectsUnsafeUnicodeConfigPathsBeforeEffects(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+	}{
+		{"invalid UTF-8", "/run/credentials/" + string([]byte{0xff}) + "forged"},
+		{"C1 control", "/run/credentials/\u0085forged"},
+		{"line separator", "/run/credentials/\u2028forged"},
+		{"paragraph separator", "/run/credentials/\u2029forged"},
+	}
+	wantErr := "allod: --config path must be one line of printable text for site config\n"
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stub := answeringStub(t)
+			useConfigStub(t, stub)
+
+			out, errText, code := runAllod(t, "site", "config", "--config="+test.path)
+			if code != 1 || out != "" || errText != wantErr {
+				t.Errorf("unsafe path result: code=%d stdout=%q stderr=%q", code, out, errText)
+			}
+			if stub.askCalls != 0 || len(stub.runs) != 0 {
+				t.Errorf("effects after unsafe path: prompts=%d commands=%+v", stub.askCalls, stub.runs)
+			}
+			if strings.Contains(out+errText, "forged") || strings.Contains(out+errText, test.path) {
+				t.Errorf("unsafe path reached command output: stdout=%q stderr=%q", out, errText)
+			}
+		})
+	}
+}
+
 func TestSiteConfigNeedsRclone(t *testing.T) {
 	stub := answeringStub(t)
 	useConfigStub(t, stub)
@@ -581,6 +615,10 @@ func TestSiteConfigRejectsUnusableAnswers(t *testing.T) {
 		{"empty host", "", testUser, testPassword, "host must be one line"},
 		{"newline in the user", testHost, "bob\n[other]", testPassword, "user must be one line"},
 		{"empty user", testHost, "", testPassword, "user must be one line"},
+		{"invalid UTF-8 in the host", "ftp." + string([]byte{0xff}) + "forged", testUser, testPassword, "host must be one line"},
+		{"C1 control in the user", testHost, "user\u0085forged", testPassword, "user must be one line"},
+		{"line separator in the host", "ftp\u2028forged", testUser, testPassword, "host must be one line"},
+		{"paragraph separator in the user", testHost, "user\u2029forged", testPassword, "user must be one line"},
 		{"empty password", testHost, testUser, "", "password must not be empty"},
 	}
 
@@ -590,7 +628,7 @@ func TestSiteConfigRejectsUnusableAnswers(t *testing.T) {
 			stub.host, stub.user, stub.password = test.host, test.user, test.password
 			useConfigStub(t, stub)
 
-			_, errText, code := runAllod(t, "site", "config")
+			out, errText, code := runAllod(t, "site", "config")
 			if code != 1 {
 				t.Errorf("exit code = %d, want 1", code)
 			}
@@ -599,6 +637,9 @@ func TestSiteConfigRejectsUnusableAnswers(t *testing.T) {
 			}
 			if _, err := os.Stat(stub.configFile); err == nil {
 				t.Errorf("%s was written despite the refusal", stub.configFile)
+			}
+			if strings.Contains(test.host+test.user, "forged") && strings.Contains(out+errText, "forged") {
+				t.Errorf("unsafe answer reached command output: stdout=%q stderr=%q", out, errText)
 			}
 		})
 	}
@@ -624,11 +665,54 @@ func TestSiteConfigObscureFailure(t *testing.T) {
 	}
 }
 
+func TestSiteConfigRejectsUnsafeUnicodeFromRcloneObscure(t *testing.T) {
+	tests := []struct {
+		name     string
+		obscured string
+	}{
+		{"invalid UTF-8", "safe" + string([]byte{0xff}) + "forged"},
+		{"C1 control", "safe\u0085forged"},
+		{"line separator", "safe\u2028forged"},
+		{"paragraph separator", "safe\u2029forged"},
+	}
+	wantErr := "allod: could not obscure the password: 'rclone obscure -' printed something that is not one config value\n"
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stub := answeringStub(t)
+			stub.obscured = test.obscured
+			useConfigStub(t, stub)
+
+			out, errText, code := runAllod(t, "site", "config")
+			if code != 1 || out != "" || errText != wantErr {
+				t.Errorf("unsafe obscure result: code=%d stdout=%q stderr=%q", code, out, errText)
+			}
+			if strings.Contains(out+errText, "forged") || strings.Contains(out+errText, test.obscured) {
+				t.Errorf("unsafe obscure output reached command output: stdout=%q stderr=%q", out, errText)
+			}
+			if _, err := os.Stat(stub.configFile); !os.IsNotExist(err) {
+				t.Errorf("config was written after unsafe obscure output (err = %v)", err)
+			}
+		})
+	}
+}
+
 // --- The pieces ---
 
 func TestValidConfigValue(t *testing.T) {
 	valid := []string{"ftp.example.com", "user@example", "a space is fine", "ünïcode"}
-	invalid := []string{"", "two\nlines", "a\ttab", "a\rreturn", "nul\x00byte", "bell\x07"}
+	invalid := []string{
+		"",
+		"two\nlines",
+		"a\ttab",
+		"a\rreturn",
+		"nul\x00byte",
+		"bell\x07",
+		string([]byte{0xff}),
+		"next\u0085line",
+		"next\u2028line",
+		"next\u2029paragraph",
+	}
 	for _, value := range valid {
 		if !validConfigValue(value) {
 			t.Errorf("validConfigValue(%q) = false, want true", value)
