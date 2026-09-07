@@ -887,6 +887,12 @@ func TestSiteDeployReportsRemoteFailuresBeforeBuilding(t *testing.T) {
 			6,
 			"allod: the 'shared' hosting remote could not be checked (rclone exited 6)\n",
 		},
+		{
+			"reserved deployed-but-unhealthy status",
+			siteRemoteCheckResult{problem: siteRemoteCredentialRejected, status: siteVerifyExit},
+			1,
+			"allod: the stored username or password for 'shared' was rejected; run 'allod site config --force' to replace it\n",
+		},
 	}
 
 	for _, test := range tests {
@@ -917,6 +923,68 @@ func TestSiteDeployReportsRemoteFailuresBeforeBuilding(t *testing.T) {
 			}
 			if stub.syncCalls != 0 {
 				t.Errorf("rclone sync ran %d times after the remote failed, want 0", stub.syncCalls)
+			}
+			if test.result.status == siteVerifyExit {
+				if code == siteVerifyExit {
+					t.Errorf("pre-build failure returned reserved post-deploy status %d", siteVerifyExit)
+				}
+				if strings.Contains(errText, "deployed") {
+					t.Errorf("pre-build failure claims a deploy happened: %q", errText)
+				}
+			}
+		})
+	}
+}
+
+// An explicit config is a different source of truth from rclone's default.
+// Every remedy that concerns stored configuration must carry that same path,
+// and must quote it so control characters cannot forge another output line.
+func TestReportSiteRemoteFailureUsesSelectedConfig(t *testing.T) {
+	configPath := "/run/credentials/site \"primary\"\nrclone.conf"
+	quotedPath := fmt.Sprintf("%q", configPath)
+	tests := []struct {
+		name   string
+		result siteRemoteCheckResult
+		want   string
+	}{
+		{
+			"remote missing",
+			siteRemoteCheckResult{problem: siteRemoteMissing, status: 1},
+			"allod: no 'shared' rclone remote is configured in " + quotedPath + "; create it in that selected configuration\n",
+		},
+		{
+			"config unreadable",
+			siteRemoteCheckResult{problem: siteRemoteConfigUnreadable, status: 1},
+			"allod: the selected rclone configuration " + quotedPath + " is unreadable; check that path and its permissions\n",
+		},
+		{
+			"credential rejected",
+			siteRemoteCheckResult{problem: siteRemoteCredentialRejected, status: 1},
+			"allod: the stored username or password for 'shared' in " + quotedPath + " was rejected; replace it in that selected configuration\n",
+		},
+		{
+			"unknown failure",
+			siteRemoteCheckResult{problem: siteRemoteUnknown, status: 8},
+			"allod: the 'shared' hosting remote using " + quotedPath + " could not be checked (rclone exited 8)\n",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var message strings.Builder
+			previousErr := stderr
+			stderr = &message
+			defer func() { stderr = previousErr }()
+
+			reportSiteRemoteFailure(test.result, configPath)
+			if got := message.String(); got != test.want {
+				t.Errorf("message = %q, want %q", got, test.want)
+			}
+			if strings.Contains(message.String(), "allod site config") {
+				t.Errorf("selected-config remedy redirects to the default configuration: %q", message.String())
+			}
+			if strings.Count(message.String(), "\n") != 1 {
+				t.Errorf("selected-config remedy is not one safe line: %q", message.String())
 			}
 		})
 	}
