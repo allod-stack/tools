@@ -573,21 +573,48 @@ func classifySiteRemoteProblem(diagnostic string) siteRemoteProblem {
 
 // reportSiteRemoteFailure is shared CLI wording rather than deploy wording so
 // a command that checks the credential without deploying can use the same
-// probe and the same diagnoses. Callers retain control of success output and
-// exit flow.
-func reportSiteRemoteFailure(result siteRemoteCheckResult) {
+// probe and the same diagnoses. When a caller selected a config path, every
+// config remedy names that path instead of redirecting the operator to
+// rclone's default. %q keeps even an unusual path on one safe output line.
+func reportSiteRemoteFailure(result siteRemoteCheckResult, configPath string) {
 	switch result.problem {
 	case siteRemoteMissing:
-		fmt.Fprintf(stderr, "allod: no '%s' rclone remote is configured; run 'allod site config' to create it\n", siteRemoteName)
+		if configPath == "" {
+			fmt.Fprintf(stderr, "allod: no '%s' rclone remote is configured; run 'allod site config' to create it\n", siteRemoteName)
+		} else {
+			fmt.Fprintf(stderr, "allod: no '%s' rclone remote is configured in %q; create it in that selected configuration\n", siteRemoteName, configPath)
+		}
 	case siteRemoteConfigUnreadable:
-		fmt.Fprintln(stderr, "allod: the rclone configuration is unreadable; check its path and permissions")
+		if configPath == "" {
+			fmt.Fprintln(stderr, "allod: the rclone configuration is unreadable; check its path and permissions")
+		} else {
+			fmt.Fprintf(stderr, "allod: the selected rclone configuration %q is unreadable; check that path and its permissions\n", configPath)
+		}
 	case siteRemoteCredentialRejected:
-		fmt.Fprintf(stderr, "allod: the stored username or password for '%s' was rejected; run 'allod site config --force' to replace it\n", siteRemoteName)
+		if configPath == "" {
+			fmt.Fprintf(stderr, "allod: the stored username or password for '%s' was rejected; run 'allod site config --force' to replace it\n", siteRemoteName)
+		} else {
+			fmt.Fprintf(stderr, "allod: the stored username or password for '%s' in %q was rejected; replace it in that selected configuration\n", siteRemoteName, configPath)
+		}
 	case siteRemoteHostUnreachable:
 		fmt.Fprintf(stderr, "allod: the host for '%s' is unreachable; check its address, the network connection, and the hosting service\n", siteRemoteName)
 	default:
-		fmt.Fprintf(stderr, "allod: the '%s' hosting remote could not be checked (rclone exited %d)\n", siteRemoteName, result.status)
+		if configPath == "" {
+			fmt.Fprintf(stderr, "allod: the '%s' hosting remote could not be checked (rclone exited %d)\n", siteRemoteName, result.status)
+		} else {
+			fmt.Fprintf(stderr, "allod: the '%s' hosting remote using %q could not be checked (rclone exited %d)\n", siteRemoteName, configPath, result.status)
+		}
 	}
+}
+
+// siteRemoteFailureExitCode preserves a useful child status except for 7,
+// which allod reserves to mean that a deploy completed and only its HTTPS
+// verification failed. A pre-build check can never truthfully return that.
+func siteRemoteFailureExitCode(status int) int {
+	if status == 0 || status == siteVerifyExit {
+		return 1
+	}
+	return status
 }
 
 // requireSiteRemote fails before the build rather than after it. The remote is
@@ -599,11 +626,8 @@ func requireSiteRemote(configPath string) {
 	if result.problem == siteRemoteReady {
 		return
 	}
-	reportSiteRemoteFailure(result)
-	if result.status == 0 {
-		exit(1)
-	}
-	exit(result.status)
+	reportSiteRemoteFailure(result, configPath)
+	exit(siteRemoteFailureExitCode(result.status))
 }
 
 // probeSite reports the status of https://<domain>/ itself. Redirects are not
@@ -750,15 +774,18 @@ rclone remote. Deploy never handles a credential, and checks that the remote
 can authenticate before it starts the build rather than discovering a rejected
 login afterwards.
 
-'--config <path>' selects one rclone configuration file for either command. An
+'--config <path>' selects one rclone configuration path for either command. An
 explicit path takes precedence over RCLONE_CONFIG, rclone's reported path,
-XDG_CONFIG_HOME, and HOME. Deploy requires the named path to be an existing,
-readable regular file before it builds, and passes it to every rclone call.
-Config may create a missing named file and writes it at mode 0600. Without the
-flag, deploy leaves resolution entirely to rclone and config keeps asking
-rclone for its configuration file before falling back to the XDG/HOME default.
-The hosting config is machine-wide; it does not belong in site.toml or a site
-repository.
+XDG_CONFIG_HOME, and HOME. A path beginning with '-' uses --config=<path> so it
+cannot be mistaken for another option. Deploy accepts a readable regular file
+or a symlink to one and passes the same path to the preflight and sync. Rclone
+opens it separately for those calls, so activation or rotation during the build
+can make sync read newer contents than the preflight checked. Config may create
+a missing path and atomically replace a regular file at mode 0600, but refuses
+to replace a symlink or any other file type. Without the flag, deploy leaves
+resolution entirely to rclone and config keeps asking rclone for its
+configuration file before falling back to the XDG/HOME default. The hosting
+config is machine-wide; it does not belong in site.toml or a site repository.
 
 Each site-enabled binary has one deployment-owned hosting layout compiled in.
 Without a linker override it uses 'directadmin', whose docroot is

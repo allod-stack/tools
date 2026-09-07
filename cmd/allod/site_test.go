@@ -23,7 +23,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // --- Harness ---
@@ -235,6 +237,7 @@ func TestSiteDeployTakesNoTarget(t *testing.T) {
 		{"site", "deploy", "other.example"},
 		{"site", "deploy", "shared:domains/other.example/public_html"},
 		{"site", "deploy", "--config"},
+		{"site", "deploy", "--config", "--dry-run"},
 		{"site", "deploy", "--config="},
 		{"site", "deploy", "--config=/run/credential\nallod: forged"},
 		{"site", "deploy", "--config", "/one", "--config", "/two"},
@@ -592,8 +595,10 @@ func TestSiteDeployDirectAdminDefaultIsUnchanged(t *testing.T) {
 	}
 }
 
-// A named config is one machine-wide credential source for the whole deploy:
-// the preflight and the sync must not resolve different rclone defaults.
+// A named config gives both rclone calls one path instead of letting either
+// resolve a default independently. It deliberately does not promise that the
+// contents remain one snapshot across the build; the test below pins that
+// rotation boundary separately.
 func TestSiteDeployUsesNamedRcloneConfigThroughout(t *testing.T) {
 	stub := &deployStub{storePath: "/nix/store/aaa-site", verifyStatus: 200}
 	useDeployStub(t, stub)
@@ -624,6 +629,109 @@ func TestSiteDeployUsesNamedRcloneConfigThroughout(t *testing.T) {
 		if strings.Contains(text, "plaintext-equivalent-test-value") {
 			t.Errorf("%s contains the credential from the named file: %q", stream, text)
 		}
+	}
+}
+
+// Rclone opens the selected path once for the preflight and again for sync.
+// Activation may rotate the file during the intervening build, so the contract
+// is path identity rather than content identity: sync can see a newer value.
+func TestSiteDeployNamedConfigCanRotateDuringBuild(t *testing.T) {
+	stub := &deployStub{storePath: "/nix/store/aaa-site", verifyStatus: 200}
+	useDeployStub(t, stub)
+	useSiteRepo(t, "domain = \"example.com\"\n")
+	configPath := filepath.Join(t.TempDir(), "rclone.conf")
+	if err := os.WriteFile(configPath, []byte("generation-one"), 0400); err != nil {
+		t.Fatalf("could not write first config generation: %v", err)
+	}
+
+	var preflightContents, syncContents string
+	siteRemoteCheck = func(path string) siteRemoteCheckResult {
+		preflightContents = readFile(t, path)
+		return siteRemoteCheckResult{problem: siteRemoteReady}
+	}
+	siteBuild = func(string) (string, int) {
+		next := configPath + ".next"
+		if err := os.WriteFile(next, []byte("generation-two"), 0400); err != nil {
+			t.Fatalf("could not rotate config during build: %v", err)
+		}
+		if err := os.Rename(next, configPath); err != nil {
+			t.Fatalf("could not activate rotated config during build: %v", err)
+		}
+		return stub.storePath, 0
+	}
+	siteSync = func(path string, _ []string) int {
+		syncContents = readFile(t, path)
+		return 0
+	}
+
+	if _, errText, code := runAllod(t, "site", "deploy", "--dry-run", "--config", configPath); code != 0 {
+		t.Fatalf("exit code = %d, want 0\nstderr: %s", code, errText)
+	}
+	if preflightContents != "generation-one" || syncContents != "generation-two" {
+		t.Errorf("config generations: preflight=%q sync=%q", preflightContents, syncContents)
+	}
+}
+
+func TestSiteDeployAcceptsSymlinkToRegularNamedConfig(t *testing.T) {
+	stub := &deployStub{storePath: "/nix/store/aaa-site", verifyStatus: 200}
+	useDeployStub(t, stub)
+	useSiteRepo(t, "domain = \"example.com\"\n")
+	dir := t.TempDir()
+	target := filepath.Join(dir, "generation-1.conf")
+	selected := filepath.Join(dir, "active.conf")
+	if err := os.WriteFile(target, []byte("[shared]\n"), 0400); err != nil {
+		t.Fatalf("could not write activation target: %v", err)
+	}
+	if err := os.Symlink(target, selected); err != nil {
+		t.Fatalf("could not create activation symlink: %v", err)
+	}
+
+	if _, errText, code := runAllod(t, "site", "deploy", "--dry-run", "--config", selected); code != 0 {
+		t.Fatalf("exit code = %d, want 0\nstderr: %s", code, errText)
+	}
+	if stub.remoteConfigPath != selected || stub.syncConfigPath != selected {
+		t.Errorf("selected symlink was resolved or lost: preflight=%q sync=%q", stub.remoteConfigPath, stub.syncConfigPath)
+	}
+}
+
+func TestSiteDeployNamedConfigFIFODoesNotBlock(t *testing.T) {
+	stub := &deployStub{storePath: "/nix/store/aaa-site", verifyStatus: 200}
+	useDeployStub(t, stub)
+	useSiteRepo(t, "domain = \"example.com\"\n")
+	configPath := filepath.Join(t.TempDir(), "rclone.conf")
+	if err := syscall.Mkfifo(configPath, 0600); err != nil {
+		t.Fatalf("could not create config FIFO: %v", err)
+	}
+
+	type result struct {
+		errText string
+		code    int
+	}
+	done := make(chan result, 1)
+	go func() {
+		_, errText, code := runAllod(t, "site", "deploy", "--config", configPath)
+		done <- result{errText: errText, code: code}
+	}()
+
+	var got result
+	select {
+	case got = <-done:
+	case <-time.After(time.Second):
+		// Release a regressed blocking read before failing so the test leaves no
+		// goroutine holding the shared CLI harness state.
+		writer, err := os.OpenFile(configPath, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+		if err == nil {
+			_ = writer.Close()
+		}
+		got = <-done
+		t.Fatalf("deploy blocked while opening a FIFO (eventual stderr: %s)", got.errText)
+	}
+	if got.code != 1 || !strings.Contains(got.errText, "not a regular file") {
+		t.Errorf("FIFO refusal: code=%d stderr=%q", got.code, got.errText)
+	}
+	if stub.remoteCalls != 0 || stub.buildCalls != 0 || stub.syncCalls != 0 {
+		t.Errorf("work ran with a FIFO config: remote-check=%d build=%d sync=%d",
+			stub.remoteCalls, stub.buildCalls, stub.syncCalls)
 	}
 }
 
@@ -683,6 +791,35 @@ func TestSiteDeployRejectsUnreadableNamedRcloneConfig(t *testing.T) {
 	if stub.remoteCalls != 0 || stub.buildCalls != 0 || stub.syncCalls != 0 {
 		t.Errorf("work ran with an unreadable named config: remote-check=%d build=%d sync=%d",
 			stub.remoteCalls, stub.buildCalls, stub.syncCalls)
+	}
+}
+
+func TestSiteDeployNamedRemoteFailureKeepsSelectedConfig(t *testing.T) {
+	stub := &deployStub{
+		remoteResult: siteRemoteCheckResult{problem: siteRemoteCredentialRejected, status: 3},
+		storePath:    "/nix/store/aaa-site",
+		verifyStatus: 200,
+	}
+	useDeployStub(t, stub)
+	useSiteRepo(t, "domain = \"example.com\"\n")
+	configPath := filepath.Join(t.TempDir(), "rclone.conf")
+	if err := os.WriteFile(configPath, []byte("[shared]\n"), 0400); err != nil {
+		t.Fatalf("could not write named config: %v", err)
+	}
+
+	_, errText, code := runAllod(t, "site", "deploy", "--config", configPath)
+	if code != 3 {
+		t.Errorf("exit code = %d, want 3", code)
+	}
+	if !strings.Contains(errText, fmt.Sprintf("in %q", configPath)) {
+		t.Errorf("credential remedy does not preserve the selected config: %q", errText)
+	}
+	if strings.Contains(errText, "allod site config --force") {
+		t.Errorf("credential remedy redirects to the default config: %q", errText)
+	}
+	if stub.remoteConfigPath != configPath || stub.buildCalls != 0 || stub.syncCalls != 0 {
+		t.Errorf("failure flow: preflight-path=%q build=%d sync=%d",
+			stub.remoteConfigPath, stub.buildCalls, stub.syncCalls)
 	}
 }
 
@@ -1136,6 +1273,12 @@ func TestSiteDeployReportsRemoteFailuresBeforeBuilding(t *testing.T) {
 			6,
 			"allod: the 'shared' hosting remote could not be checked (rclone exited 6)\n",
 		},
+		{
+			"reserved deployed-but-unhealthy status",
+			siteRemoteCheckResult{problem: siteRemoteCredentialRejected, status: siteVerifyExit},
+			1,
+			"allod: the stored username or password for 'shared' was rejected; run 'allod site config --force' to replace it\n",
+		},
 	}
 
 	for _, test := range tests {
@@ -1166,6 +1309,68 @@ func TestSiteDeployReportsRemoteFailuresBeforeBuilding(t *testing.T) {
 			}
 			if stub.syncCalls != 0 {
 				t.Errorf("rclone sync ran %d times after the remote failed, want 0", stub.syncCalls)
+			}
+			if test.result.status == siteVerifyExit {
+				if code == siteVerifyExit {
+					t.Errorf("pre-build failure returned reserved post-deploy status %d", siteVerifyExit)
+				}
+				if strings.Contains(errText, "deployed") {
+					t.Errorf("pre-build failure claims a deploy happened: %q", errText)
+				}
+			}
+		})
+	}
+}
+
+// An explicit config is a different source of truth from rclone's default.
+// Every remedy that concerns stored configuration must carry that same path,
+// and must quote it so control characters cannot forge another output line.
+func TestReportSiteRemoteFailureUsesSelectedConfig(t *testing.T) {
+	configPath := "/run/credentials/site \"primary\"\nrclone.conf"
+	quotedPath := fmt.Sprintf("%q", configPath)
+	tests := []struct {
+		name   string
+		result siteRemoteCheckResult
+		want   string
+	}{
+		{
+			"remote missing",
+			siteRemoteCheckResult{problem: siteRemoteMissing, status: 1},
+			"allod: no 'shared' rclone remote is configured in " + quotedPath + "; create it in that selected configuration\n",
+		},
+		{
+			"config unreadable",
+			siteRemoteCheckResult{problem: siteRemoteConfigUnreadable, status: 1},
+			"allod: the selected rclone configuration " + quotedPath + " is unreadable; check that path and its permissions\n",
+		},
+		{
+			"credential rejected",
+			siteRemoteCheckResult{problem: siteRemoteCredentialRejected, status: 1},
+			"allod: the stored username or password for 'shared' in " + quotedPath + " was rejected; replace it in that selected configuration\n",
+		},
+		{
+			"unknown failure",
+			siteRemoteCheckResult{problem: siteRemoteUnknown, status: 8},
+			"allod: the 'shared' hosting remote using " + quotedPath + " could not be checked (rclone exited 8)\n",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var message strings.Builder
+			previousErr := stderr
+			stderr = &message
+			defer func() { stderr = previousErr }()
+
+			reportSiteRemoteFailure(test.result, configPath)
+			if got := message.String(); got != test.want {
+				t.Errorf("message = %q, want %q", got, test.want)
+			}
+			if strings.Contains(message.String(), "allod site config") {
+				t.Errorf("selected-config remedy redirects to the default configuration: %q", message.String())
+			}
+			if strings.Count(message.String(), "\n") != 1 {
+				t.Errorf("selected-config remedy is not one safe line: %q", message.String())
 			}
 		})
 	}
