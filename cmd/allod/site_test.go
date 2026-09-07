@@ -181,7 +181,9 @@ func TestSiteUsage(t *testing.T) {
 		{"--help prints usage to stdout", []string{"site", "--help"}, 0, "allod site deploy [--config <path>] [--dry-run]", "", true},
 		{"-h prints usage to stdout", []string{"site", "-h"}, 0, "allod site config [--config <path>] [--force]", "", true},
 		{"deploy --help prints usage to stdout", []string{"site", "deploy", "--help"}, 0, "allod site deploy [--config <path>] [--dry-run]", "", true},
+		{"check --help prints usage to stdout", []string{"site", "check", "--help"}, 0, "allod site check [--config <path>]", "", true},
 		{"config --help prints usage to stdout", []string{"site", "config", "--help"}, 0, "allod site config [--config <path>] [--force]", "", true},
+		{"config help discovers updates", []string{"site", "config", "update", "--help"}, 0, "allod site config update {host|user|password}", "", true},
 		{"unknown command", []string{"site", "publish"}, 1, "", "unknown site command: publish", false},
 	}
 
@@ -220,6 +222,96 @@ func TestSiteUsageKeepsHostingSelectionAtBuildTime(t *testing.T) {
 	}
 	if strings.Contains(out, "ALLOD_SITE_HOSTING_PROFILE") {
 		t.Errorf("help still advertises runtime environment selection: %q", out)
+	}
+}
+
+// Check is exactly the authenticated preflight made available on its own. It
+// needs no site repository and has no path to build, sync, verify, or publish.
+func TestSiteCheckDoesNothingButProbeTheRemote(t *testing.T) {
+	stub := &deployStub{}
+	useDeployStub(t, stub)
+
+	out, errText, code := runAllod(t, "site", "check")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0\nstderr: %s", code, errText)
+	}
+	if out != "Remote 'shared' is ready.\n" || errText != "" {
+		t.Errorf("stdout=%q stderr=%q, want one safe success line", out, errText)
+	}
+	if stub.remoteCalls != 1 || stub.remoteConfigPath != "" {
+		t.Errorf("remote check calls=%d config=%q, want one default-config probe", stub.remoteCalls, stub.remoteConfigPath)
+	}
+	if stub.buildCalls != 0 || stub.syncCalls != 0 || stub.verifyCalls != 0 {
+		t.Errorf("check had deploy effects: build=%d sync=%d verify=%d", stub.buildCalls, stub.syncCalls, stub.verifyCalls)
+	}
+}
+
+// An explicit path reaches the shared probe unchanged. The file content is a
+// plaintext-equivalent credential, so neither stream may reveal any of it.
+func TestSiteCheckPropagatesExplicitConfigWithoutReadingItAloud(t *testing.T) {
+	stub := &deployStub{}
+	useDeployStub(t, stub)
+	configPath := filepath.Join(t.TempDir(), "runtime credentials", "rclone.conf")
+	credential := "[shared]\npass = NEVER-PRINT-THIS\n"
+	writeExistingConfig(t, configPath, credential)
+
+	out, errText, code := runAllod(t, "site", "check", "--config", configPath)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0\nstderr: %s", code, errText)
+	}
+	if stub.remoteCalls != 1 || stub.remoteConfigPath != configPath {
+		t.Errorf("remote check calls=%d config=%q, want one probe with %q", stub.remoteCalls, stub.remoteConfigPath, configPath)
+	}
+	if strings.Contains(out, "NEVER-PRINT-THIS") || strings.Contains(errText, "NEVER-PRINT-THIS") {
+		t.Errorf("check exposed config content: stdout=%q stderr=%q", out, errText)
+	}
+	if stub.buildCalls != 0 || stub.syncCalls != 0 || stub.verifyCalls != 0 {
+		t.Errorf("check had deploy effects: build=%d sync=%d verify=%d", stub.buildCalls, stub.syncCalls, stub.verifyCalls)
+	}
+}
+
+func TestSiteCheckReports530AsUsernameOrPassword(t *testing.T) {
+	stub := &deployStub{remoteResult: siteRemoteCheckResult{problem: siteRemoteCredentialRejected, status: 4}}
+	useDeployStub(t, stub)
+
+	out, errText, code := runAllod(t, "site", "check")
+	if code != 4 {
+		t.Errorf("exit code = %d, want rclone status 4", code)
+	}
+	if out != "" {
+		t.Errorf("stdout = %q, want empty", out)
+	}
+	for _, want := range []string{"username or password", "site config update user", "site config update password"} {
+		if !strings.Contains(errText, want) {
+			t.Errorf("stderr does not contain %q: %q", want, errText)
+		}
+	}
+	if strings.Contains(errText, "the password was rejected") {
+		t.Errorf("530 was over-classified as a password failure: %q", errText)
+	}
+	if stub.buildCalls != 0 || stub.syncCalls != 0 || stub.verifyCalls != 0 {
+		t.Errorf("failed check had deploy effects: build=%d sync=%d verify=%d", stub.buildCalls, stub.syncCalls, stub.verifyCalls)
+	}
+}
+
+func TestSiteCheckRejectsUnexpectedArguments(t *testing.T) {
+	for _, args := range [][]string{
+		{"site", "check", "shared"},
+		{"site", "check", "--publish"},
+		{"site", "check", "--config"},
+		{"site", "check", "--config", "/one", "--config", "/two"},
+	} {
+		t.Run(strings.Join(args[2:], " "), func(t *testing.T) {
+			stub := &deployStub{}
+			useDeployStub(t, stub)
+			_, errText, code := runAllod(t, args...)
+			if code != 1 || !strings.Contains(errText, "site check") {
+				t.Errorf("exit=%d stderr=%q, want a site-check parse failure", code, errText)
+			}
+			if stub.remoteCalls != 0 || stub.buildCalls != 0 || stub.syncCalls != 0 || stub.verifyCalls != 0 {
+				t.Errorf("bad arguments had effects: probe=%d build=%d sync=%d verify=%d", stub.remoteCalls, stub.buildCalls, stub.syncCalls, stub.verifyCalls)
+			}
+		})
 	}
 }
 
@@ -1259,7 +1351,7 @@ func TestSiteDeployReportsRemoteFailuresBeforeBuilding(t *testing.T) {
 			"credential rejected",
 			siteRemoteCheckResult{problem: siteRemoteCredentialRejected, status: 4},
 			4,
-			"allod: the stored username or password for 'shared' was rejected; run 'allod site config --force' to replace it\n",
+			"allod: the stored username or password for 'shared' was rejected; run 'allod site config update user' or 'allod site config update password'\n",
 		},
 		{
 			"host unreachable",
@@ -1277,7 +1369,7 @@ func TestSiteDeployReportsRemoteFailuresBeforeBuilding(t *testing.T) {
 			"reserved deployed-but-unhealthy status",
 			siteRemoteCheckResult{problem: siteRemoteCredentialRejected, status: siteVerifyExit},
 			1,
-			"allod: the stored username or password for 'shared' was rejected; run 'allod site config --force' to replace it\n",
+			"allod: the stored username or password for 'shared' was rejected; run 'allod site config update user' or 'allod site config update password'\n",
 		},
 	}
 
@@ -1329,29 +1421,34 @@ func TestReportSiteRemoteFailureUsesSelectedConfig(t *testing.T) {
 	configPath := "/run/credentials/site \"primary\"\nrclone.conf"
 	quotedPath := fmt.Sprintf("%q", configPath)
 	tests := []struct {
-		name   string
-		result siteRemoteCheckResult
-		want   string
+		name               string
+		result             siteRemoteCheckResult
+		want               string
+		usesLifecycleRoute bool
 	}{
 		{
 			"remote missing",
 			siteRemoteCheckResult{problem: siteRemoteMissing, status: 1},
 			"allod: no 'shared' rclone remote is configured in " + quotedPath + "; create it in that selected configuration\n",
+			false,
 		},
 		{
 			"config unreadable",
 			siteRemoteCheckResult{problem: siteRemoteConfigUnreadable, status: 1},
 			"allod: the selected rclone configuration " + quotedPath + " is unreadable; check that path and its permissions\n",
+			false,
 		},
 		{
 			"credential rejected",
 			siteRemoteCheckResult{problem: siteRemoteCredentialRejected, status: 1},
-			"allod: the stored username or password for 'shared' in " + quotedPath + " was rejected; replace it in that selected configuration\n",
+			"allod: the stored username or password for 'shared' in " + quotedPath + " was rejected; run 'allod site config update user' or 'allod site config update password' with that same --config path\n",
+			true,
 		},
 		{
 			"unknown failure",
 			siteRemoteCheckResult{problem: siteRemoteUnknown, status: 8},
 			"allod: the 'shared' hosting remote using " + quotedPath + " could not be checked (rclone exited 8)\n",
+			false,
 		},
 	}
 
@@ -1366,8 +1463,11 @@ func TestReportSiteRemoteFailureUsesSelectedConfig(t *testing.T) {
 			if got := message.String(); got != test.want {
 				t.Errorf("message = %q, want %q", got, test.want)
 			}
-			if strings.Contains(message.String(), "allod site config") {
+			if !test.usesLifecycleRoute && strings.Contains(message.String(), "allod site config") {
 				t.Errorf("selected-config remedy redirects to the default configuration: %q", message.String())
+			}
+			if test.usesLifecycleRoute && !strings.Contains(message.String(), "same --config path") {
+				t.Errorf("selected-config lifecycle remedy loses its source path: %q", message.String())
 			}
 			if strings.Count(message.String(), "\n") != 1 {
 				t.Errorf("selected-config remedy is not one safe line: %q", message.String())

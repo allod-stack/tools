@@ -228,8 +228,8 @@ const siteVerifyExit = 7
 
 // Test seams. Every effect this command has outside the process goes through
 // one of these four, so the tests can drive the whole command without a nix
-// daemon, a configured rclone remote, or a network. 'site config' has two
-// seams of its own; see site_config.go.
+// daemon, a configured rclone remote, or a network. 'site config' has its own
+// command and terminal seams; see site_config.go.
 var (
 	siteRemoteCheck = rcloneSiteRemoteCheck
 	siteBuild       = nixBuild
@@ -242,7 +242,7 @@ var (
 func init() {
 	registerNamespace(namespace{
 		name:    "site",
-		summary: "Deploy a static site to shared hosting (deploy, config)",
+		summary: "Deploy a static site to shared hosting (deploy, check, config)",
 		main:    siteMain,
 	})
 }
@@ -256,6 +256,8 @@ func siteMain(args []string) {
 	switch command {
 	case "deploy":
 		siteDeploy(args)
+	case "check":
+		siteCheck(args)
 	case "config":
 		siteConfigure(args)
 	case "-h", "--help":
@@ -592,9 +594,9 @@ func reportSiteRemoteFailure(result siteRemoteCheckResult, configPath string) {
 		}
 	case siteRemoteCredentialRejected:
 		if configPath == "" {
-			fmt.Fprintf(stderr, "allod: the stored username or password for '%s' was rejected; run 'allod site config --force' to replace it\n", siteRemoteName)
+			fmt.Fprintf(stderr, "allod: the stored username or password for '%s' was rejected; run 'allod site config update user' or 'allod site config update password'\n", siteRemoteName)
 		} else {
-			fmt.Fprintf(stderr, "allod: the stored username or password for '%s' in %q was rejected; replace it in that selected configuration\n", siteRemoteName, configPath)
+			fmt.Fprintf(stderr, "allod: the stored username or password for '%s' in %q was rejected; run 'allod site config update user' or 'allod site config update password' with that same --config path\n", siteRemoteName, configPath)
 		}
 	case siteRemoteHostUnreachable:
 		fmt.Fprintf(stderr, "allod: the host for '%s' is unreachable; check its address, the network connection, and the hosting service\n", siteRemoteName)
@@ -615,6 +617,53 @@ func siteRemoteFailureExitCode(status int) int {
 		return 1
 	}
 	return status
+}
+
+// requireReadableSiteConfig applies the named-path contract shared by commands
+// that hand a credential to rclone. The default selection remains rclone's to
+// resolve; an explicit file must exist, be regular, and be readable before a
+// check or a build starts.
+func requireReadableSiteConfig(selection rcloneConfigSelection) {
+	if err := selection.requireReadable(); err != nil {
+		if os.IsNotExist(err) {
+			fmt.Fprintf(stderr, "allod: named rclone configuration does not exist: %q\n", selection.path)
+			fmt.Fprintln(stderr, "allod: while resolving: the hosting credential selected by --config")
+			fmt.Fprintln(stderr, "allod: to fix: materialise the credential at that path, or omit --config to use rclone's configuration")
+			exit(1)
+		}
+		die(1, "named rclone configuration is not readable: %q: %s", selection.path, err)
+	}
+}
+
+// siteCheck is the quick, read-only half of the deploy preflight. It neither
+// resolves a site repository nor selects a hosting layout: opening 'shared:'
+// is enough to prove that the stored host and credential work, and nothing is
+// built, synced, verified over HTTPS, or published.
+func siteCheck(args []string) {
+	var configSelection rcloneConfigSelection
+	for len(args) > 0 {
+		if rest, consumed := configSelection.consume(args, "check"); consumed {
+			args = rest
+			continue
+		}
+		switch args[0] {
+		case "-h", "--help":
+			fmt.Fprint(stdout, siteUsageText)
+			return
+		default:
+			if strings.HasPrefix(args[0], "-") {
+				die(1, "unknown option for site check: %s", args[0])
+			}
+			die(1, "unexpected argument for site check: %s", args[0])
+		}
+	}
+
+	if _, err := exec.LookPath("rclone"); err != nil {
+		die(1, "'rclone' not found on PATH")
+	}
+	requireReadableSiteConfig(configSelection)
+	requireSiteRemote(configSelection.configPath())
+	fmt.Fprintf(stdout, "Remote '%s' is ready.\n", siteRemoteName)
 }
 
 // requireSiteRemote fails before the build rather than after it. The remote is
@@ -686,15 +735,7 @@ func siteDeploy(args []string) {
 	if _, err := exec.LookPath("rclone"); err != nil {
 		die(1, "'rclone' not found on PATH")
 	}
-	if err := configSelection.requireReadable(); err != nil {
-		if os.IsNotExist(err) {
-			fmt.Fprintf(stderr, "allod: named rclone configuration does not exist: %q\n", configSelection.path)
-			fmt.Fprintln(stderr, "allod: while resolving: the hosting credential selected by --config")
-			fmt.Fprintln(stderr, "allod: to fix: materialise the credential at that path, or omit --config to use rclone's configuration")
-			exit(1)
-		}
-		die(1, "named rclone configuration is not readable: %q: %s", configSelection.path, err)
-	}
+	requireReadableSiteConfig(configSelection)
 	configPath := configSelection.configPath()
 	// Before the build, not after it: building a site is minutes of work, and
 	// none of it is any use without somewhere to send the result.
@@ -761,11 +802,16 @@ func siteDeploy(args []string) {
 
 const siteUsageText = `Usage:
   allod site deploy [--config <path>] [--dry-run]
+  allod site check [--config <path>]
   allod site config [--config <path>] [--force]
+  allod site config show [--config <path>]
+  allod site config update {host|user|password} [--config <path>]
+  allod site config replace [--config <path>]
 
 Commands:
   deploy   Build the site repo and sync the result to its shared-hosting docroot
-  config   Create the 'shared' rclone remote every deploy goes through
+  check    Verify the stored hosting credential without deploying
+  config   Create, inspect, update, or replace the 'shared' rclone remote
 
 'deploy' walks up from the current directory to the site.toml that marks the
 site repository root, builds that repo with 'nix build --no-link
@@ -774,18 +820,19 @@ rclone remote. Deploy never handles a credential, and checks that the remote
 can authenticate before it starts the build rather than discovering a rejected
 login afterwards.
 
-'--config <path>' selects one rclone configuration path for either command. An
+'--config <path>' selects one rclone configuration path for any command. An
 explicit path takes precedence over RCLONE_CONFIG, rclone's reported path,
 XDG_CONFIG_HOME, and HOME. A path beginning with '-' uses --config=<path> so it
-cannot be mistaken for another option. Deploy accepts a readable regular file
-or a symlink to one and passes the same path to the preflight and sync. Rclone
-opens it separately for those calls, so activation or rotation during the build
-can make sync read newer contents than the preflight checked. Config may create
-a missing path and atomically replace a regular file at mode 0600, but refuses
-to replace a symlink or any other file type. Without the flag, deploy leaves
-resolution entirely to rclone and config keeps asking rclone for its
-configuration file before falling back to the XDG/HOME default. The hosting
-config is machine-wide; it does not belong in site.toml or a site repository.
+cannot be mistaken for another option. Deploy, check, and config show accept a
+readable regular file or a symlink to one. Create, update, and replace may
+create a missing path and atomically replace a regular file at mode 0600, but
+refuse to replace a symlink or any other file type. Deploy passes the same path
+to the preflight and sync; rclone opens it separately for those calls, so
+activation or rotation during the build can make sync read newer contents than
+the preflight checked. Without the flag, deploy and check leave resolution to
+rclone, while config asks rclone for its configuration file before falling
+back to the XDG/HOME default. The hosting config is machine-wide; it does not
+belong in site.toml or a site repository.
 
 Each site-enabled binary has one deployment-owned hosting layout compiled in.
 Without a linker override it uses 'directadmin', whose docroot is
@@ -814,10 +861,19 @@ skipped. Without it, deploy checks that https://<domain>/ answers 200 and exits
 7 if it does not, which distinguishes a site that did not deploy from one that
 deployed and is not serving.
 
-'config' asks for an FTP host, user, and password on the terminal and writes
-the 'shared' remote to rclone's own configuration file, so nobody has to drive
-'rclone config' by hand or invent the stanza from memory. The password is not
-echoed as it is typed, never appears in a command line, and is stored the only
-way rclone accepts a stored password: obscured, by rclone itself. An existing
-'shared' remote is left alone unless --force is passed.
+'check' opens the 'shared' remote without reading a site repo, building, syncing,
+or publishing. A rejected FTP login can identify only the username or password
+as the cause, so its failure points to both single-field update commands.
+
+'config' with no action creates the remote and refuses to replace one that is
+already present. 'config show' safely prints its config path, type, host, and
+user, but never its plaintext-equivalent obscured password. 'config update'
+asks only for the selected field and changes only that value. 'config replace'
+is the discoverable full replacement, asking for host, user, and password;
+'config --force' remains a compatibility spelling for that same operation.
+
+Passwords are not echoed as they are typed, never appear in a command line,
+and are stored the only way rclone accepts a stored password: obscured, by
+rclone itself. Every successful create, update, or replacement names 'allod
+site check' as the way to verify the stored values with the server.
 `

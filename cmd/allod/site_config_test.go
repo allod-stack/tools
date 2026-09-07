@@ -2,7 +2,7 @@
 
 package main
 
-// Tests for 'allod site config'. The command's two seams are stubbed, so no
+// Tests for 'allod site config'. The command's effect seams are stubbed, so no
 // rclone runs and no terminal is opened, and the stub keeps every argv it was
 // handed — which is what makes the central claim checkable: the password
 // reaches rclone on stdin and appears nowhere else.
@@ -10,6 +10,7 @@ package main
 // The seams are package-level mutable state, so no test here calls t.Parallel.
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,6 +46,7 @@ type configStub struct {
 	password      string
 	askErr        error
 	askCalls      int
+	fieldCalls    []remoteConfigField
 	runs          []runCall
 }
 
@@ -53,7 +55,7 @@ func useConfigStub(t *testing.T, stub *configStub) {
 	if stub.obscured == "" && stub.obscureStatus == 0 {
 		stub.obscured = testObscured
 	}
-	previousRun, previousAsk := siteRun, siteAsk
+	previousRun, previousAsk, previousAskField := siteRun, siteAsk, siteAskField
 	siteRun = func(input, name string, args ...string) (string, int) {
 		stub.runs = append(stub.runs, runCall{name: name, args: append([]string(nil), args...), input: input})
 		switch strings.Join(args, " ") {
@@ -73,7 +75,21 @@ func useConfigStub(t *testing.T, stub *configStub) {
 		stub.askCalls++
 		return stub.host, stub.user, stub.password, stub.askErr
 	}
-	t.Cleanup(func() { siteRun, siteAsk = previousRun, previousAsk })
+	siteAskField = func(field remoteConfigField) (string, error) {
+		stub.fieldCalls = append(stub.fieldCalls, field)
+		switch field {
+		case remoteConfigHost:
+			return stub.host, stub.askErr
+		case remoteConfigUser:
+			return stub.user, stub.askErr
+		case remoteConfigPassword:
+			return stub.password, stub.askErr
+		}
+		return "", stub.askErr
+	}
+	t.Cleanup(func() {
+		siteRun, siteAsk, siteAskField = previousRun, previousAsk, previousAskField
+	})
 	stubTools(t, "rclone")
 }
 
@@ -131,7 +147,7 @@ func TestSiteConfigWritesTheStanza(t *testing.T) {
 
 	for _, want := range []string{"Remote: shared\n", "Type: ftp\n", "Host: " + testHost + "\n",
 		"User: " + testUser + "\n", "Config: " + stub.configFile + "\n",
-		"The next deploy will check this remote before building.\n"} {
+		"Check it with: allod site check\n"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("stdout does not contain %q\ngot: %q", want, out)
 		}
@@ -250,6 +266,197 @@ func TestSiteConfigForceReplacesOnlyTheSharedStanza(t *testing.T) {
 	}
 }
 
+// 'replace' is the discoverable spelling of the legacy --force behavior: both
+// ask for all three values and replace only the owned stanza.
+func TestSiteConfigReplaceIsTheFullReplacementSpelling(t *testing.T) {
+	stub := answeringStub(t)
+	useConfigStub(t, stub)
+	writeExistingConfig(t, stub.configFile,
+		"[backup]\ntype = s3\n\n"+
+			"[shared]\ntype = ftp\nhost = old.example\nuser = old-user\npass = OLD\nexplicit_tls = true\n")
+
+	out, errText, code := runAllod(t, "site", "config", "replace")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0\nstderr: %s", code, errText)
+	}
+	if stub.askCalls != 1 || len(stub.fieldCalls) != 0 {
+		t.Errorf("full prompts = %d, field prompts = %v; want one full prompt", stub.askCalls, stub.fieldCalls)
+	}
+	want := "[backup]\ntype = s3\n\n" +
+		"[shared]\ntype = ftp\nhost = " + testHost + "\nuser = " + testUser +
+		"\npass = " + testObscured + "\nexplicit_tls = true\n"
+	if got := readFile(t, stub.configFile); got != want {
+		t.Errorf("config file =\n%q\nwant\n%q", got, want)
+	}
+	if !strings.Contains(out, "allod site check") {
+		t.Errorf("replacement does not name the available check command: %q", out)
+	}
+}
+
+// Each update asks one question and replaces one value byte range. The fixture
+// deliberately uses CRLF, unusual spacing, comments, an unknown directive and
+// unrelated stanzas so a normalising rewrite cannot pass.
+func TestSiteConfigUpdateChangesExactlyTheSelectedField(t *testing.T) {
+	const oldObscured = "OLD-OBSCURED-SECRET"
+	existing := "# keep this byte for byte\r\n" +
+		"[backup]\r\ntype = s3\r\nprovider = Other\r\n\r\n" +
+		"[shared]\r\ntype = ftp\r\nhost   = old.example.test  \r\n" +
+		"user = old-user\r\npass = " + oldObscured + "\r\n" +
+		"explicit_tls = true\r\nunknown = untouched\r\n\r\n" +
+		"[scratch]\r\ntype = local\r\n"
+
+	tests := []struct {
+		name        string
+		field       remoteConfigField
+		oldValue    string
+		newValue    string
+		wantObscure bool
+	}{
+		{"host", remoteConfigHost, "old.example.test", testHost, false},
+		{"user", remoteConfigUser, "old-user", testUser, false},
+		{"password", remoteConfigPassword, oldObscured, testObscured, true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stub := answeringStub(t)
+			useConfigStub(t, stub)
+			writeExistingConfig(t, stub.configFile, existing)
+
+			out, errText, code := runAllod(t, "site", "config", "update", string(test.field))
+			if code != 0 {
+				t.Fatalf("exit code = %d, want 0\nstderr: %s", code, errText)
+			}
+			if stub.askCalls != 0 {
+				t.Errorf("all three fields were prompted %d times, want 0", stub.askCalls)
+			}
+			if len(stub.fieldCalls) != 1 || stub.fieldCalls[0] != test.field {
+				t.Errorf("field prompts = %v, want exactly [%s]", stub.fieldCalls, test.field)
+			}
+
+			want := strings.Replace(existing, test.oldValue, test.newValue, 1)
+			if got := readFile(t, stub.configFile); got != want {
+				t.Errorf("config file =\n%q\nwant the selected value only:\n%q", got, want)
+			}
+			obscureCalls := 0
+			for _, call := range stub.runs {
+				for _, arg := range append([]string{call.name}, call.args...) {
+					if strings.Contains(arg, testPassword) || strings.Contains(arg, testObscured) || strings.Contains(arg, oldObscured) {
+						t.Errorf("a password appears in argv: %s %v", call.name, call.args)
+					}
+				}
+				if call.name == "rclone" && strings.Join(call.args, " ") == "obscure -" {
+					obscureCalls++
+					if call.input != testPassword {
+						t.Errorf("stdin to obscure = %q, want password exactly", call.input)
+					}
+				}
+			}
+			wantObscureCalls := 0
+			if test.wantObscure {
+				wantObscureCalls = 1
+			}
+			if obscureCalls != wantObscureCalls {
+				t.Errorf("obscure calls = %d, want %d", obscureCalls, wantObscureCalls)
+			}
+			for stream, text := range map[string]string{"stdout": out, "stderr": errText} {
+				for _, secret := range []string{testPassword, testObscured, oldObscured} {
+					if strings.Contains(text, secret) {
+						t.Errorf("%s contains a password: %q", stream, text)
+					}
+				}
+			}
+			if !strings.Contains(out, "Updated: "+string(test.field)+"\n") || !strings.Contains(out, "allod site check") {
+				t.Errorf("stdout does not report the selected update and check command: %q", out)
+			}
+		})
+	}
+}
+
+func TestSiteConfigShowPrintsOnlySafeFields(t *testing.T) {
+	stub := answeringStub(t)
+	useConfigStub(t, stub)
+	writeExistingConfig(t, stub.configFile,
+		"[shared]\ntype = ftp\nhost = "+testHost+"\nuser = "+testUser+
+			"\npass = "+testObscured+"\nexplicit_tls = true\n")
+
+	out, errText, code := runAllod(t, "site", "config", "show")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0\nstderr: %s", code, errText)
+	}
+	want := "Config: " + stub.configFile + "\nRemote: shared\nType: ftp\nHost: " + testHost + "\nUser: " + testUser + "\n"
+	if out != want {
+		t.Errorf("stdout = %q, want safe inspection %q", out, want)
+	}
+	for stream, text := range map[string]string{"stdout": out, "stderr": errText} {
+		for _, secret := range []string{testPassword, testObscured} {
+			if strings.Contains(text, secret) {
+				t.Errorf("%s contains the password or its obscured form: %q", stream, text)
+			}
+		}
+	}
+	if stub.askCalls != 0 || len(stub.fieldCalls) != 0 {
+		t.Errorf("inspection prompted: full=%d fields=%v", stub.askCalls, stub.fieldCalls)
+	}
+}
+
+func TestSiteConfigShowRejectsMissingOrDuplicateRequiredKeys(t *testing.T) {
+	tests := []struct {
+		name   string
+		stanza string
+		want   string
+	}{
+		{"missing host", "type = ftp\nuser = u\npass = SECRET\nexplicit_tls = true\n", "no host key"},
+		{"duplicate user", "type = ftp\nhost = h\nuser = first\nuser = second\npass = SECRET\nexplicit_tls = true\n", "more than one user key"},
+		{"missing password", "type = ftp\nhost = h\nuser = u\nexplicit_tls = true\n", "no pass key"},
+		{"duplicate remote", "type = ftp\nhost = h\nuser = u\npass = SECRET\nexplicit_tls = true\n[shared]\ntype = ftp\nhost = h2\nuser = u2\npass = SECRET2\nexplicit_tls = true\n", "more than one 'shared'"},
+		{"newline forges another host", "type = ftp\nhost = safe\nhost = FORGED\nuser = u\npass = SECRET\nexplicit_tls = true\n", "more than one host key"},
+		{"control byte in host", "type = ftp\nhost = safe\x07FORGED\nuser = u\npass = SECRET\nexplicit_tls = true\n", "unusable host value"},
+		{"terminal escape in user", "type = ftp\nhost = h\nuser = safe\x1b[2JFORGED\npass = SECRET\nexplicit_tls = true\n", "unusable user value"},
+		{"wrong backend", "type = sftp\nhost = h\nuser = u\npass = SECRET\nexplicit_tls = true\n", "not an FTP remote"},
+		{"TLS disabled", "type = ftp\nhost = h\nuser = u\npass = SECRET\nexplicit_tls = false\n", "does not require explicit TLS"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stub := answeringStub(t)
+			useConfigStub(t, stub)
+			writeExistingConfig(t, stub.configFile, "[shared]\n"+test.stanza)
+
+			out, errText, code := runAllod(t, "site", "config", "show")
+			if code != 1 {
+				t.Errorf("exit code = %d, want 1", code)
+			}
+			if !strings.Contains(errText, test.want) {
+				t.Errorf("stderr does not contain %q: %q", test.want, errText)
+			}
+			if out != "" || strings.Contains(errText, "SECRET") || strings.Contains(errText, "FORGED") || strings.Contains(errText, "\x1b") {
+				t.Errorf("failed inspection exposed config content: stdout=%q stderr=%q", out, errText)
+			}
+			if stub.askCalls != 0 || len(stub.fieldCalls) != 0 {
+				t.Errorf("failed inspection prompted: full=%d fields=%v", stub.askCalls, stub.fieldCalls)
+			}
+		})
+	}
+}
+
+func TestSiteConfigUpdateRejectsAnAmbiguousFieldBeforePrompting(t *testing.T) {
+	stub := answeringStub(t)
+	useConfigStub(t, stub)
+	existing := "[shared]\ntype = ftp\nhost = h\nuser = first\nuser = second\npass = SECRET\nexplicit_tls = true\n"
+	writeExistingConfig(t, stub.configFile, existing)
+
+	out, errText, code := runAllod(t, "site", "config", "update", "user")
+	if code != 1 || !strings.Contains(errText, "more than one user key") {
+		t.Errorf("exit=%d stdout=%q stderr=%q, want duplicate-user refusal", code, out, errText)
+	}
+	if got := readFile(t, stub.configFile); got != existing {
+		t.Errorf("ambiguous update modified the config: %q", got)
+	}
+	if stub.askCalls != 0 || len(stub.fieldCalls) != 0 {
+		t.Errorf("ambiguous update prompted: full=%d fields=%v", stub.askCalls, stub.fieldCalls)
+	}
+}
+
 // A configuration with other remotes but no 'shared' is appended to, not
 // refused and not replaced.
 func TestSiteConfigAppendsToAnExistingFile(t *testing.T) {
@@ -305,6 +512,58 @@ func TestSiteConfigUsesExplicitPathWithoutResolvingRcloneDefault(t *testing.T) {
 	}
 	if !strings.Contains(out, "Config: "+namedPath+"\n") {
 		t.Errorf("stdout does not report the named path\ngot: %q", out)
+	}
+	if !strings.Contains(out, "allod site check") || !strings.Contains(out, "Config path above with --config") {
+		t.Errorf("stdout does not give truthful named-config check advice\ngot: %q", out)
+	}
+}
+
+// The shared selector remains free-order around lifecycle subcommands. A
+// named update neither resolves nor touches rclone's default configuration.
+func TestSiteConfigUpdateUsesExplicitPathInEitherOrder(t *testing.T) {
+	orders := [][]string{
+		{"--config", "NAMED", "update", "user"},
+		{"update", "user", "--config=NAMED"},
+	}
+	for index, order := range orders {
+		t.Run(fmt.Sprintf("order %d", index+1), func(t *testing.T) {
+			stub := answeringStub(t)
+			useConfigStub(t, stub)
+			namedPath := filepath.Join(t.TempDir(), "selected rclone.conf")
+			writeExistingConfig(t, namedPath,
+				"[shared]\ntype = ftp\nhost = old.example\nuser = old-user\npass = OLD\nexplicit_tls = true\n")
+			args := []string{"site", "config"}
+			for _, arg := range order {
+				if arg == "NAMED" {
+					arg = namedPath
+				} else if arg == "--config=NAMED" {
+					arg = "--config=" + namedPath
+				}
+				args = append(args, arg)
+			}
+
+			out, errText, code := runAllod(t, args...)
+			if code != 0 {
+				t.Fatalf("exit code = %d, want 0\nstderr: %s", code, errText)
+			}
+			if !strings.Contains(readFile(t, namedPath), "user = "+testUser+"\n") {
+				t.Errorf("named config did not receive the update")
+			}
+			if _, err := os.Stat(stub.configFile); !os.IsNotExist(err) {
+				t.Errorf("default config was touched (err = %v)", err)
+			}
+			for _, call := range stub.runs {
+				if strings.Join(call.args, " ") == "config file" {
+					t.Errorf("named update resolved rclone's default: %+v", stub.runs)
+				}
+			}
+			if len(stub.fieldCalls) != 1 || stub.fieldCalls[0] != remoteConfigUser {
+				t.Errorf("field prompts = %v, want [user]", stub.fieldCalls)
+			}
+			if !strings.Contains(out, "Config: "+namedPath+"\n") || !strings.Contains(out, "Config path above with --config") {
+				t.Errorf("stdout loses named-path check guidance: %q", out)
+			}
+		})
 	}
 }
 
@@ -368,7 +627,7 @@ func TestSiteConfigTreatsSymlinkAsReadOnly(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "generation-1.conf")
 	selected := filepath.Join(dir, "active.conf")
-	existing := "[shared]\ntype = ftp\npass = activation-owned\n"
+	existing := "[shared]\ntype = ftp\nhost = activation.example\nuser = activation-user\npass = activation-owned\nexplicit_tls = true\n"
 	writeExistingConfig(t, target, existing)
 	if err := os.Symlink(target, selected); err != nil {
 		t.Fatalf("could not create config symlink: %v", err)
@@ -377,12 +636,33 @@ func TestSiteConfigTreatsSymlinkAsReadOnly(t *testing.T) {
 	if got, err := readRcloneConfig(selected); err != nil || got != existing {
 		t.Fatalf("read-only config access through symlink = %q, %v", got, err)
 	}
-	_, errText, code := runAllod(t, "site", "config", "--config", selected, "--force")
-	if code != 1 || !strings.Contains(errText, "symbolic links are read-only") {
-		t.Errorf("symlink refusal: code=%d stderr=%q", code, errText)
+	out, errText, code := runAllod(t, "site", "config", "show", "--config", selected)
+	if code != 0 || errText != "" {
+		t.Fatalf("show through activation symlink: code=%d stderr=%q", code, errText)
 	}
-	if stub.askCalls != 0 {
-		t.Errorf("the operator was asked %d times before the symlink refusal, want 0", stub.askCalls)
+	for _, want := range []string{"Config: " + selected, "Type: ftp", "Host: activation.example", "User: activation-user"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("safe symlink inspection does not contain %q: %q", want, out)
+		}
+	}
+	if strings.Contains(out, "activation-owned") {
+		t.Errorf("symlink inspection prints the obscured password: %q", out)
+	}
+
+	mutations := [][]string{
+		{"site", "config", "--config", selected},
+		{"site", "config", "replace", "--config", selected},
+		{"site", "config", "--config", selected, "--force"},
+		{"site", "config", "update", "user", "--config", selected},
+	}
+	for _, args := range mutations {
+		_, errText, code = runAllod(t, args...)
+		if code != 1 || !strings.Contains(errText, "symbolic links are read-only") {
+			t.Errorf("%v symlink refusal: code=%d stderr=%q", args[2:], code, errText)
+		}
+	}
+	if stub.askCalls != 0 || len(stub.fieldCalls) != 0 {
+		t.Errorf("the operator was prompted before symlink refusals: full=%d fields=%v", stub.askCalls, stub.fieldCalls)
 	}
 	if info, err := os.Lstat(selected); err != nil || info.Mode()&os.ModeSymlink == 0 {
 		t.Errorf("selected path is no longer a symlink: info=%v err=%v", info, err)
@@ -409,21 +689,30 @@ func TestSiteConfigRefusesNonRegularFileBeforePrompting(t *testing.T) {
 		}},
 	}
 
+	mutations := [][]string{
+		{},
+		{"replace"},
+		{"update", "password"},
+	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			stub := answeringStub(t)
-			useConfigStub(t, stub)
-			path := filepath.Join(t.TempDir(), "rclone.conf")
-			test.setup(t, path)
+		for _, mutation := range mutations {
+			t.Run(test.name+" "+strings.Join(mutation, " "), func(t *testing.T) {
+				stub := answeringStub(t)
+				useConfigStub(t, stub)
+				path := filepath.Join(t.TempDir(), "rclone.conf")
+				test.setup(t, path)
+				args := append([]string{"site", "config"}, mutation...)
+				args = append(args, "--config", path)
 
-			_, errText, code := runAllod(t, "site", "config", "--config", path, "--force")
-			if code != 1 || !strings.Contains(errText, "not a regular file") {
-				t.Errorf("non-regular refusal: code=%d stderr=%q", code, errText)
-			}
-			if stub.askCalls != 0 {
-				t.Errorf("the operator was asked %d times before the refusal, want 0", stub.askCalls)
-			}
-		})
+				_, errText, code := runAllod(t, args...)
+				if code != 1 || !strings.Contains(errText, "not a regular file") {
+					t.Errorf("non-regular refusal: code=%d stderr=%q", code, errText)
+				}
+				if stub.askCalls != 0 || len(stub.fieldCalls) != 0 {
+					t.Errorf("the operator was prompted before refusal: full=%d fields=%v", stub.askCalls, stub.fieldCalls)
+				}
+			})
+		}
 	}
 }
 
@@ -503,6 +792,26 @@ func TestSiteConfigFallsBackToTheXDGPath(t *testing.T) {
 	}
 }
 
+func TestSiteConfigRejectsUnsafeResolvedPathWithoutPrintingIt(t *testing.T) {
+	stub := answeringStub(t)
+	stub.configFile = "/tmp/rclone\x1b[2JFORGED.conf"
+	useConfigStub(t, stub)
+
+	out, errText, code := runAllod(t, "site", "config", "show")
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	if out != "" || !strings.Contains(errText, "rclone returned an unusable path") {
+		t.Errorf("stdout=%q stderr=%q, want safe resolved-path refusal", out, errText)
+	}
+	if strings.Contains(errText, "\x1b") || strings.Contains(errText, "FORGED") {
+		t.Errorf("stderr prints the unsafe path: %q", errText)
+	}
+	if stub.askCalls != 0 || len(stub.fieldCalls) != 0 {
+		t.Errorf("unsafe path prompted: full=%d fields=%v", stub.askCalls, stub.fieldCalls)
+	}
+}
+
 func TestLastNonBlankLine(t *testing.T) {
 	tests := map[string]string{
 		"Configuration file is stored at:\n/home/a/.config/rclone/rclone.conf": "/home/a/.config/rclone/rclone.conf",
@@ -532,6 +841,14 @@ func TestSiteConfigRejectsUnexpectedArguments(t *testing.T) {
 		{[]string{"site", "config", "--config="}, "--config requires a non-empty path for site config"},
 		{[]string{"site", "config", "--config=/run/credential\nallod: forged"}, "--config path must be one line"},
 		{[]string{"site", "config", "--config", "/one", "--config", "/two"}, "--config may only be specified once"},
+		{[]string{"site", "config", "update"}, "requires exactly one field"},
+		{[]string{"site", "config", "update", "port"}, "unknown field"},
+		{[]string{"site", "config", "update", "user", "password"}, "takes one field"},
+		{[]string{"site", "config", "show", "user"}, "unexpected argument for site config show"},
+		{[]string{"site", "config", "replace", "user"}, "unexpected argument for site config replace"},
+		{[]string{"site", "config", "replace", "--force"}, "--force cannot be combined"},
+		{[]string{"site", "config", "show", "--force"}, "--force cannot be combined"},
+		{[]string{"site", "config", "--force", "--force"}, "--force may only be specified once"},
 	}
 	for _, test := range tests {
 		t.Run(strings.Join(test.args[2:], " "), func(t *testing.T) {

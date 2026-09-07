@@ -52,8 +52,26 @@ const (
 // may read past the line it returns, and a second reader would lose whatever
 // the first one had buffered, which is how a pasted password disappears.
 var (
-	siteRun = runCapture
-	siteAsk = askRemoteCredentials
+	siteRun      = runCapture
+	siteAsk      = askRemoteCredentials
+	siteAskField = askRemoteCredentialField
+)
+
+type remoteConfigOperation uint8
+
+const (
+	remoteConfigCreate remoteConfigOperation = iota
+	remoteConfigShow
+	remoteConfigUpdate
+	remoteConfigReplace
+)
+
+type remoteConfigField string
+
+const (
+	remoteConfigHost     remoteConfigField = "host"
+	remoteConfigUser     remoteConfigField = "user"
+	remoteConfigPassword remoteConfigField = "password"
 )
 
 // rcloneConfigSelection is the one config-file selector shared by every site
@@ -144,8 +162,9 @@ func (selection rcloneConfigSelection) requireReadable() error {
 }
 
 func siteConfigure(args []string) {
-	force := false
+	force, forceSeen := false, false
 	var configSelection rcloneConfigSelection
+	var positionals []string
 	for len(args) > 0 {
 		if rest, consumed := configSelection.consume(args, "config"); consumed {
 			args = rest
@@ -153,19 +172,57 @@ func siteConfigure(args []string) {
 		}
 		switch args[0] {
 		case "--force":
+			if forceSeen {
+				die(1, "--force may only be specified once for site config")
+			}
+			forceSeen = true
 			force, args = true, args[1:]
 		case "-h", "--help":
 			fmt.Fprint(stdout, siteUsageText)
 			return
 		default:
-			// Nothing on the command line names the remote, its type, or its
-			// TLS setting. A deploy targets 'shared' and nothing else, so a
-			// remote under any other name would be one nothing ever reads.
 			if strings.HasPrefix(args[0], "-") {
 				die(1, "unknown option for site config: %s", args[0])
 			}
-			die(1, "unexpected argument for site config: %s", args[0])
+			positionals = append(positionals, args[0])
+			args = args[1:]
 		}
+	}
+
+	operation, field := remoteConfigCreate, remoteConfigField("")
+	if len(positionals) > 0 {
+		switch positionals[0] {
+		case "show":
+			operation = remoteConfigShow
+			if len(positionals) != 1 {
+				die(1, "unexpected argument for site config show: %s", positionals[1])
+			}
+		case "replace":
+			operation = remoteConfigReplace
+			if len(positionals) != 1 {
+				die(1, "unexpected argument for site config replace: %s", positionals[1])
+			}
+		case "update":
+			operation = remoteConfigUpdate
+			if len(positionals) < 2 {
+				die(1, "site config update requires exactly one field: host, user, or password")
+			}
+			if len(positionals) > 2 {
+				die(1, "site config update takes one field, not %q and %q", positionals[1], positionals[2])
+			}
+			field = remoteConfigField(positionals[1])
+			if field != remoteConfigHost && field != remoteConfigUser && field != remoteConfigPassword {
+				die(1, "unknown field for site config update: %s; expected host, user, or password", field)
+			}
+		default:
+			die(1, "unexpected argument for site config: %s", positionals[0])
+		}
+	}
+	if force {
+		if operation != remoteConfigCreate {
+			die(1, "--force cannot be combined with a site config action; use 'site config replace' by itself")
+		}
+		operation = remoteConfigReplace
 	}
 
 	if _, err := exec.LookPath("rclone"); err != nil {
@@ -176,19 +233,50 @@ func siteConfigure(args []string) {
 	if err != nil {
 		die(1, "could not determine where rclone keeps its configuration: %s", err)
 	}
-	existing, err := readRcloneConfigForUpdate(path)
+	if !validConfigValue(path) {
+		die(1, "could not determine where rclone keeps its configuration: rclone returned an unusable path")
+	}
+	var existing string
+	if operation == remoteConfigShow {
+		existing, err = readRcloneConfig(path)
+	} else {
+		existing, err = readRcloneConfigForUpdate(path)
+	}
 	if err != nil {
-		if errors.Is(err, errRcloneConfigSymlink) || errors.Is(err, errRcloneConfigNotRegular) {
+		if operation != remoteConfigShow && (errors.Is(err, errRcloneConfigSymlink) || errors.Is(err, errRcloneConfigNotRegular)) {
 			die(1, "refusing to update %s: %s", path, err)
 		}
 		die(1, "could not read %s: %s", path, err)
 	}
+
+	switch operation {
+	case remoteConfigShow:
+		view, err := inspectRcloneRemote(existing, siteRemoteName)
+		if err != nil {
+			die(1, "could not inspect %s: %s", path, err)
+		}
+		fmt.Fprintf(stdout, "Config: %s\nRemote: %s\nType: %s\nHost: %s\nUser: %s\n",
+			path, siteRemoteName, view.kind, view.host, view.user)
+		return
+	case remoteConfigUpdate:
+		updated, err := updateRcloneRemote(existing, siteRemoteName, field)
+		if err != nil {
+			die(1, "could not update %s in %s: %s", field, path, err)
+		}
+		if err := writeRcloneConfig(path, updated); err != nil {
+			die(1, "could not write %s: %s", path, err)
+		}
+		fmt.Fprintf(stdout, "Updated: %s\nRemote: %s\nConfig: %s\n", field, siteRemoteName, path)
+		printSiteCheckAdvice(configSelection)
+		return
+	}
+
 	// Asked before the prompts rather than after them: nobody should type a
 	// password only to be told the command was never going to store it.
-	if hasStanza(existing, siteRemoteName) && !force {
+	if hasStanza(existing, siteRemoteName) && operation == remoteConfigCreate {
 		fmt.Fprintf(stderr, "allod: a '%s' rclone remote already exists in %s\n", siteRemoteName, path)
 		fmt.Fprintln(stderr, "allod: while resolving: whether to replace a credential that may be working")
-		fmt.Fprintln(stderr, "allod: to fix: rerun with --force to replace it, or leave it as it is")
+		fmt.Fprintln(stderr, "allod: to fix: update one field with 'allod site config update', replace all three with 'allod site config replace', or use the compatible --force spelling")
 		exit(1)
 	}
 
@@ -222,7 +310,170 @@ func siteConfigure(args []string) {
 	// Everything printed here is safe to read over a shoulder or paste into an
 	// issue. The password and its obscured form are not, and are not printed.
 	fmt.Fprintf(stdout, "Remote: %s\nType: ftp\nHost: %s\nUser: %s\nConfig: %s\n", siteRemoteName, host, user, path)
-	fmt.Fprintln(stdout, "The next deploy will check this remote before building.")
+	printSiteCheckAdvice(configSelection)
+}
+
+func printSiteCheckAdvice(selection rcloneConfigSelection) {
+	if selection.explicit {
+		fmt.Fprintln(stdout, "Check it with 'allod site check'; pass the Config path above with --config.")
+		return
+	}
+	fmt.Fprintln(stdout, "Check it with: allod site check")
+}
+
+type rcloneRemoteView struct {
+	kind string
+	host string
+	user string
+}
+
+type rcloneConfigEntry struct {
+	key        string
+	valueStart int
+	valueEnd   int
+}
+
+// rcloneRemoteEntries finds one stanza without normalising the file. Byte
+// offsets let a single-field update replace only the old value; comments,
+// spacing, line endings, unknown directives, and every other stanza survive.
+func rcloneRemoteEntries(text, name string) ([]rcloneConfigEntry, error) {
+	header := "[" + name + "]"
+	inRemote, remoteCount := false, 0
+	var entries []rcloneConfigEntry
+	for lineStart := 0; lineStart < len(text); {
+		lineEnd := strings.IndexByte(text[lineStart:], '\n')
+		if lineEnd < 0 {
+			lineEnd = len(text)
+		} else {
+			lineEnd += lineStart + 1
+		}
+		contentEnd := lineEnd
+		if contentEnd > lineStart && text[contentEnd-1] == '\n' {
+			contentEnd--
+		}
+		if contentEnd > lineStart && text[contentEnd-1] == '\r' {
+			contentEnd--
+		}
+		line := text[lineStart:contentEnd]
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") {
+			inRemote = trimmed == header
+			if inRemote {
+				remoteCount++
+				if remoteCount > 1 {
+					return nil, fmt.Errorf("more than one '%s' rclone remote is configured", name)
+				}
+			}
+			lineStart = lineEnd
+			continue
+		}
+		if inRemote && trimmed != "" && !strings.HasPrefix(trimmed, "#") && !strings.HasPrefix(trimmed, ";") {
+			if equals := strings.IndexByte(line, '='); equals >= 0 {
+				key := strings.TrimSpace(line[:equals])
+				valueStart, valueEnd := lineStart+equals+1, contentEnd
+				for valueStart < valueEnd && (text[valueStart] == ' ' || text[valueStart] == '\t') {
+					valueStart++
+				}
+				for valueEnd > valueStart && (text[valueEnd-1] == ' ' || text[valueEnd-1] == '\t') {
+					valueEnd--
+				}
+				entries = append(entries, rcloneConfigEntry{key: key, valueStart: valueStart, valueEnd: valueEnd})
+			}
+		}
+		lineStart = lineEnd
+	}
+	if remoteCount == 0 {
+		return nil, fmt.Errorf("no '%s' rclone remote is configured", name)
+	}
+	return entries, nil
+}
+
+func uniqueRcloneConfigEntry(entries []rcloneConfigEntry, name, key string) (rcloneConfigEntry, error) {
+	var found rcloneConfigEntry
+	count := 0
+	for _, entry := range entries {
+		if entry.key == key {
+			found, count = entry, count+1
+		}
+	}
+	if count == 0 {
+		return rcloneConfigEntry{}, fmt.Errorf("the '%s' remote has no %s key", name, key)
+	}
+	if count > 1 {
+		return rcloneConfigEntry{}, fmt.Errorf("the '%s' remote has more than one %s key", name, key)
+	}
+	return found, nil
+}
+
+// inspectRcloneRemote validates every key the credential stanza needs before
+// choosing values to print. In particular, duplicate keys fail loud rather
+// than showing one value while rclone might use another. The password is
+// checked for presence but is never returned to a caller.
+func inspectRcloneRemote(text, name string) (rcloneRemoteView, error) {
+	entries, err := rcloneRemoteEntries(text, name)
+	if err != nil {
+		return rcloneRemoteView{}, err
+	}
+	values := make(map[string]string, 3)
+	explicitTLS := ""
+	for _, key := range []string{"type", "host", "user", "pass", "explicit_tls"} {
+		entry, err := uniqueRcloneConfigEntry(entries, name, key)
+		if err != nil {
+			return rcloneRemoteView{}, err
+		}
+		value := text[entry.valueStart:entry.valueEnd]
+		if !validConfigValue(value) {
+			return rcloneRemoteView{}, fmt.Errorf("the '%s' remote has an unusable %s value", name, key)
+		}
+		switch key {
+		case "type", "host", "user":
+			values[key] = value
+		case "explicit_tls":
+			explicitTLS = value
+		}
+	}
+	if values["type"] != "ftp" {
+		return rcloneRemoteView{}, fmt.Errorf("the '%s' remote is not an FTP remote", name)
+	}
+	if explicitTLS != "true" {
+		return rcloneRemoteView{}, fmt.Errorf("the '%s' remote does not require explicit TLS", name)
+	}
+	return rcloneRemoteView{kind: values["type"], host: values["host"], user: values["user"]}, nil
+}
+
+func updateRcloneRemote(text, name string, field remoteConfigField) (string, error) {
+	entries, err := rcloneRemoteEntries(text, name)
+	if err != nil {
+		return "", err
+	}
+	key := string(field)
+	if field == remoteConfigPassword {
+		key = "pass"
+	}
+	entry, err := uniqueRcloneConfigEntry(entries, name, key)
+	if err != nil {
+		return "", err
+	}
+
+	value, err := siteAskField(field)
+	if err != nil {
+		return "", fmt.Errorf("could not read the answer: %w", err)
+	}
+	switch field {
+	case remoteConfigHost, remoteConfigUser:
+		if !validConfigValue(value) {
+			return "", fmt.Errorf("the %s must be one line of printable text", field)
+		}
+	case remoteConfigPassword:
+		if value == "" {
+			return "", errors.New("the password must not be empty")
+		}
+		value, err = obscurePassword(value)
+		if err != nil {
+			return "", fmt.Errorf("could not obscure the password: %w", err)
+		}
+	}
+	return text[:entry.valueStart] + value + text[entry.valueEnd:], nil
 }
 
 // runCapture runs a command with input on its stdin and returns its trimmed
@@ -548,6 +799,30 @@ func askRemoteCredentials() (host, user, password string, err error) {
 		return "", "", "", err
 	}
 	return host, user, password, nil
+}
+
+// askRemoteCredentialField opens the controlling terminal once and asks only
+// for the value selected on the command line. Password rotation uses the same
+// no-echo path as initial configuration; host and user remain visible so an
+// operator can catch a typo before pressing Return.
+func askRemoteCredentialField(field remoteConfigField) (string, error) {
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return "", fmt.Errorf("no terminal to ask on: %w", err)
+	}
+	defer tty.Close()
+	reader := bufio.NewReader(tty)
+
+	switch field {
+	case remoteConfigHost:
+		return askLine(tty, reader, "FTP host: ")
+	case remoteConfigUser:
+		return askLine(tty, reader, "FTP user: ")
+	case remoteConfigPassword:
+		return askSecret(tty, reader, "FTP password: ")
+	default:
+		return "", fmt.Errorf("unknown credential field %q", field)
+	}
 }
 
 func askLine(tty *os.File, reader *bufio.Reader, prompt string) (string, error) {
