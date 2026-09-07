@@ -70,7 +70,9 @@ type rcloneConfigSelection struct {
 
 // consume parses the shared --config option at the front of args. It accepts
 // both conventional spellings, leaves every other argument for the command's
-// own parser, and refuses ambiguity from naming the option twice.
+// own parser, and refuses ambiguity from naming the option twice. A separated
+// value may not look like another option: --config=<path> is the unambiguous
+// spelling for the unusual case where a relative path begins with a dash.
 func (selection *rcloneConfigSelection) consume(args []string, command string) ([]string, bool) {
 	if len(args) == 0 {
 		return args, false
@@ -81,6 +83,9 @@ func (selection *rcloneConfigSelection) consume(args []string, command string) (
 	case args[0] == "--config":
 		if len(args) < 2 {
 			die(1, "--config requires a path for site %s", command)
+		}
+		if strings.HasPrefix(args[1], "-") {
+			die(1, "--config requires a path for site %s; use --config=<path> when the path begins with '-'", command)
 		}
 		path, args = args[1], args[2:]
 	case strings.HasPrefix(args[0], "--config="):
@@ -124,20 +129,14 @@ func rcloneArgs(configPath string, args ...string) []string {
 // requireReadable checks a declaratively supplied config before a deploy does
 // any expensive work. It opens rather than reads the file: that proves the
 // caller can read it without bringing a plaintext-equivalent credential into
-// this process. Non-regular files are refused so a FIFO cannot block the
-// preflight and a directory cannot reach rclone as if it were a config file.
+// this process. The nonblocking opener follows a final symlink so an
+// activation-managed path can point at a regular credential, but refuses the
+// FIFO or other non-regular target that could otherwise block this process.
 func (selection rcloneConfigSelection) requireReadable() error {
 	if !selection.explicit {
 		return nil
 	}
-	info, err := os.Stat(selection.path)
-	if err != nil {
-		return err
-	}
-	if !info.Mode().IsRegular() {
-		return errors.New("not a regular file")
-	}
-	file, err := os.Open(selection.path)
+	file, err := openReadableRcloneConfig(selection.path)
 	if err != nil {
 		return err
 	}
@@ -177,8 +176,11 @@ func siteConfigure(args []string) {
 	if err != nil {
 		die(1, "could not determine where rclone keeps its configuration: %s", err)
 	}
-	existing, err := readRcloneConfig(path)
+	existing, err := readRcloneConfigForUpdate(path)
 	if err != nil {
+		if errors.Is(err, errRcloneConfigSymlink) || errors.Is(err, errRcloneConfigNotRegular) {
+			die(1, "refusing to update %s: %s", path, err)
+		}
 		die(1, "could not read %s: %s", path, err)
 	}
 	// Asked before the prompts rather than after them: nobody should type a
@@ -329,19 +331,104 @@ func lastNonBlankLine(text string) string {
 	return ""
 }
 
-// readRcloneConfig returns the current contents of the configuration file, or
-// the empty string if there is none yet. Any other failure is an error: a
-// configuration that exists but cannot be read must not be replaced by one
-// holding a single remote, because the ones it holds are not recoverable.
+var (
+	errRcloneConfigNotRegular = errors.New("not a regular file")
+	errRcloneConfigSymlink    = errors.New("symbolic links are read-only; refusing to replace one")
+)
+
+// openReadableRcloneConfig is the read-only contract shared by deploy and
+// credential inspection. O_NONBLOCK keeps a FIFO from hanging the command;
+// checking the opened descriptor closes the stat/open race. A final symlink is
+// followed deliberately so activation can point a stable name at a regular,
+// generation-specific credential.
+func openReadableRcloneConfig(path string) (*os.File, error) {
+	return openRegularRcloneConfig(path, false)
+}
+
+// openMutableRcloneConfig is the update contract. A symlink is a read-only
+// source: atomically replacing its directory entry would silently sever it
+// from the activation-managed target. Missing paths are handled by the caller.
+func openMutableRcloneConfig(path string) (*os.File, error) {
+	return openRegularRcloneConfig(path, true)
+}
+
+func openRegularRcloneConfig(path string, noFollow bool) (*os.File, error) {
+	flags := os.O_RDONLY | syscall.O_NONBLOCK
+	if noFollow {
+		flags |= syscall.O_NOFOLLOW
+	}
+	file, err := os.OpenFile(path, flags, 0)
+	if err != nil {
+		if noFollow && errors.Is(err, syscall.ELOOP) {
+			return nil, errRcloneConfigSymlink
+		}
+		return nil, err
+	}
+	info, statErr := file.Stat()
+	if statErr != nil {
+		_ = file.Close()
+		return nil, statErr
+	}
+	if !info.Mode().IsRegular() {
+		_ = file.Close()
+		return nil, errRcloneConfigNotRegular
+	}
+	return file, nil
+}
+
+// readRcloneConfig is the read-only lifecycle helper. It follows a final
+// symlink to a regular file and reports a missing path, which lets a future
+// 'show' command distinguish an absent configuration from an empty one.
 func readRcloneConfig(path string) (string, error) {
-	data, err := os.ReadFile(path)
+	return readOpenedRcloneConfig(path, openReadableRcloneConfig)
+}
+
+// readRcloneConfigForUpdate reads only a regular file owned by this path. A
+// missing path is an empty starting point because 'site config' may create it;
+// symlinks and other existing file types are refused before any prompt.
+func readRcloneConfigForUpdate(path string) (string, error) {
+	text, err := readOpenedRcloneConfig(path, openMutableRcloneConfig)
 	if errors.Is(err, os.ErrNotExist) {
 		return "", nil
 	}
+	return text, err
+}
+
+func readOpenedRcloneConfig(path string, open func(string) (*os.File, error)) (string, error) {
+	file, err := open(path)
 	if err != nil {
 		return "", err
 	}
+	data, readErr := io.ReadAll(file)
+	closeErr := file.Close()
+	if readErr != nil {
+		return "", readErr
+	}
+	if closeErr != nil {
+		return "", closeErr
+	}
 	return string(data), nil
+}
+
+// requireMutableRcloneConfigPath protects the atomic writer as well as its
+// callers. Site config opens the path through openMutableRcloneConfig before
+// prompting; the writer checks again before creating its temporary file and
+// immediately before rename so later replacements are refused too.
+func requireMutableRcloneConfigPath(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return errRcloneConfigSymlink
+	}
+	if !info.Mode().IsRegular() {
+		return errRcloneConfigNotRegular
+	}
+	return nil
 }
 
 // writeRcloneConfig replaces the configuration file atomically: a temporary
@@ -349,6 +436,9 @@ func readRcloneConfig(path string) (string, error) {
 // a machine that has lost every remote it had, and truncating in place makes
 // that the outcome of any interruption.
 func writeRcloneConfig(path, text string) error {
+	if err := requireMutableRcloneConfigPath(path); err != nil {
+		return err
+	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, rcloneConfigDirMode); err != nil {
 		return err
@@ -370,6 +460,9 @@ func writeRcloneConfig(path, text string) error {
 	// os.CreateTemp already creates the file at 0600; this says so out loud,
 	// and fixes the mode of a file rclone or an operator left wider.
 	if err := os.Chmod(name, rcloneConfigFileMode); err != nil {
+		return err
+	}
+	if err := requireMutableRcloneConfigPath(path); err != nil {
 		return err
 	}
 	return os.Rename(name, path)

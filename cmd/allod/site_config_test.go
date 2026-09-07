@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -307,6 +308,23 @@ func TestSiteConfigUsesExplicitPathWithoutResolvingRcloneDefault(t *testing.T) {
 	}
 }
 
+func TestSiteConfigLeadingDashPathUsesEqualsSpelling(t *testing.T) {
+	stub := answeringStub(t)
+	useConfigStub(t, stub)
+	t.Chdir(t.TempDir())
+
+	out, errText, code := runAllod(t, "site", "config", "--config=-runtime.conf")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0\nstderr: %s", code, errText)
+	}
+	if !strings.Contains(readFile(t, "-runtime.conf"), "[shared]\n") {
+		t.Error("leading-dash config path does not hold the remote")
+	}
+	if !strings.Contains(out, "Config: -runtime.conf\n") {
+		t.Errorf("stdout does not report the leading-dash path: %q", out)
+	}
+}
+
 func TestSiteConfigRejectsUnreadableNamedFileBeforePrompting(t *testing.T) {
 	stub := answeringStub(t)
 	useConfigStub(t, stub)
@@ -339,6 +357,107 @@ func TestSiteConfigRejectsUnreadableNamedFileBeforePrompting(t *testing.T) {
 		if strings.Join(call.args, " ") == "config file" || strings.Join(call.args, " ") == "obscure -" {
 			t.Errorf("rclone ran before the unreadable-file refusal: %+v", stub.runs)
 		}
+	}
+}
+
+// A symlink may be inspected but not mutated: replacing its directory entry
+// would sever an activation-managed name from its generation-specific target.
+func TestSiteConfigTreatsSymlinkAsReadOnly(t *testing.T) {
+	stub := answeringStub(t)
+	useConfigStub(t, stub)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "generation-1.conf")
+	selected := filepath.Join(dir, "active.conf")
+	existing := "[shared]\ntype = ftp\npass = activation-owned\n"
+	writeExistingConfig(t, target, existing)
+	if err := os.Symlink(target, selected); err != nil {
+		t.Fatalf("could not create config symlink: %v", err)
+	}
+
+	if got, err := readRcloneConfig(selected); err != nil || got != existing {
+		t.Fatalf("read-only config access through symlink = %q, %v", got, err)
+	}
+	_, errText, code := runAllod(t, "site", "config", "--config", selected, "--force")
+	if code != 1 || !strings.Contains(errText, "symbolic links are read-only") {
+		t.Errorf("symlink refusal: code=%d stderr=%q", code, errText)
+	}
+	if stub.askCalls != 0 {
+		t.Errorf("the operator was asked %d times before the symlink refusal, want 0", stub.askCalls)
+	}
+	if info, err := os.Lstat(selected); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("selected path is no longer a symlink: info=%v err=%v", info, err)
+	}
+	if got := readFile(t, target); got != existing {
+		t.Errorf("activation target changed to %q", got)
+	}
+}
+
+func TestSiteConfigRefusesNonRegularFileBeforePrompting(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, path string)
+	}{
+		{"directory", func(t *testing.T, path string) {
+			if err := os.Mkdir(path, 0700); err != nil {
+				t.Fatalf("could not create config directory: %v", err)
+			}
+		}},
+		{"FIFO", func(t *testing.T, path string) {
+			if err := syscall.Mkfifo(path, 0600); err != nil {
+				t.Fatalf("could not create config FIFO: %v", err)
+			}
+		}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stub := answeringStub(t)
+			useConfigStub(t, stub)
+			path := filepath.Join(t.TempDir(), "rclone.conf")
+			test.setup(t, path)
+
+			_, errText, code := runAllod(t, "site", "config", "--config", path, "--force")
+			if code != 1 || !strings.Contains(errText, "not a regular file") {
+				t.Errorf("non-regular refusal: code=%d stderr=%q", code, errText)
+			}
+			if stub.askCalls != 0 {
+				t.Errorf("the operator was asked %d times before the refusal, want 0", stub.askCalls)
+			}
+		})
+	}
+}
+
+// The writer repeats the type check after the prompts. A path that was missing
+// during preflight but becomes an activation symlink is refused, not renamed
+// over after the operator has supplied a password.
+func TestSiteConfigRefusesSymlinkIntroducedWhilePrompting(t *testing.T) {
+	stub := answeringStub(t)
+	useConfigStub(t, stub)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "generation-1.conf")
+	selected := filepath.Join(dir, "active.conf")
+	existing := "[shared]\npass = activation-owned\n"
+	writeExistingConfig(t, target, existing)
+	siteAsk = func() (string, string, string, error) {
+		stub.askCalls++
+		if err := os.Symlink(target, selected); err != nil {
+			t.Fatalf("could not rotate selected path during prompt: %v", err)
+		}
+		return stub.host, stub.user, stub.password, nil
+	}
+
+	_, errText, code := runAllod(t, "site", "config", "--config", selected)
+	if code != 1 || !strings.Contains(errText, "symbolic links are read-only") {
+		t.Errorf("rotated-path refusal: code=%d stderr=%q", code, errText)
+	}
+	if stub.askCalls != 1 {
+		t.Errorf("answers requested %d times, want 1", stub.askCalls)
+	}
+	if info, err := os.Lstat(selected); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("selected path is no longer a symlink: info=%v err=%v", info, err)
+	}
+	if got := readFile(t, target); got != existing {
+		t.Errorf("activation target changed to %q", got)
 	}
 }
 
@@ -409,6 +528,7 @@ func TestSiteConfigRejectsUnexpectedArguments(t *testing.T) {
 		{[]string{"site", "config", "--remote", "other"}, "unknown option for site config"},
 		{[]string{"site", "config", "shared"}, "unexpected argument for site config"},
 		{[]string{"site", "config", "--config"}, "--config requires a path for site config"},
+		{[]string{"site", "config", "--config", "--force"}, "use --config=<path> when the path begins with '-'"},
 		{[]string{"site", "config", "--config="}, "--config requires a non-empty path for site config"},
 		{[]string{"site", "config", "--config=/run/credential\nallod: forged"}, "--config path must be one line"},
 		{[]string{"site", "config", "--config", "/one", "--config", "/two"}, "--config may only be specified once"},

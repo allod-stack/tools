@@ -615,15 +615,18 @@ once per machine; deploy never handles a credential, and checks that the remote
 can authenticate before it starts the build rather than discovering a rejected
 login afterwards.
 
-'--config <path>' selects one rclone configuration file for either command. An
+'--config <path>' selects one rclone configuration path for either command. An
 explicit path takes precedence over RCLONE_CONFIG, rclone's reported path,
-XDG_CONFIG_HOME, and HOME. Deploy requires the named path to be an existing,
-readable regular file before it builds, and passes it to every rclone call.
-Config may create a missing named file and writes it at mode 0600. Without the
-flag, deploy leaves resolution entirely to rclone and config keeps asking
-rclone for its configuration file before falling back to the XDG/HOME default.
-The hosting config is machine-wide; it does not belong in site.toml or a site
-repository.
+XDG_CONFIG_HOME, and HOME. A path beginning with '-' uses --config=<path> so it
+cannot be mistaken for another option. Deploy accepts a readable regular file
+or a symlink to one and passes the same path to the preflight and sync. Rclone
+opens it separately for those calls, so activation or rotation during the build
+can make sync read newer contents than the preflight checked. Config may create
+a missing path and atomically replace a regular file at mode 0600, but refuses
+to replace a symlink or any other file type. Without the flag, deploy leaves
+resolution entirely to rclone and config keeps asking rclone for its
+configuration file before falling back to the XDG/HOME default. The hosting
+config is machine-wide; it does not belong in site.toml or a site repository.
 
 The docroot is derived from the 'domain' key in site.toml and from nothing
 else. No flag, argument, or environment variable can point a deploy at another
