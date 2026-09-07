@@ -30,6 +30,8 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"unicode"
+	"unicode/utf8"
 	"unsafe"
 )
 
@@ -506,7 +508,9 @@ func obscurePassword(password string) (string, error) {
 	if status != 0 {
 		return "", fmt.Errorf("'rclone obscure -' exited %d", status)
 	}
-	obscured = strings.TrimSpace(obscured)
+	// Only the line ending belongs to command framing. Trimming every Unicode
+	// space here would erase C1 or separator sabotage before validation.
+	obscured = strings.TrimRight(obscured, "\r\n")
 	if obscured == "" {
 		return "", errors.New("'rclone obscure -' printed nothing")
 	}
@@ -525,15 +529,16 @@ func remoteStanza(host, user, obscured string) string {
 		siteRemoteName, host, user, obscured)
 }
 
-// validConfigValue rejects anything that could not be one rclone config value:
-// an empty answer, and any control character. See the call sites for why a
-// newline in particular has to be refused rather than escaped.
+// validConfigValue rejects anything that could not be one printable rclone
+// config value: empty or malformed UTF-8, Unicode control characters, and the
+// line and paragraph separators that terminals can render as forged lines.
+// Ordinary printable Unicode remains valid for paths, hosts, and user names.
 func validConfigValue(value string) bool {
-	if value == "" {
+	if value == "" || !utf8.ValidString(value) {
 		return false
 	}
 	for _, r := range value {
-		if r < 0x20 || r == 0x7f {
+		if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' {
 			return false
 		}
 	}
