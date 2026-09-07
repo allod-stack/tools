@@ -593,10 +593,14 @@ func reportSiteRemoteFailure(result siteRemoteCheckResult, configPath string) {
 			fmt.Fprintf(stderr, "allod: the selected rclone configuration %q is unreadable; check that path and its permissions\n", configPath)
 		}
 	case siteRemoteCredentialRejected:
-		if configPath == "" {
+		if selectedConfigIsSymlink(configPath) {
+			if configPath == "" {
+				fmt.Fprintf(stderr, "allod: the stored username or password for '%s' was rejected; update the source credential behind rclone's read-only configuration symlink, then run 'allod site check' again\n", siteRemoteName)
+			} else {
+				fmt.Fprintf(stderr, "allod: the stored username or password for '%s' in %q was rejected; update the source credential behind that read-only symlink, then run 'allod site check' again with the same --config path\n", siteRemoteName, configPath)
+			}
+		} else if configPath == "" {
 			fmt.Fprintf(stderr, "allod: the stored username or password for '%s' was rejected; run 'allod site config update user' or 'allod site config update password'\n", siteRemoteName)
-		} else if selectedConfigIsSymlink(configPath) {
-			fmt.Fprintf(stderr, "allod: the stored username or password for '%s' in %q was rejected; update the source credential behind that read-only symlink, then run 'allod site check' again with the same --config path\n", siteRemoteName, configPath)
 		} else {
 			fmt.Fprintf(stderr, "allod: the stored username or password for '%s' in %q was rejected; run 'allod site config update user' or 'allod site config update password' with that same --config path\n", siteRemoteName, configPath)
 		}
@@ -611,7 +615,20 @@ func reportSiteRemoteFailure(result siteRemoteCheckResult, configPath string) {
 	}
 }
 
+// selectedConfigIsSymlink resolves only enough of rclone's implicit precedence
+// to choose truthful recovery wording. The path itself stays out of output:
+// RCLONE_CONFIG may name an identity-bearing activation credential.
 func selectedConfigIsSymlink(configPath string) bool {
+	if configPath == "" {
+		configPath = os.Getenv("RCLONE_CONFIG")
+		if configPath == "" {
+			var err error
+			configPath, err = defaultRcloneConfigPath()
+			if err != nil {
+				return false
+			}
+		}
+	}
 	info, err := os.Lstat(configPath)
 	return err == nil && info.Mode()&os.ModeSymlink != 0
 }

@@ -329,6 +329,69 @@ func TestSiteCheckRejectedSymlinkPointsToItsSourceCredential(t *testing.T) {
 	}
 }
 
+func TestSiteCheckRejectedDefaultSymlinkPointsToItsSourceCredential(t *testing.T) {
+	tests := []struct {
+		name     string
+		selected func(t *testing.T) string
+	}{
+		{
+			"RCLONE_CONFIG",
+			func(t *testing.T) string {
+				path := filepath.Join(t.TempDir(), "active.conf")
+				t.Setenv("RCLONE_CONFIG", path)
+				return path
+			},
+		},
+		{
+			"XDG default",
+			func(t *testing.T) string {
+				base := t.TempDir()
+				t.Setenv("RCLONE_CONFIG", "")
+				t.Setenv("XDG_CONFIG_HOME", base)
+				path := filepath.Join(base, "rclone", "rclone.conf")
+				if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+					t.Fatalf("could not create default config directory: %v", err)
+				}
+				return path
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stub := &deployStub{remoteResult: siteRemoteCheckResult{problem: siteRemoteCredentialRejected, status: 4}}
+			useDeployStub(t, stub)
+			selected := test.selected(t)
+			target := filepath.Join(t.TempDir(), "generation-1.conf")
+			writeExistingConfig(t, target, "[shared]\npass = NEVER-PRINT-THIS\n")
+			if err := os.Symlink(target, selected); err != nil {
+				t.Fatalf("could not create default config symlink: %v", err)
+			}
+
+			out, errText, code := runAllod(t, "site", "check")
+			if code != 4 || out != "" {
+				t.Errorf("rejected default symlink: exit=%d stdout=%q stderr=%q", code, out, errText)
+			}
+			for _, want := range []string{"source credential behind rclone's read-only configuration symlink", "allod site check"} {
+				if !strings.Contains(errText, want) {
+					t.Errorf("default-symlink remedy does not contain %q: %q", want, errText)
+				}
+			}
+			for _, refused := range []string{"site config update", "--config", selected, "NEVER-PRINT-THIS"} {
+				if strings.Contains(out+errText, refused) {
+					t.Errorf("default-symlink remedy contains %q: stdout=%q stderr=%q", refused, out, errText)
+				}
+			}
+			if stub.remoteCalls != 1 || stub.remoteConfigPath != "" {
+				t.Errorf("remote check calls=%d config=%q, want one implicit-config probe", stub.remoteCalls, stub.remoteConfigPath)
+			}
+			if stub.buildCalls != 0 || stub.syncCalls != 0 || stub.verifyCalls != 0 {
+				t.Errorf("failed default-symlink check had deploy effects: build=%d sync=%d verify=%d", stub.buildCalls, stub.syncCalls, stub.verifyCalls)
+			}
+		})
+	}
+}
+
 func TestSiteCheckRejectsUnexpectedArguments(t *testing.T) {
 	for _, args := range [][]string{
 		{"site", "check", "shared"},
