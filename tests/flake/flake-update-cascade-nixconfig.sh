@@ -95,6 +95,9 @@ case "$*" in
   "diff --quiet"|"diff --cached --quiet"|"pull")
     exit 0
     ;;
+  "remote get-url origin")
+    printf 'ssh://git@forge.anarch.diy:2222/acme/app.git\n'
+    ;;
   "rev-parse @{u}")
     printf 'origin/master\n'
     ;;

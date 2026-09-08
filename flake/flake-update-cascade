@@ -145,13 +145,31 @@ repo_forge_name() {
 }
 
 ACTIVE_PR_FILE="${HOME}/.config/git/active-pr-branches"
+ALLOWED_EXTERNAL_REMOTES_FILE="${HOME}/.config/git/allowed-external-remotes"
+
+# The push boundary, the same rule git-hooks/protected-refs-policy enforces on
+# push: the forge is always allowed, anything else needs a substring pattern in
+# allowed-external-remotes. The hook stops a push; this stops the cascade from
+# pulling, updating or committing such a repository at all, in every mode. A
+# workspace can hold a third-party checkout whose origin nobody here should
+# publish to, and "skip" is the only safe answer for it.
+remote_is_allowed() {
+  local remote_url="$1" pattern
+  case "$remote_url" in *forge.anarch.diy*) return 0 ;; esac
+  [[ -r "$ALLOWED_EXTERNAL_REMOTES_FILE" ]] || return 1
+  while IFS= read -r pattern; do
+    case "$pattern" in \#*|"") continue ;; esac
+    case "$remote_url" in *"$pattern"*) return 0 ;; esac
+  done < "$ALLOWED_EXTERNAL_REMOTES_FILE"
+  return 1
+}
 PROTECTED_BRANCHES_FILE="${HOME}/.config/git/protected-branches"
 printf -v INPUT_LABEL '%s, ' "${INPUT_NAMES[@]}"
 INPUT_LABEL="${INPUT_LABEL%, }"
 INPUT_SLUG=$(IFS=-; echo "${INPUT_NAMES[*]}")
 
 run_combined_cycle() {
-  local repo dir default_branch current_branch unpushed
+  local repo dir default_branch current_branch unpushed remote_url
   local repo_errors status repo_slug lock_fd_file tmp_lock old_lock
   local old_rev new_rev pr_branch forge_repo existing_pr pr_url input_path
   local changed
@@ -163,6 +181,8 @@ run_combined_cycle() {
   # Status values:
   #   skip:silent     — dir does not exist (no output)
   #   skip:no-lock    — no flake.lock found
+  #   skip:no-origin  — no origin remote
+  #   skip:external-remote — origin outside the push boundary (every mode)
   #   skip:no-input   — no requested input has a reachable direct pin
   #   skip:active-pr  — listed in active-pr-branches (GPG required)
   #   skip:protected  — default branch is protected (direct mode only)
@@ -172,6 +192,7 @@ run_combined_cycle() {
   local -A REPO_STATUS=()
   local -A REPO_ERROR_MSG=()
   local -A REPO_INPUT_PATHS=()
+  local -A REPO_REMOTE=()
   local -a ERROR_REPOS=()
 
   for repo in "${REPOS[@]}"; do
@@ -186,6 +207,20 @@ run_combined_cycle() {
     # Step 2: Flake check
     if [[ ! -f "${dir}/flake.lock" ]]; then
       REPO_STATUS["$repo"]="skip:no-lock"
+      continue
+    fi
+
+    # Step 2b: Remote check, in every mode. A repository whose origin is
+    # outside the push boundary is reported and left alone before anything
+    # else about it is read.
+    remote_url=$(git -C "$dir" remote get-url origin 2>/dev/null || true)
+    if [[ -z "$remote_url" ]]; then
+      REPO_STATUS["$repo"]="skip:no-origin"
+      continue
+    fi
+    if ! remote_is_allowed "$remote_url"; then
+      REPO_STATUS["$repo"]="skip:external-remote"
+      REPO_REMOTE["$repo"]="$remote_url"
       continue
     fi
 
@@ -282,6 +317,14 @@ run_combined_cycle() {
         ;;
       skip:no-input)
         echo "  no directly pinned ${INPUT_LABEL} input found, skipping"
+        continue
+        ;;
+      skip:no-origin)
+        echo "  no origin remote, skipping"
+        continue
+        ;;
+      skip:external-remote)
+        echo "  origin ${REPO_REMOTE[$repo]} is not the forge and not listed in ~/.config/git/allowed-external-remotes, skipping"
         continue
         ;;
       skip:active-pr)

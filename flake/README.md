@@ -68,6 +68,8 @@ invocation, producing at most one commit and one PR per repository.
 - No `flake.lock` -> skip with notice
 - Input not present / is a `follows` -> skip with notice
 - Listed in `~/.config/git/active-pr-branches` -> skip with notice (GPG-signed commits required)
+- `origin` outside the forge and not matched by `~/.config/git/allowed-external-remotes` -> skip with notice, in every mode; the repo is never pulled, updated, committed to or pushed
+- No `origin` remote -> skip with notice
 
 If any repo fails pre-flight, the cascade aborts before touching anything.
 

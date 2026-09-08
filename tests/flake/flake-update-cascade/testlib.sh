@@ -50,9 +50,13 @@ case "$command" in
     [[ "${MOCK_SCENARIO:-}" == pr ]] && exit 1 || exit 0
     ;;
   "remote get-url origin")
-    printf 'ssh://git@forge.example:2222/acme/%s.git\n' "$repo"
+    case "$repo" in
+      external-*|allowed-*) printf 'https://github.com/acme/%s.git\n' "$repo" ;;
+      no-origin-*) echo "error: No such remote 'origin'" >&2; exit 2 ;;
+      *) printf 'ssh://git@forge.anarch.diy:2222/acme/%s.git\n' "$repo" ;;
+    esac
     ;;
-  "add flake.lock"|"checkout -B agent/flake-update-demo"|"commit -m flake.lock: update demo"|"fetch origin agent/flake-update-demo"|"push --force-with-lease origin agent/flake-update-demo"|"checkout master"|"checkout -- flake.lock")
+  "add flake.lock"|"push"|"checkout -B agent/flake-update-demo"|"commit -m flake.lock: update demo"|"fetch origin agent/flake-update-demo"|"push --force-with-lease origin agent/flake-update-demo"|"checkout master"|"checkout -- flake.lock")
     exit 0
     ;;
   *)

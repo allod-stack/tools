@@ -66,6 +66,9 @@ case "$*" in
   "diff --quiet -- flake.lock")
     [[ "${MOCK_MODE:-dry-run}" == direct ]] && exit 1 || exit 0
     ;;
+  "remote get-url origin")
+    printf 'ssh://git@forge.anarch.diy:2222/acme/app.git\n'
+    ;;
   "rev-parse @{u}")
     printf 'origin/master\n'
     ;;
