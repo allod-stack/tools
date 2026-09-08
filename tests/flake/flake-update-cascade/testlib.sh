@@ -16,6 +16,19 @@ export MOCK_LOG="$TMP/commands.log"
   cat <<'EOF'
 set -euo pipefail
 
+# Branch heads. MOCK_HEAD is the revision every asked-for ref resolves to, or
+# `unreachable` for a remote that cannot be read; the answer is given for the
+# first ref requested, as a branch that exists is.
+if [[ "$1" == "ls-remote" ]]; then
+  printf 'git\tls-remote\t%s\n' "${*:2}" >> "$MOCK_LOG"
+  case "${MOCK_HEAD:-}" in
+    unreachable) exit 128 ;;
+    "") echo "unexpected ls-remote with no MOCK_HEAD: $*" >&2; exit 1 ;;
+  esac
+  printf '%s\t%s\n' "$MOCK_HEAD" "$4"
+  exit 0
+fi
+
 [[ "$1" == "-C" ]] || { echo "unexpected git invocation: $*" >&2; exit 1; }
 dir="$2"
 repo=$(basename "$dir")
@@ -79,23 +92,43 @@ EOF
 set -euo pipefail
 printf 'nix\t%s\n' "$*" >> "$MOCK_LOG"
 
-# MOCK_FAIL_NIX names the subcommand that fails: "flake update" or "flake metadata".
+# MOCK_FAIL_NIX names the subcommand that fails: "flake lock", "flake update"
+# or "flake metadata".
 [[ "$1 $2" == "${MOCK_FAIL_NIX:-}" ]] && exit 1
 
+# Both lock-writing commands read the reference lock (the flake's own unless
+# --reference-lock-file names another) and write the output lock (the flake's
+# own unless --output-lock-file names another). A fixture path's node is its
+# last component. An update moves every named path to the b revision; a lock
+# pins each overridden path to the revision its flake reference ends in.
 case "$1 $2" in
   "flake update")
-    flake=""
-    output=""
+    shift 2
+    flake="" output="" reference="" filter="."
     while [[ $# -gt 0 ]]; do
       case "$1" in
         --flake) flake="$2"; shift 2 ;;
         --output-lock-file) output="$2"; shift 2 ;;
-        *) shift ;;
+        --reference-lock-file) reference="$2"; shift 2 ;;
+        *) filter+=" | .nodes[\"${1##*/}\"].locked.rev = \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\""; shift ;;
       esac
     done
     target="${output:-$flake/flake.lock}"
-    jq '.nodes.demo.locked.rev = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"' \
-      "$flake/flake.lock" > "$target.tmp"
+    jq "$filter" "${reference:-$flake/flake.lock}" > "$target.tmp"
+    mv "$target.tmp" "$target"
+    ;;
+  "flake lock")
+    shift 2
+    flake="" output="" filter="."
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --override-input) filter+=" | .nodes[\"${2##*/}\"].locked.rev = \"${3##*[/=]}\""; shift 3 ;;
+        --output-lock-file) output="$2"; shift 2 ;;
+        *) flake="$1"; shift ;;
+      esac
+    done
+    target="${output:-$flake/flake.lock}"
+    jq "$filter" "$flake/flake.lock" > "$target.tmp"
     mv "$target.tmp" "$target"
     ;;
   "flake metadata")
@@ -140,6 +173,40 @@ write_direct_lock() {
   }
 }
 EOF
+}
+
+# Locks whose nodes carry the flake.nix declaration, as a lock Nix wrote does.
+# write_declared_lock <dir> <node-name> <original-json> [<node-name> <original-json>]...
+# writes root inputs named after each node, all locked at the a revision.
+write_declared_lock() {
+  local dir="$1"
+  shift
+  mkdir -p "$dir/.git"
+  : > "$dir/.git/HEAD"
+  local inputs="{}" nodes="{}"
+  while [[ $# -gt 0 ]]; do
+    inputs=$(jq -c --arg n "$1" '. + {($n): $n}' <<<"$inputs")
+    nodes=$(jq -c --arg n "$1" --argjson o "$2" \
+      '. + {($n): {original: $o, locked: {rev: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}' <<<"$nodes")
+    shift 2
+  done
+  jq -n --argjson inputs "$inputs" --argjson nodes "$nodes" \
+    '{nodes: ({root: {inputs: $inputs}} + $nodes)}' > "$dir/flake.lock"
+}
+
+# A GitHub branch, the shape nixpkgs and home-manager inputs take.
+write_github_lock() {
+  write_declared_lock "$1" demo '{"type":"github","owner":"acme","repo":"demo","ref":"main"}'
+}
+
+# A GitHub reference that names its revision in flake.nix.
+write_pinned_lock() {
+  write_declared_lock "$1" demo '{"type":"github","owner":"acme","repo":"demo","rev":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'
+}
+
+# A git branch on a forge, the shape framework inputs take.
+write_git_lock() {
+  write_declared_lock "$1" demo '{"type":"git","url":"ssh://git@forge.example:2222/acme/demo.git","ref":"master"}'
 }
 
 write_follow_lock() {

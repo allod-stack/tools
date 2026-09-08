@@ -45,8 +45,8 @@ Examples:
   flake-update-cascade allod-tools --dry-run
 `
 
-// updateTimeout bounds one `nix flake update`: SIGTERM on expiry, then wait
-// for nix to exit.
+// updateTimeout bounds one lock-writing nix command: SIGTERM on expiry, then
+// wait for nix to exit.
 const updateTimeout = 120 * time.Second
 
 var inputNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
@@ -143,6 +143,7 @@ func run(args []string) int {
 		protectedFile: filepath.Join(homeDir(), ".config", "git", "protected-branches"),
 		inputLabel:    strings.Join(opts.names, ", "),
 		inputSlug:     strings.Join(opts.names, "-"),
+		heads:         make(map[string]string),
 	}
 	c.repos = collectRepos(c.workDir)
 	return c.runCombinedCycle()
@@ -189,6 +190,10 @@ type cascade struct {
 	updatePaths map[string][]string
 	remote      map[string]string
 	errorRepos  []string
+
+	// heads caches the branch heads read this run, keyed by URL and ref; an
+	// empty value records a failed read so it is not retried.
+	heads map[string]string
 
 	// lockFile is the per-repository exclusion lock, held on one descriptor
 	// that each repository reopens, so at most one repository is locked at a
@@ -455,14 +460,25 @@ func (c *cascade) execute() int {
 			continue
 		}
 
+		// Read the branch head behind each path and keep only what moved, so
+		// a repository that is already current costs no nix call at all.
+		plan := planLock(readLock(dir+"/flake.lock"), updatePaths, c.resolveHead)
+		for _, u := range plan.unresolved {
+			say("  %s: could not resolve %s at %s; asking nix instead", u.path, u.ref, u.url)
+		}
+		if plan.empty() {
+			say("  already up to date")
+			continue
+		}
+
 		var succeeded bool
 		switch {
 		case c.dryRun:
-			succeeded = c.dryRunRepo(dir, repoSlug, updatePaths)
+			succeeded = c.dryRunRepo(dir, repoSlug, updatePaths, plan)
 		case c.prMode:
-			succeeded = c.prRepo(dir, repoSlug, defaultBranch, updatePaths)
+			succeeded = c.prRepo(dir, repoSlug, defaultBranch, updatePaths, plan)
 		default:
-			succeeded = c.directRepo(dir, repoSlug, updatePaths)
+			succeeded = c.directRepo(dir, repoSlug, updatePaths, plan)
 		}
 		if !succeeded {
 			overallExit = 1
@@ -510,13 +526,12 @@ func short(rev string) string {
 	return rev
 }
 
-func (c *cascade) dryRunRepo(dir, repoSlug string, updatePaths []string) bool {
+func (c *cascade) dryRunRepo(dir, repoSlug string, updatePaths []string, plan lockPlan) bool {
 	tmpLock := "/tmp/" + repoSlug + ".flake.lock.new"
 
-	say("  updating %s (dry-run)...", strings.Join(updatePaths, " "))
-	args := append(append([]string{}, updatePaths...), "--flake", dir, "--output-lock-file", tmpLock)
-	if !nixFlakeUpdate(args) {
-		say("  nix flake update failed, skipping")
+	say("  updating %s (dry-run)...", strings.Join(plan.paths, " "))
+	if err := applyLock(dir, tmpLock, plan); err != nil {
+		say("  %v, skipping", err)
 		os.Remove(tmpLock)
 		return false
 	}
@@ -539,16 +554,15 @@ func (c *cascade) dryRunRepo(dir, repoSlug string, updatePaths []string) bool {
 }
 
 // updateAndCheck is the shared front half of the two mutating modes: snapshot
-// the lock, run the combined update, gate on evaluation, and report what
+// the lock, write the planned update, gate on evaluation, and report what
 // moved. It returns the outcome and whether the caller should go on to commit.
-func (c *cascade) updateAndCheck(dir, repoSlug string, updatePaths []string) (ok, proceed bool) {
+func (c *cascade) updateAndCheck(dir, repoSlug string, updatePaths []string, plan lockPlan) (ok, proceed bool) {
 	oldLock := "/tmp/" + repoSlug + ".flake.lock.old"
 	copyFile(dir+"/flake.lock", oldLock)
 
-	say("  updating %s...", strings.Join(updatePaths, " "))
-	args := append(append([]string{}, updatePaths...), "--flake", dir)
-	if !nixFlakeUpdate(args) {
-		say("  nix flake update failed, skipping")
+	say("  updating %s...", strings.Join(plan.paths, " "))
+	if err := applyLock(dir, "", plan); err != nil {
+		say("  %v, skipping", err)
 		mustGit(dir, "checkout", "--", "flake.lock")
 		os.Remove(oldLock)
 		return false, false
@@ -572,10 +586,10 @@ func (c *cascade) updateAndCheck(dir, repoSlug string, updatePaths []string) (ok
 	return true, true
 }
 
-func (c *cascade) prRepo(dir, repoSlug, defaultBranch string, updatePaths []string) bool {
+func (c *cascade) prRepo(dir, repoSlug, defaultBranch string, updatePaths []string, plan lockPlan) bool {
 	prBranch := "agent/flake-update-" + c.inputSlug
 
-	ok, proceed := c.updateAndCheck(dir, repoSlug, updatePaths)
+	ok, proceed := c.updateAndCheck(dir, repoSlug, updatePaths, plan)
 	if !proceed {
 		return ok
 	}
@@ -625,8 +639,8 @@ func (c *cascade) prRepo(dir, repoSlug, defaultBranch string, updatePaths []stri
 	return true
 }
 
-func (c *cascade) directRepo(dir, repoSlug string, updatePaths []string) bool {
-	ok, proceed := c.updateAndCheck(dir, repoSlug, updatePaths)
+func (c *cascade) directRepo(dir, repoSlug string, updatePaths []string, plan lockPlan) bool {
+	ok, proceed := c.updateAndCheck(dir, repoSlug, updatePaths, plan)
 	if !proceed {
 		return ok
 	}
@@ -722,14 +736,14 @@ func capture(stdin io.Reader, name string, args ...string) (string, bool) {
 	return strings.TrimRight(out.String(), "\n"), err == nil
 }
 
-// nixFlakeUpdate runs one combined update with stdin from /dev/null, so nix
-// declines a foreign nixConfig instead of prompting, bounded by updateTimeout.
-// The child stays in this process group, so a terminal Ctrl-C reaches nix
-// directly (allod/tools#143).
-func nixFlakeUpdate(args []string) bool {
+// nixWrite runs one lock-writing nix command, `flake lock` or `flake update`,
+// with stdin from /dev/null, so nix declines a foreign nixConfig instead of
+// prompting, bounded by updateTimeout. The child stays in this process group,
+// so a terminal Ctrl-C reaches nix directly (allod/tools#143).
+func nixWrite(args ...string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), updateTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "nix", append([]string{"flake", "update"}, args...)...)
+	cmd := exec.CommandContext(ctx, "nix", args...)
 	cmd.Stdin = nil
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

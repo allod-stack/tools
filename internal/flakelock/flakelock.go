@@ -20,8 +20,9 @@ type Lock struct {
 }
 
 type node struct {
-	inputs map[string]edge
-	rev    string
+	inputs   map[string]edge
+	rev      string
+	original map[string]any
 }
 
 // An edge is either a pin, naming another node, or a follows, an absolute path
@@ -45,8 +46,9 @@ const (
 func Parse(data []byte) (*Lock, error) {
 	var raw struct {
 		Nodes map[string]struct {
-			Inputs map[string]json.RawMessage `json:"inputs"`
-			Locked map[string]json.RawMessage `json:"locked"`
+			Inputs   map[string]json.RawMessage `json:"inputs"`
+			Locked   map[string]json.RawMessage `json:"locked"`
+			Original map[string]any             `json:"original"`
 		} `json:"nodes"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -54,7 +56,7 @@ func Parse(data []byte) (*Lock, error) {
 	}
 	lock := &Lock{nodes: make(map[string]node, len(raw.Nodes))}
 	for name, rawNode := range raw.Nodes {
-		n := node{inputs: make(map[string]edge, len(rawNode.Inputs))}
+		n := node{inputs: make(map[string]edge, len(rawNode.Inputs)), original: rawNode.Original}
 		for input, rawEdge := range rawNode.Inputs {
 			n.inputs[input] = parseEdge(rawEdge)
 		}

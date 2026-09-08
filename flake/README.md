@@ -79,6 +79,24 @@ Each eligible repo gets a branch named `agent/flake-update-<input>`. On
 re-runs, the branch is force-updated and the existing PR is noted rather than a
 new one being created. Requires `forge` on PATH.
 
+**What a run costs.** Before asking Nix anything, the tool reads each named
+input's branch head with `git ls-remote` — once per branch per run, however
+many repositories pin it — and compares it to the lock. A repository whose
+inputs are all at their heads prints `already up to date` with no `nix` call,
+and a moved input is pinned to the revision just read with `nix flake lock
+--override-input`, so Nix never resolves the branch itself. This matters for
+GitHub inputs: `nix flake update` resolves each one through the REST API,
+which allows sixty unauthenticated requests an hour per address, shared by
+every machine behind that address; a ref advertisement over the git protocol
+counts nothing against it, and neither does fetching the newly pinned
+revision, which Nix 2.34 reads over the git protocol as well.
+An input the tool cannot read itself — a registry reference, a tarball, a
+`path:`, a `git` or `github` reference carrying `dir`, `host` or `submodules`,
+a reference that names its revision, or a remote that cannot be reached — is
+still updated by `nix flake update`, and an unreachable one is reported on the
+repository's own lines: `<input>: could not resolve <ref> at <url>; asking nix
+instead`.
+
 **Implementation.** The command is the Go program in `cmd/flake-update-cascade`.
 Every suite under `tests/flake` runs the program `CASCADE_UNDER_TEST` names,
 building it from the working tree when the variable is unset. `nix flake check`

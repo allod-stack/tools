@@ -162,6 +162,7 @@
           tests/flake/flake-update-cascade/preflight.sh
           tests/flake/flake-update-cascade/pr-mode.sh
           tests/flake/flake-update-cascade/validation.sh
+          tests/flake/flake-update-cascade/resolve-heads.sh
           tests/flake/flake-update-cascade-multiple-inputs.sh
           tests/flake/flake-update-cascade-follows.sh"
 
