@@ -13,6 +13,12 @@
 # config, and leaves the repository untouched.
 set -euo pipefail
 
+# Nix enables its prompt logger only on a non-dumb terminal with neither
+# color-disable variable set. Agent runners commonly supply these variables;
+# fix the terminal conditions for both arms so the control really prompts.
+export TERM=xterm
+unset NO_COLOR NOCOLOR
+
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 # shellcheck source=cascade-under-test.sh
 source "$ROOT/tests/flake/cascade-under-test.sh"

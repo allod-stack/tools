@@ -378,7 +378,7 @@ func (c *cascade) preflight() {
 
 		if len(repoErrors) > 0 {
 			c.status[repo] = preflightErr
-			c.errorMsg[repo] = strings.Join(repoErrors, ", ")
+			c.errorMsg[repo] = strings.Join(repoErrors, ",")
 			c.errorRepos = append(c.errorRepos, repo)
 		} else {
 			c.status[repo] = eligible
