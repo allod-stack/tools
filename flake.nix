@@ -43,6 +43,21 @@
         };
       };
 
+      flakeUpdateCascade = pkgs.buildGoModule {
+        pname = "flake-update-cascade";
+        version = "0.1.0";
+        src = ./.;
+        # Standard library only, by design: no module dependencies to vendor.
+        vendorHash = null;
+        subPackages = [ "cmd/flake-update-cascade" ];
+
+        meta = {
+          description = "Update named flake inputs across every workspace repository that pins them";
+          mainProgram = "flake-update-cascade";
+          platforms = pkgs.lib.platforms.unix;
+        };
+      };
+
       # buildGoModule's check phase only tests the packages named in
       # subPackages, so the internal ones need a check of their own. This also
       # covers formatting and vet, which nothing else would.
@@ -119,16 +134,73 @@
 
         touch "$out"
       '';
+
+      # The cascade suites run three times: against the Bash oracle, against
+      # the Go program, and in parity mode, where every invocation runs both
+      # on one fixture and must produce identical output, status, command
+      # trace, and tree. The nixConfig suite is left out: it drives the real
+      # nix under a pty, which the sandbox cannot host; run it by hand.
+      cascadeParity = pkgs.runCommand "flake-update-cascade-parity-tests"
+        {
+          nativeBuildInputs = [
+            pkgs.bash
+            pkgs.coreutils
+            pkgs.diffutils
+            pkgs.findutils
+            pkgs.gnugrep
+            pkgs.gnused
+            pkgs.gnutar
+            pkgs.jq
+            pkgs.util-linux
+          ];
+          src = ./.;
+        } ''
+        export HOME="$TMPDIR/home"
+        cp -r "$src" source
+        chmod -R u+w source
+        cd source
+        patchShebangs .
+
+        suites="tests/flake/flake-update-cascade/dry-run.sh
+          tests/flake/flake-update-cascade/external-remote.sh
+          tests/flake/flake-update-cascade/failures.sh
+          tests/flake/flake-update-cascade/lock-contention.sh
+          tests/flake/flake-update-cascade/preflight.sh
+          tests/flake/flake-update-cascade/pr-mode.sh
+          tests/flake/flake-update-cascade/validation.sh
+          tests/flake/flake-update-cascade-multiple-inputs.sh
+          tests/flake/flake-update-cascade-follows.sh"
+
+        for suite in $suites; do
+          echo "== oracle: $suite"
+          bash "$suite"
+        done
+        export CASCADE_UNDER_TEST=${flakeUpdateCascade}/bin/flake-update-cascade
+        for suite in $suites; do
+          echo "== under test: $suite"
+          bash "$suite"
+        done
+        export CASCADE_PARITY=1
+        for suite in $suites; do
+          echo "== parity: $suite"
+          bash "$suite"
+        done
+
+        touch "$out"
+      '';
     in
     {
       packages.${system} = {
         inherit allod forge;
+        flake-update-cascade = flakeUpdateCascade;
         default = forge;
       };
 
       checks.${system} = {
         inherit allod forge;
+        flake-update-cascade = flakeUpdateCascade;
         allod-parity = allodParity;
+        cascade-parity = cascadeParity;
         go-checks = goChecks;
       };
 

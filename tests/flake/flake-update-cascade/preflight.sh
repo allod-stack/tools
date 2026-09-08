@@ -18,14 +18,18 @@ printf '%s\n' '{"nodes":{"root":{"inputs":{}}}}' > "$HOME/work/no-input/flake.lo
 write_follow_lock "$HOME/work/follows"
 write_direct_lock "$HOME/work/protected"
 printf '%s\n' "work/protected master" > "$HOME/.config/git/protected-branches"
+write_direct_lock "$HOME/work/active"
+printf '%s\n' "active" > "$HOME/.config/git/active-pr-branches"
 export MOCK_SCENARIO=skips
-output=$(bash "$ROOT/flake/flake-update-cascade" demo)
+output=$(run_cascade demo)
 assert_contains "$output" "no flake.lock, skipping" \
   "skips repositories without a lock file"
 assert_contains "$output" "no directly pinned demo input found, skipping" \
   "skips repositories without a reachable direct pin"
 assert_contains "$output" "protected branch (master)" \
   "skips protected branches in direct mode"
+assert_contains "$output" "listed in active-pr-branches (GPG-signed commits required), skipping — handle manually" \
+  "skips repositories listed in active-pr-branches"
 assert_equal "$(grep -c '^nix' "$MOCK_LOG" || true)" "0" \
   "does not invoke Nix when every repository is skipped"
 

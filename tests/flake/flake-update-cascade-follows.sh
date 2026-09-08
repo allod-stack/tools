@@ -11,6 +11,8 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+# shellcheck source=cascade-under-test.sh
+source "$ROOT/tests/flake/cascade-under-test.sh"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -51,8 +53,9 @@ cat > "$REPO/flake.lock" <<'EOF'
 }
 EOF
 
-cat > "$TMP/bin/git" <<'EOF'
-#!/usr/bin/env bash
+{
+  printf '#!%s\n' "$(command -v bash)"
+  cat <<'EOF'
 set -euo pipefail
 
 [[ "$1" == "-C" ]] || { echo "unexpected git invocation: $*" >&2; exit 1; }
@@ -92,12 +95,14 @@ case "$*" in
     ;;
 esac
 EOF
+} > "$TMP/bin/git"
 
 # The update collapses nexus's own vm onto the root-level one, exactly as
 # `nexus.inputs.vm.follows = "vm"` does: the vm_2 node disappears and the edge
 # that pointed at it becomes the array ["archetypes","vm"].
-cat > "$TMP/bin/nix" <<'EOF'
-#!/usr/bin/env bash
+{
+  printf '#!%s\n' "$(command -v bash)"
+  cat <<'EOF'
 set -euo pipefail
 printf 'nix\t%s\n' "$*" >> "$MOCK_LOG"
 
@@ -130,6 +135,7 @@ case "$1 $2" in
     ;;
 esac
 EOF
+} > "$TMP/bin/nix"
 
 chmod +x "$TMP/bin/git" "$TMP/bin/nix"
 export PATH="$TMP/bin:$PATH"
@@ -140,7 +146,7 @@ fail() {
 }
 
 status=0
-output=$(bash "$ROOT/flake/flake-update-cascade" vm --dry-run 2>&1) || status=$?
+output=$(run_cascade vm --dry-run 2>&1) || status=$?
 
 [[ "$status" == 0 ]] ||
   fail "the run exited ${status} on a lock whose input collapsed to a follows"

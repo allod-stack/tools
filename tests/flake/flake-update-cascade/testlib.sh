@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+# shellcheck source=../cascade-under-test.sh
+source "$ROOT/tests/flake/cascade-under-test.sh"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -9,8 +11,9 @@ MOCK_BIN="$TMP/bin"
 mkdir -p "$MOCK_BIN"
 export MOCK_LOG="$TMP/commands.log"
 
-cat > "$MOCK_BIN/git" <<'EOF'
-#!/usr/bin/env bash
+{
+  printf '#!%s\n' "$(command -v bash)"
+  cat <<'EOF'
 set -euo pipefail
 
 [[ "$1" == "-C" ]] || { echo "unexpected git invocation: $*" >&2; exit 1; }
@@ -19,6 +22,9 @@ repo=$(basename "$dir")
 shift 2
 command="$*"
 printf 'git\t%s\t%s\n' "$repo" "$command" >> "$MOCK_LOG"
+
+# MOCK_FAIL_GIT names commands that fail, one per line, exactly as logged.
+case $'\n'"${MOCK_FAIL_GIT:-}"$'\n' in *$'\n'"$command"$'\n'*) exit 1 ;; esac
 
 case "$command" in
   "rev-parse --show-toplevel")
@@ -47,7 +53,7 @@ case "$command" in
     exit 0
     ;;
   "diff --quiet -- flake.lock")
-    [[ "${MOCK_SCENARIO:-}" == pr ]] && exit 1 || exit 0
+    case "${MOCK_SCENARIO:-}" in pr|direct) exit 1 ;; *) exit 0 ;; esac
     ;;
   "remote get-url origin")
     case "$repo" in
@@ -56,7 +62,7 @@ case "$command" in
       *) printf 'ssh://git@forge.anarch.diy:2222/acme/%s.git\n' "$repo" ;;
     esac
     ;;
-  "add flake.lock"|"push"|"checkout -B agent/flake-update-demo"|"commit -m flake.lock: update demo"|"fetch origin agent/flake-update-demo"|"push --force-with-lease origin agent/flake-update-demo"|"checkout master"|"checkout -- flake.lock")
+  "add flake.lock"|"push"|"checkout -B agent/flake-update-demo"|"commit -m flake.lock: update demo"|"fetch origin agent/flake-update-demo"|"update-ref -d refs/remotes/origin/agent/flake-update-demo"|"push --force-with-lease origin agent/flake-update-demo"|"checkout master"|"checkout -- flake.lock"|"restore --staged flake.lock"|"reset HEAD flake.lock")
     exit 0
     ;;
   *)
@@ -65,11 +71,16 @@ case "$command" in
     ;;
 esac
 EOF
+} > "$MOCK_BIN/git"
 
-cat > "$MOCK_BIN/nix" <<'EOF'
-#!/usr/bin/env bash
+{
+  printf '#!%s\n' "$(command -v bash)"
+  cat <<'EOF'
 set -euo pipefail
 printf 'nix\t%s\n' "$*" >> "$MOCK_LOG"
+
+# MOCK_FAIL_NIX names the subcommand that fails: "flake update" or "flake metadata".
+[[ "$1 $2" == "${MOCK_FAIL_NIX:-}" ]] && exit 1
 
 case "$1 $2" in
   "flake update")
@@ -96,16 +107,22 @@ case "$1 $2" in
     ;;
 esac
 EOF
+} > "$MOCK_BIN/nix"
 
-cat > "$MOCK_BIN/forge" <<'EOF'
-#!/usr/bin/env bash
+{
+  printf '#!%s\n' "$(command -v bash)"
+  cat <<'EOF'
 set -euo pipefail
 printf 'forge\t%s\n' "$*" >> "$MOCK_LOG"
 case "$*" in
-  *"pr find-by-head agent/flake-update-demo") printf '42\n' ;;
+  *"pr find-by-head agent/flake-update-demo")
+    [[ -n "${MOCK_FORGE_NO_PR:-}" ]] || printf '42\n' ;;
+  *"pr create --title flake.lock: update demo --head agent/flake-update-demo --base master --body "*)
+    [[ "${MOCK_FORGE_CREATE_URL:-}" == "" ]] || printf '%s\n' "$MOCK_FORGE_CREATE_URL" ;;
   *) echo "unexpected forge invocation: $*" >&2; exit 1 ;;
 esac
 EOF
+} > "$MOCK_BIN/forge"
 
 chmod +x "$MOCK_BIN/git" "$MOCK_BIN/nix" "$MOCK_BIN/forge"
 export PATH="$MOCK_BIN:$PATH"
@@ -158,7 +175,7 @@ run_fail() {
   local expected="$1" description="$2"
   shift 2
   local output
-  if output=$(bash "$ROOT/flake/flake-update-cascade" "$@" 2>&1); then
+  if output=$(run_cascade "$@" 2>&1); then
     fail "$description" "command unexpectedly succeeded: $*" "$output"
   elif [[ "$output" == *"$expected"* ]]; then
     pass "$description"

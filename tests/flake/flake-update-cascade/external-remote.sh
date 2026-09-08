@@ -18,7 +18,7 @@ for mode in "" --dry-run --pr; do
   write_direct_lock "$HOME/work/external-app"
   before=$(sha256sum "$HOME/work/external-app/flake.lock")
   export MOCK_SCENARIO=pr
-  output=$(bash "$ROOT/flake/flake-update-cascade" demo $mode)
+  output=$(run_cascade demo $mode)
   assert_contains "$output" "$external_notice" \
     "names the external origin and skips it (${mode:-direct})"
   assert_equal "$(grep -Ec $'^nix\t.*external-app' "$MOCK_LOG" || true)" "0" \
@@ -36,7 +36,7 @@ write_direct_lock "$HOME/work/allowed-app"
 write_direct_lock "$HOME/work/app"
 printf '%s\n' "github.com/acme/allowed-app" > "$HOME/.config/git/allowed-external-remotes"
 export MOCK_SCENARIO=dry-run
-output=$(bash "$ROOT/flake/flake-update-cascade" demo --dry-run)
+output=$(run_cascade demo --dry-run)
 assert_log_contains $'nix\tflake update demo --flake '"$HOME/work/allowed-app" \
   "an allowlisted external origin is updated"
 assert_log_contains $'nix\tflake update demo --flake '"$HOME/work/app" \
@@ -46,7 +46,7 @@ assert_log_contains $'nix\tflake update demo --flake '"$HOME/work/app" \
 new_home no-origin
 write_direct_lock "$HOME/work/no-origin-app"
 export MOCK_SCENARIO=dry-run
-output=$(bash "$ROOT/flake/flake-update-cascade" demo --dry-run)
+output=$(run_cascade demo --dry-run)
 assert_contains "$output" "no origin remote, skipping" \
   "skips a repository with no origin remote"
 assert_equal "$(grep -Ec $'^nix\t.*no-origin-app' "$MOCK_LOG" || true)" "0" \

@@ -79,6 +79,23 @@ Each eligible repo gets a branch named `agent/flake-update-<input>`. On
 re-runs, the branch is force-updated and the existing PR is noted rather than a
 new one being created. Requires `forge` on PATH.
 
+**Implementation.** The command is the Go program in `cmd/flake-update-cascade`.
+The Bash program at `flake/flake-update-cascade` is its oracle until the
+retirement step of allod/tools#159: every suite under `tests/flake` runs against
+whichever `CASCADE_UNDER_TEST` names, the Bash program by default, and with
+`CASCADE_PARITY=1` runs both on one fixture and requires identical output, exit
+status, subprocess trace, and tree. `nix flake check` runs the mock-driven suites
+all three ways; `tests/flake/flake-update-cascade-nixconfig.sh` drives the real
+`nix` under a pty and is run by hand:
+
+```bash
+CASCADE_UNDER_TEST="$(nix build .#flake-update-cascade --print-out-paths)/bin/flake-update-cascade" \
+  CASCADE_PARITY=1 bash tests/flake/flake-update-cascade-nixconfig.sh
+```
+
+Repositories are processed in directory order; dependency ordering and pin
+propagation are allod/tools#171.
+
 **Examples:**
 
 ```bash
