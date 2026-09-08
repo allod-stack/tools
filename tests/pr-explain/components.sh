@@ -67,8 +67,8 @@ assert_contains "$(cat "$CONTRACT")" "review" \
   "the contract requires investigating pull request reviews"
 assert_contains "$(cat "$CONTRACT")" "Facts" \
   "the contract separates facts from interpretation"
-assert_contains "$(cat "$SECTION_PROMPT")" "not decoration" \
-  "the section prompt allows pictures and motion only when they reduce cognitive work"
+assert_contains "$(cat "$SECTION_PROMPT")" "remove cognitive work" \
+  "the section prompt admits a component only when it removes cognitive work"
 assert_contains "$(cat "$SECTION_PROMPT")" "as strictly as the report's opening" \
   "the section prompt re-checks the reader contract on every section"
 
