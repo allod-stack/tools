@@ -2,14 +2,11 @@
 // repository in the workspace that pins them directly, with one combined
 // update, commit, and optional PR per repository.
 //
-// This is a port of flake/flake-update-cascade. Until that Bash program is
-// retired under allod/tools#159 it is the oracle: every suite under
-// tests/flake runs against both, and the port reproduces the oracle's output,
-// exit status, subprocess trace, and on-disk effects. That includes behavior
-// the Bash owes to `set -e`: a failure that the oracle does not guard ends the
-// run with the failing command's status, and the port does the same via
-// mustRun. Repository processing order is the directory walk of
-// lib/workspace.sh; dependency ordering is allod/tools#171, after this port.
+// A failure the program does not guard — a restore that fails after a failed
+// update, say — ends the run with the failing command's status, via mustGit,
+// rather than carrying on with a checkout in an unknown state. Repositories are
+// processed in directory order; dependency ordering and pin propagation are
+// allod/tools#171.
 package main
 
 import (
@@ -48,15 +45,15 @@ Examples:
   flake-update-cascade allod-tools --dry-run
 `
 
-// updateTimeout bounds one `nix flake update`, as `timeout --foreground 120`
-// does in the oracle: SIGTERM on expiry, then wait for nix to exit.
+// updateTimeout bounds one `nix flake update`: SIGTERM on expiry, then wait
+// for nix to exit.
 const updateTimeout = 120 * time.Second
 
 var inputNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 // exitStatus carries an exit code out of the run through a panic, so that a
-// failure deep inside repository processing ends the program the way the
-// oracle's `set -e` does, without threading a status through every helper.
+// failure deep inside repository processing ends the program without
+// threading a status through every helper.
 type exitStatus int
 
 func fatal(code int) { panic(exitStatus(code)) }
@@ -84,7 +81,7 @@ type options struct {
 	names  []string
 }
 
-// parseArgs mirrors the oracle's single pass over the arguments: options may
+// parseArgs makes a single pass over the arguments: options may
 // sit anywhere, -h wins as soon as it is seen, and the first unknown option
 // ends the run. It returns the exit code to use when parsing ends the run.
 func parseArgs(args []string) (opts options, code int, done bool) {
@@ -153,9 +150,9 @@ func run(args []string) int {
 
 func homeDir() string { return os.Getenv("HOME") }
 
-// workDir is the oracle's WORK_DIR: taken from the environment as given, or
-// $HOME/work. A trailing slash is stripped only where the oracle strips it,
-// in repository discovery; repository paths are joined to the raw value.
+// workDir is WORK_DIR from the environment as given, or $HOME/work. A trailing
+// slash is stripped only in repository discovery; repository paths are joined
+// to the raw value.
 func workDir() string {
 	if value := os.Getenv("WORK_DIR"); value != "" {
 		return value
@@ -193,10 +190,10 @@ type cascade struct {
 	remote      map[string]string
 	errorRepos  []string
 
-	// lockFile is the per-repository exclusion lock. The oracle holds it on a
-	// fixed descriptor that each `exec 9>` reopens, so at most one repository
-	// is locked at a time and the previous lock is released when the next
-	// eligible repository is reached.
+	// lockFile is the per-repository exclusion lock, held on one descriptor
+	// that each repository reopens, so at most one repository is locked at a
+	// time and the previous lock is released when the next eligible
+	// repository is reached.
 	lockFile *os.File
 }
 
@@ -208,8 +205,8 @@ func (c *cascade) repoDir(repo string) string {
 	return c.workDir + "/" + repo
 }
 
-// readLock parses a repository's flake.lock. The oracle hands a malformed lock
-// to jq, whose parse error ends the run; the port ends it with the file named.
+// readLock parses a repository's flake.lock; a malformed lock ends the run
+// with the file named.
 func readLock(path string) *flakelock.Lock {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -477,8 +474,7 @@ func (c *cascade) execute() int {
 
 // acquireLock takes the per-repository exclusion lock, releasing whichever
 // one the previous repository held. A lock another instance holds is
-// reported as contention; a lock file that cannot be opened ends the run,
-// as a failed `exec 9>` does in the oracle.
+// reported as contention; a lock file that cannot be opened ends the run.
 func (c *cascade) acquireLock(path string) bool {
 	if c.lockFile != nil {
 		c.lockFile.Close()
@@ -602,11 +598,9 @@ func (c *cascade) prRepo(dir, repoSlug, defaultBranch string, updatePaths []stri
 		return false
 	}
 
-	// The oracle's `forge_repo=$(repo_forge_name "$dir")` ends the run under
-	// `set -e` when the origin URL yields no owner/repo, so its "could not
-	// infer forge repo" branch is unreachable; the port stops at the same
-	// point with the same status. That leaves the checkout on the PR branch
-	// in both, which is a known bug carried for parity (allod/tools#159).
+	// An origin URL with no owner/repo component ends the run here, after the
+	// push and with the checkout left on the PR branch. No forge remote has
+	// that shape, so the gentler path is not built.
 	forgeRepo, ok := repoForgeName(dir)
 	if !ok {
 		fatal(1)
@@ -656,7 +650,7 @@ func (c *cascade) directRepo(dir, repoSlug string, updatePaths []string) bool {
 	return true
 }
 
-// copyFile is the oracle's `cp`, whose failure ends the run under `set -e`.
+// copyFile copies the lock aside; a failure ends the run.
 func copyFile(src, dst string) {
 	data, err := os.ReadFile(src)
 	if err == nil {
@@ -712,7 +706,7 @@ func gitCapture(dir string, args ...string) (string, bool) {
 }
 
 // mustGit runs git with inherited streams and ends the run with git's exit
-// status on failure, as an unguarded command does under the oracle's `set -e`.
+// status on failure.
 func mustGit(dir string, args ...string) {
 	if status := gitStatus(dir, os.Stdin, os.Stdout, os.Stderr, args...); status != 0 {
 		fatal(status)
@@ -729,9 +723,9 @@ func capture(stdin io.Reader, name string, args ...string) (string, bool) {
 }
 
 // nixFlakeUpdate runs one combined update with stdin from /dev/null, so nix
-// declines a foreign nixConfig instead of prompting, and under the same bound
-// the oracle's `timeout --foreground` applies. The child stays in this
-// process group, so a terminal Ctrl-C reaches nix directly (allod/tools#143).
+// declines a foreign nixConfig instead of prompting, bounded by updateTimeout.
+// The child stays in this process group, so a terminal Ctrl-C reaches nix
+// directly (allod/tools#143).
 func nixFlakeUpdate(args []string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), updateTimeout)
 	defer cancel()

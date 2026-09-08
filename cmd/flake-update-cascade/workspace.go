@@ -8,8 +8,9 @@ import (
 )
 
 // The functions here are lib/workspace.sh's workspace_collect_repos and
-// workspace_repo_default_branch, plus the oracle's repo_forge_name, kept to
-// the same subprocess calls so the traces match.
+// workspace_repo_default_branch, which the Bash workspace tools still use, so
+// every tool agrees on which repositories the workspace holds and in what
+// order; repoForgeName is the cascade's own.
 
 // isRepoRoot is workspace_is_repo_root: a .git entry exists and git agrees
 // the directory is its own top level.

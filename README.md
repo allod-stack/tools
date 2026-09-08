@@ -34,7 +34,6 @@ workspace/                daily workspace sync and status
   work-diff               show staged/unstaged changes across repos
 flake/                    nix flake pin management
   flake-status            inspect flake input pins across repos
-  flake-update-cascade    update flake inputs across repos (Bash oracle for cmd/flake-update-cascade)
   fleet-diff              check which machines a change rebuilds
 git-hooks/                git hook policy and setup
   protected-refs-policy   branch protection, signing, remote restrictions
@@ -74,7 +73,7 @@ check runs both: each compiles code and tests the other does not.
 ## Shared Library
 
 `lib/workspace.sh` provides repo discovery and default-branch helpers used by
-`pull-all`, `work-diff`, `flake-status`, and `flake-update-cascade`.
+`pull-all`, `work-diff`, and `flake-status`.
 It also sets `WORK_DIR` (defaults to `~/work/`, overridable via the environment).
 
 `workspace_collect_repos` returns exactly the checkouts under `WORK_DIR`, which

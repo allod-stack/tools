@@ -13,9 +13,9 @@ new_home combined-errors
 write_direct_lock "$HOME/work/app"
 export MOCK_SCENARIO=wrong-branch MOCK_FAIL_GIT='diff --quiet'
 output=$(run_cascade demo 2>&1) && status=0 || status=$?
-assert_equal "$status" "1" "combined preflight errors return the oracle status"
+assert_equal "$status" "1" "combined preflight errors return status 1"
 assert_contains "$output" "expected 'master'),dirty working tree (unstaged changes)" \
-  "preserves the oracle separator for combined preflight errors"
+  "joins combined preflight errors with a bare comma"
 unset MOCK_FAIL_GIT
 assert_equal "$(grep -c '^nix' "$MOCK_LOG" || true)" "0" \
   "does not invoke Nix after combined preflight failures"

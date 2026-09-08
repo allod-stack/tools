@@ -11,10 +11,10 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-# shellcheck source=cascade-under-test.sh
-source "$ROOT/tests/flake/cascade-under-test.sh"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
+# shellcheck source=cascade-under-test.sh
+source "$ROOT/tests/flake/cascade-under-test.sh"
 
 export HOME="$TMP/home"
 export MOCK_LOG="$TMP/commands.log"

@@ -20,10 +20,10 @@ export TERM=xterm
 unset NO_COLOR NOCOLOR
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-# shellcheck source=cascade-under-test.sh
-source "$ROOT/tests/flake/cascade-under-test.sh"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
+# shellcheck source=cascade-under-test.sh
+source "$ROOT/tests/flake/cascade-under-test.sh"
 
 fail() {
   echo "FAIL: $1" >&2
@@ -147,10 +147,6 @@ grep -Fq "do you want to allow configuration setting" "$TMP/arm1.out" \
 
 # --- Arm 2: the cascade over the same repo, same pty conditions, must
 # complete promptly, decline the foreign config, and leave the repo unchanged.
-# The parity byte-diff of run_cascade is not used here: nix's own stderr on a
-# pty is not stable between two runs. Under CASCADE_PARITY the arm instead
-# runs once per implementation, oracle first, and holds each to the same
-# assertions.
 arm2() {
   local label="$1"
   shift
@@ -175,14 +171,7 @@ arm2() {
   [[ "$before" == "$after" ]] || fail "$label: dry-run changed flake.lock"
 }
 
-if [[ -n "${CASCADE_PARITY:-}" && -n "${CASCADE_UNDER_TEST:-}" ]]; then
-  arm2 "oracle" bash "$CASCADE_ORACLE"
-fi
-if [[ -z "${CASCADE_UNDER_TEST:-}" ]]; then
-  arm2 "oracle" bash "$CASCADE_ORACLE"
-else
-  arm2 "under test" "$CASCADE_UNDER_TEST"
-fi
+arm2 "cascade" "$CASCADE_UNDER_TEST"
 exec 3<&-
 
 echo "flake-update-cascade nixConfig non-interactivity tests passed"

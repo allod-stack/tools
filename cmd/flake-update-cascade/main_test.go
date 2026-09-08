@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestParseArgsMirrorsTheOracle(t *testing.T) {
+func TestParseArgsSinglePass(t *testing.T) {
 	opts, code, done := parseArgs([]string{"nixpkgs", "--pr", "vm", "--dry-run"})
 	if done || code != 0 {
 		t.Fatalf("parse ended the run: code %d", code)
@@ -87,7 +87,7 @@ func TestForgeNamePattern(t *testing.T) {
 	}
 }
 
-// collectRepos must return repositories in the oracle's glob order: plain
+// collectRepos must return repositories in the directory walk's glob order: plain
 // names first, dotted names after, each in byte order, with a dotted directory
 // entered only when it is itself a repository, and a directory that is not a
 // repository descended into.

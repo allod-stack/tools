@@ -135,21 +135,15 @@
         touch "$out"
       '';
 
-      # The cascade suites run three times: against the Bash oracle, against
-      # the Go program, and in parity mode, where every invocation runs both
-      # on one fixture and must produce identical output, status, command
-      # trace, and tree. The nixConfig suite is left out: it drives the real
-      # nix under a pty, which the sandbox cannot host; run it by hand.
-      cascadeParity = pkgs.runCommand "flake-update-cascade-parity-tests"
+      # The mock-driven cascade suites, run against the packaged program. The
+      # nixConfig suite is left out: it drives the real nix under a pty, which
+      # the sandbox cannot host; run it by hand.
+      cascadeSuites = pkgs.runCommand "flake-update-cascade-suites"
         {
           nativeBuildInputs = [
             pkgs.bash
             pkgs.coreutils
-            pkgs.diffutils
-            pkgs.findutils
             pkgs.gnugrep
-            pkgs.gnused
-            pkgs.gnutar
             pkgs.jq
             pkgs.util-linux
           ];
@@ -171,18 +165,9 @@
           tests/flake/flake-update-cascade-multiple-inputs.sh
           tests/flake/flake-update-cascade-follows.sh"
 
-        for suite in $suites; do
-          echo "== oracle: $suite"
-          bash "$suite"
-        done
         export CASCADE_UNDER_TEST=${flakeUpdateCascade}/bin/flake-update-cascade
         for suite in $suites; do
-          echo "== under test: $suite"
-          bash "$suite"
-        done
-        export CASCADE_PARITY=1
-        for suite in $suites; do
-          echo "== parity: $suite"
+          echo "== $suite"
           bash "$suite"
         done
 
@@ -200,7 +185,7 @@
         inherit allod forge;
         flake-update-cascade = flakeUpdateCascade;
         allod-parity = allodParity;
-        cascade-parity = cascadeParity;
+        cascade-suites = cascadeSuites;
         go-checks = goChecks;
       };
 

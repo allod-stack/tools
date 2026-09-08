@@ -2,10 +2,9 @@
 // needs: which reachable direct pins carry a requested input name, and which
 // revision a pin path resolves to.
 //
-// The functions here mirror the two jq programs in flake/flake-update-cascade,
-// including the shapes they tolerate: a missing node, a missing `inputs`, an
-// edge that is a `follows` array rather than a node name. They are pure, so a
-// malformed lock is reported by Parse and never by a walk.
+// The walks tolerate the shapes a lock can take: a missing node, a missing
+// `inputs`, an edge that is a `follows` array rather than a node name. They are
+// pure, so a malformed lock is reported by Parse and never by a walk.
 package flakelock
 
 import (
