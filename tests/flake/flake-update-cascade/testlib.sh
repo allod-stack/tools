@@ -67,6 +67,14 @@ case "$command" in
   "rev-parse @{u}")
     printf 'origin/master\n'
     ;;
+  "rev-parse HEAD")
+    # After a push the checkout's HEAD is what the tracking head became.
+    if [[ -n "${MOCK_HEADS:-}" && -f "$MOCK_HEADS/$repo" ]]; then
+      cat "$MOCK_HEADS/$repo"
+    else
+      printf '%s\n' "${MOCK_HEAD:-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}"
+    fi
+    ;;
   "rev-list HEAD...@{u} --count")
     [[ "${MOCK_SCENARIO:-}" == unpushed ]] && printf '1\n' || printf '0\n'
     ;;
@@ -172,8 +180,11 @@ printf 'forge\t%s\n' "$*" >> "$MOCK_LOG"
 case "$*" in
   *"pr find-by-head agent/flake-update-demo")
     [[ -n "${MOCK_FORGE_NO_PR:-}" ]] || printf '42\n' ;;
-  *"pr create --title flake.lock: update demo --head agent/flake-update-demo --base master --body "*)
+  *"pr create --title flake.lock: update "*" --head agent/flake-update-demo --base master --body "*)
+    [[ -z "${MOCK_FORGE_CREATE_FAIL:-}" ]] || exit 1
     [[ "${MOCK_FORGE_CREATE_URL:-}" == "" ]] || printf '%s\n' "$MOCK_FORGE_CREATE_URL" ;;
+  *"pr edit 42 --title flake.lock: update "*" --body "*)
+    [[ -z "${MOCK_FORGE_EDIT_FAIL:-}" ]] || exit 1 ;;
   *) echo "unexpected forge invocation: $*" >&2; exit 1 ;;
 esac
 EOF

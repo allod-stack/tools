@@ -124,6 +124,16 @@ assert_log_contains $'forge\t-R acme/app pr create --title flake.lock: update de
 assert_contains "$RUN_OUTPUT" "  https://forge.example/acme/app/pulls/7" "prints the new PR URL"
 assert_log_contains $'git\tapp\tcheckout master' "returns to the default branch after creating the PR"
 
+new_home create-fail
+write_direct_lock "$HOME/work/app"
+export MOCK_SCENARIO=pr MOCK_FORGE_NO_PR=1 MOCK_FORGE_CREATE_FAIL=1
+run_status demo --pr
+assert_equal "$RUN_STATUS" "1" "a failed PR creation ends with status 1"
+assert_contains "$RUN_OUTPUT" "PR creation failed" "reports the failed PR creation"
+assert_log_contains $'git\tapp\tcheckout master' "returns to the default branch after a failed PR creation"
+assert_log_contains $'git\tapp\tcheckout -- flake.lock' "restores the lock file after a failed PR creation"
+unset MOCK_FORGE_CREATE_FAIL
+
 new_home new-pr-no-url
 write_direct_lock "$HOME/work/app"
 export MOCK_SCENARIO=pr MOCK_FORGE_NO_PR=1 MOCK_FORGE_CREATE_URL=""

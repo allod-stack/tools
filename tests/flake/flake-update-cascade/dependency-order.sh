@@ -35,6 +35,9 @@ assert_log_contains $'git\tmid\tcommit -m flake.lock: update leaf' "mid's commit
 assert_log_contains $'git\ttop\tcommit -m flake.lock: update mid' "top's commit names only its mid pin"
 assert_equal "$(grep -c $'\tcommit -m flake.lock: update demo' "$MOCK_LOG")" "1" \
   "no commit names an input that moved in another repository"
+assert_log_contains $'git\tleaf\trev-parse HEAD' "reads what the push left at leaf's head"
+assert_equal "$(grep -c 'ls-remote.*acme/leaf.git' "$MOCK_LOG" || true)" "0" \
+  "never asks the remote for a head this run pushed"
 assert_contains "$output" "==> mid
   pulling...
   updating leaf...
@@ -60,11 +63,17 @@ output=$(run_cascade demo --pr) && status=0 || status=$?
 assert_equal "$status" "0" "waiting repositories do not fail the run"
 assert_contains "$output" "PR #42 updated" "leaf gets its PR"
 assert_contains "$output" "==> mid
+  pulling...
   waiting on PR #42 (leaf)" "mid waits on leaf's PR by number"
 assert_contains "$output" "==> top
+  pulling...
   waiting on PR #42 (leaf)" "top waits on the same PR through mid"
 assert_equal "$(( $(commits_in mid) + $(commits_in top) ))" "0" "nothing is committed in a waiting repository"
-assert_equal "$(grep -Ec $'^git\t(mid|top)\tpull' "$MOCK_LOG" || true)" "0" "a waiting repository is not even pulled"
+assert_equal "$(grep -Ec $'^git\t(mid|top)\tpull' "$MOCK_LOG" || true)" "2" "a waiting repository is pulled, so its current lock decides"
+assert_equal "$(grep -Ec $'^(nix\t.*/(mid|top)|git\tls-remote.*/(leaf|mid)\.git)' "$MOCK_LOG" || true)" "0" \
+  "nothing is asked of nix or the remote for a waiting repository"
+assert_log_contains $'forge\t-R acme/leaf pr edit 42 --title flake.lock: update demo --body Automated flake.lock update for inputs `demo`.' \
+  "refreshes the existing PR's title and body to what moved this time"
 assert_contains "$output" "Waiting on unmerged PRs:
   mid: PR #42 (leaf)
   top: PR #42 (leaf)
@@ -104,6 +113,71 @@ assert_contains "$output" "Dry run: mid, top also take the commits above once th
   "ends by naming the repositories a real run also moves"
 assert_equal "$(cat "$HOME"/work/*/flake.lock | sha256sum)" "$before" "changes no lock"
 assert_equal "$(grep -Ec $'^git\t(leaf|mid|top)\t(commit|push)' "$MOCK_LOG" || true)" "0" "commits and pushes nothing"
+
+# --- A pin of a branch that is not the target's default is read like any
+# other but never waits for, or is promised, a commit from this run ---
+new_home release-pin
+write_chain leaf mid top
+write_declared_lock "$HOME/work/mid" leaf '{"type":"git","url":"https://forge.anarch.diy/acme/leaf.git","ref":"release"}'
+export MOCK_HEAD="$b" MOCK_SCENARIO=dry-run
+output=$(run_cascade demo --dry-run)
+assert_contains "$output" "demo: aaaaaaa → bbbbbbb" "leaf still moves"
+assert_contains "$output" "==> mid
+  pulling...
+  already up to date" "a release-branch pin is not promised a default-branch commit"
+assert_equal "$(grep -c 'Dry run:' <<<"$output")" "0" "no wave is announced for a release-branch pin"
+assert_log_contains $'git\tls-remote\t--exit-code https://forge.anarch.diy/acme/leaf.git refs/heads/release refs/tags/release' \
+  "the release branch itself is read"
+export MOCK_SCENARIO=pr
+: > "$MOCK_LOG"
+output=$(run_cascade demo --pr)
+assert_contains "$output" "PR #42 updated" "leaf gets its PR"
+assert_equal "$(grep -c 'waiting on' <<<"$output")" "0" "a release-branch pin does not wait on the PR"
+
+# --- A protected repository in a dry run of a direct run: shown, named as
+# skipped, and promised to nobody downstream ---
+new_home protected-dry-run
+write_chain leaf mid top
+printf '%s\n' "work/leaf master" > "$HOME/.config/git/protected-branches"
+export MOCK_HEAD="$b" MOCK_SCENARIO=dry-run
+output=$(run_cascade demo --dry-run)
+assert_contains "$output" "==> leaf
+  pulling...
+  protected branch (master) — a direct run skips this repository; re-run with --pr
+  updating demo (dry-run)...
+  demo: aaaaaaa → bbbbbbb" "a protected repository's update is shown and named as skipped"
+assert_contains "$output" "==> mid
+  pulling...
+  already up to date" "nothing downstream is promised a commit a direct run will not make"
+assert_equal "$(grep -c 'Dry run:' <<<"$output")" "0" "no wave is announced behind a protected repository"
+
+# --- A pin the pull brings in is waited on: the current lock decides ---
+new_home pulled-pin
+write_chain leaf mid top
+write_github_lock "$HOME/work/mid"
+export MOCK_PULLED_LOCKS="$HOME/pulled"
+mkdir -p "$MOCK_PULLED_LOCKS"
+jq -n --arg a "$a" '{nodes: {root: {inputs: {demo: "demo", leaf: "leaf"}}, demo: {original: {type: "github", owner: "acme", repo: "demo", ref: "main"}, locked: {rev: $a}}, leaf: {original: {type: "git", url: "https://forge.anarch.diy/acme/leaf.git"}, locked: {rev: $a}}}}' \
+  > "$MOCK_PULLED_LOCKS/mid"
+export MOCK_HEAD="$b" MOCK_SCENARIO=pr
+output=$(run_cascade demo --pr) && status=0 || status=$?
+assert_equal "$status" "0" "the run succeeds"
+assert_contains "$output" "==> mid
+  pulling...
+  waiting on PR #42 (leaf)" "a pin that arrived with the pull waits on the PR"
+assert_equal "$(commits_in mid)" "0" "nothing is committed in the newly pinning repository"
+
+# --- A cycle among repositories the run skips constrains nothing ---
+new_home skipped-cycle
+write_declared_lock "$HOME/work/x" y '{"type":"git","url":"https://forge.anarch.diy/acme/y.git"}'
+write_declared_lock "$HOME/work/y" x '{"type":"git","url":"https://forge.anarch.diy/acme/x.git"}'
+write_direct_lock "$HOME/work/app"
+printf '%s\n' x y > "$HOME/.config/git/active-pr-branches"
+export MOCK_HEAD="$b" MOCK_SCENARIO=direct
+output=$(run_cascade demo) && status=0 || status=$?
+assert_equal "$status" "0" "a cycle among skipped repositories does not fail the run"
+assert_contains "$output" "committed and pushed" "the unrelated repository is still updated"
+assert_equal "$(grep -c 'listed in active-pr-branches' <<<"$output")" "2" "the cycle's members are skipped as before"
 
 # --- A cycle is a preflight error naming both repositories ---
 new_home cycle

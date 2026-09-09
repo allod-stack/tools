@@ -154,6 +154,9 @@ func run(args []string) int {
 		inputLabel:    strings.Join(opts.names, ", "),
 		inputSlug:     strings.Join(opts.names, "-"),
 		heads:         make(map[string]string),
+		pushed:        make(map[string]pushedHead),
+		defaults:      make(map[string]string),
+		protected:     make(map[string]bool),
 		prMoved:       make(map[string]string),
 		waiting:       make(map[string][]blocker),
 		wouldMove:     make(map[string]bool),
@@ -218,12 +221,18 @@ type cascade struct {
 	identity   map[string]string
 	byIdentity map[string][]string
 	// pins holds each repository's workspace pins as read before anything
-	// is pulled: the graph the order is built from.
-	pins map[string][]pin
+	// is pulled: the graph the order is built from. defaults caches each
+	// repository's default branch, and protected says whether that branch
+	// is listed in protected-branches, in every mode.
+	pins      map[string][]pin
+	defaults  map[string]string
+	protected map[string]bool
 
 	// heads caches the branch heads read this run, keyed by URL and ref; an
-	// empty value records a failed read so it is not retried.
-	heads map[string]string
+	// empty value records a failed read so it is not retried. pushed holds,
+	// per repository this run pushed a default branch of, what it pushed.
+	heads  map[string]string
+	pushed map[string]pushedHead
 
 	// prMoved records, per repository this run pushed a lock commit for on a
 	// PR branch, the PR carrying it; waiting records the PRs each deferred
@@ -397,18 +406,16 @@ func (c *cascade) preflight() {
 			continue
 		}
 
-		if !c.prMode && !c.dryRun {
-			defaultBranch := defaultBranch(dir)
-			if fileHasLine(c.protectedFile, "work/"+repo+" "+defaultBranch) {
-				c.status[repo] = skipProtect
-				continue
-			}
+		defaultBranch := c.defaultBranchOf(repo)
+		c.protected[repo] = fileHasLine(c.protectedFile, "work/"+repo+" "+defaultBranch)
+		if !c.prMode && !c.dryRun && c.protected[repo] {
+			c.status[repo] = skipProtect
+			continue
 		}
 
 		var repoErrors []string
 
 		currentBranch, _ := gitCapture(dir, "branch", "--show-current")
-		defaultBranch := defaultBranch(dir)
 		if currentBranch == "" || currentBranch != defaultBranch {
 			shown := currentBranch
 			if shown == "" {
@@ -445,12 +452,20 @@ func (c *cascade) preflight() {
 	}
 
 	// The order: every repository after the ones it pins, directory order
-	// among the rest. Repositories that pin each other have no order, and
-	// the run stops here naming them.
+	// among the rest. Only repositories the run goes on to process are
+	// ordered; a skipped one is never committed to, so a cycle through it
+	// constrains nothing, and a repository pinning itself is left to nix.
+	// Repositories that pin each other have no order, and the run stops
+	// here naming them.
 	deps := make(map[string][]string)
 	for _, repo := range c.repos {
+		if c.status[repo] != eligible && c.status[repo] != preflightErr {
+			continue
+		}
 		for _, p := range c.pins[repo] {
-			deps[repo] = append(deps[repo], p.target)
+			if p.target != repo {
+				deps[repo] = append(deps[repo], p.target)
+			}
 		}
 	}
 	order, cycle := dependencyOrder(c.repos, deps)
@@ -458,6 +473,16 @@ func (c *cascade) preflight() {
 		c.addError(repo, cycleMessage(cycle, repo))
 	}
 	c.order = order
+}
+
+// defaultBranchOf is defaultBranch for a repository, asked of git once.
+func (c *cascade) defaultBranchOf(repo string) string {
+	branch, ok := c.defaults[repo]
+	if !ok {
+		branch = defaultBranch(c.repoDir(repo))
+		c.defaults[repo] = branch
+	}
+	return branch
 }
 
 // addError records a preflight error against a repository, joining it to any
@@ -533,22 +558,8 @@ func (c *cascade) execute() int {
 			say("  listed in active-pr-branches (GPG-signed commits required), skipping — handle manually")
 			continue
 		case skipProtect:
-			say("  protected branch (%s) — re-run with --pr to create a PR", defaultBranch(dir))
+			say("  protected branch (%s) — re-run with --pr to create a PR", c.defaultBranchOf(repo))
 			continue
-		}
-
-		// A repository pinning one this run moved only on a PR branch cannot
-		// pin that commit until the PR merges; it waits, untouched, and the
-		// same command re-run after the merge continues from here.
-		if c.prMode {
-			if blockers := c.blockers(repo); len(blockers) > 0 {
-				for _, b := range blockers {
-					say("  waiting on %s (%s)", b.pr, b.repo)
-				}
-				c.waiting[repo] = blockers
-				c.waitingOrder = append(c.waitingOrder, repo)
-				continue
-			}
 		}
 
 		repoSlug := strings.ReplaceAll(repo, "/", "_")
@@ -558,7 +569,7 @@ func (c *cascade) execute() int {
 			continue
 		}
 
-		defaultBranch := defaultBranch(dir)
+		defaultBranch := c.defaultBranchOf(repo)
 
 		say("  pulling...")
 		if !gitInherit(dir, "pull") {
@@ -577,13 +588,38 @@ func (c *cascade) execute() int {
 			continue
 		}
 
+		pins := c.workspacePins(lock)
+
+		// A repository pinning one this run moved only on a PR branch cannot
+		// pin that commit until the PR merges; it waits, with nothing
+		// written, and the same command re-run after the merge continues
+		// from here.
+		if c.prMode {
+			if blockers := c.blockers(pins); len(blockers) > 0 {
+				for _, b := range blockers {
+					say("  waiting on %s (%s)", b.pr, b.repo)
+				}
+				c.waiting[repo] = blockers
+				c.waitingOrder = append(c.waitingOrder, repo)
+				continue
+			}
+		}
+
+		// A dry run of a direct run shows a protected repository's update,
+		// as it always has, but says the real run skips it, and promises
+		// nothing downstream on its account.
+		skippedByDirect := c.dryRun && !c.prMode && c.protected[repo]
+		if skippedByDirect {
+			say("  protected branch (%s) — a direct run skips this repository; re-run with --pr", defaultBranch)
+		}
+
 		// A dry run cannot show the pin a downstream repository would take
 		// from a commit this run would push, because nothing is pushed; it
 		// says so and shows the rest.
 		pending := false
 		if c.dryRun {
-			for _, p := range c.workspacePins(lock) {
-				if c.wouldMove[p.target] {
+			for _, p := range pins {
+				if p.onDefault && c.wouldMove[p.target] {
 					say("  %s: %s moves in this run; a dry run cannot show the revision it will pin", p.input, p.target)
 					pending = true
 				}
@@ -602,7 +638,7 @@ func (c *cascade) execute() int {
 		if plan.empty() {
 			if pending {
 				say("  no other changes (dry-run)")
-				c.wouldMove[repo] = true
+				c.wouldMove[repo] = !skippedByDirect
 			} else {
 				say("  already up to date")
 			}
@@ -623,7 +659,7 @@ func (c *cascade) execute() int {
 		}
 		switch {
 		case c.dryRun:
-			if result.moved || pending {
+			if (result.moved || pending) && !skippedByDirect {
 				c.wouldMove[repo] = true
 			}
 		case c.prMode:
@@ -631,11 +667,10 @@ func (c *cascade) execute() int {
 				c.prMoved[repo] = result.pr
 			}
 		default:
-			// The push moved the branch head every downstream pin reads, so
-			// the cached head is dropped and read again where it is next
-			// needed.
+			// The push moved the head every downstream pin of this branch
+			// reads; what it moved to is known here without asking.
 			if result.moved {
-				c.forgetHeads(c.identity[repo])
+				c.recordPush(dir, repo, defaultBranch)
 			}
 		}
 	}
@@ -644,11 +679,11 @@ func (c *cascade) execute() int {
 	return overallExit
 }
 
-// blockers lists the PRs a repository waits on: one for each workspace pin
-// whose target this run moved on a PR branch, and the ones each waiting
-// target is itself waiting on, since a repository is processed after every
-// repository it pins.
-func (c *cascade) blockers(repo string) []blocker {
+// blockers lists the PRs a repository with the given workspace pins waits
+// on: one for each pin of a default branch whose repository this run moved on
+// a PR branch, and the ones each waiting target is itself waiting on, since a
+// repository is processed after every repository it pins.
+func (c *cascade) blockers(pins []pin) []blocker {
 	var blockers []blocker
 	seen := make(map[blocker]bool)
 	add := func(b blocker) {
@@ -657,7 +692,10 @@ func (c *cascade) blockers(repo string) []blocker {
 			blockers = append(blockers, b)
 		}
 	}
-	for _, p := range c.pins[repo] {
+	for _, p := range pins {
+		if !p.onDefault {
+			continue
+		}
 		if pr, ok := c.prMoved[p.target]; ok {
 			add(blocker{pr: pr, repo: p.target})
 		}
@@ -831,21 +869,35 @@ func (c *cascade) prRepo(dir, repoSlug, defaultBranch string, updatePaths []stri
 	if !ok {
 		fatal(1)
 	}
+	title := "flake.lock: update " + label
+	body := "Automated flake.lock update for inputs `" + label + "`."
 	var pr string
 	existingPR, _ := capture(nil, "forge", "-R", forgeRepo, "pr", "find-by-head", prBranch)
 	if existingPR == "" {
-		prURL, _ := capture(nil, "forge", "-R", forgeRepo, "pr", "create",
-			"--title", "flake.lock: update "+label,
-			"--head", prBranch,
-			"--base", defaultBranch,
-			"--body", "Automated flake.lock update for inputs `"+label+"`.")
+		prURL, created := capture(nil, "forge", "-R", forgeRepo, "pr", "create",
+			"--title", title, "--head", prBranch, "--base", defaultBranch, "--body", body)
+		if !created {
+			// The branch is pushed but no PR carries it; nothing downstream
+			// should wait on one.
+			say("  PR creation failed")
+			mustGit(dir, "checkout", defaultBranch)
+			mustGit(dir, "checkout", "--", "flake.lock")
+			return outcome{}
+		}
+		pr = prURL
 		if prURL == "" {
 			prURL = "PR created (could not fetch URL)"
+			pr = "the PR for " + prBranch
 		}
 		say("  %s", prURL)
-		pr = prURL
 	} else {
-		say("  PR #%s updated", existingPR)
+		// The commit just pushed names what moved this time, which may
+		// differ from what the PR was opened for.
+		if _, edited := capture(nil, "forge", "-R", forgeRepo, "pr", "edit", existingPR, "--title", title, "--body", body); edited {
+			say("  PR #%s updated", existingPR)
+		} else {
+			say("  PR #%s updated; its title could not be refreshed", existingPR)
+		}
 		pr = "PR #" + existingPR
 	}
 

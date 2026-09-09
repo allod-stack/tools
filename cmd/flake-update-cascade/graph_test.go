@@ -124,9 +124,14 @@ func TestWorkspacePinsAndUpdateSet(t *testing.T) {
 		"forge.anarch.diy/allod/nexus":     {"allod/nexus"},
 		"forge.anarch.diy/allod/inventory": {"allod/inventory"},
 		"forge.anarch.diy/allod/secrets":   {"allod/secrets"},
-	}}
+	}, defaults: map[string]string{"allod/vm": "master", "allod/nexus": "master"}}
 	pins := c.workspacePins(lock)
-	want := []pin{{"nexus", "allod/nexus"}, {"vm", "allod/vm"}}
+	// vm names no branch, so it follows the default; nexus names main,
+	// which is not nexus's default branch.
+	want := []pin{
+		{input: "nexus", target: "allod/nexus", ref: "main", onDefault: false},
+		{input: "vm", target: "allod/vm", ref: "HEAD", onDefault: true},
+	}
 	if !reflect.DeepEqual(pins, want) {
 		t.Errorf("workspacePins = %v, want %v", pins, want)
 	}
@@ -136,6 +141,24 @@ func TestWorkspacePinsAndUpdateSet(t *testing.T) {
 	c.names = []string{"vm"}
 	if got := c.updateSet(lock); !reflect.DeepEqual(got, []string{"nexus", "vm"}) {
 		t.Errorf("updateSet with a pinned name = %v", got)
+	}
+}
+
+// A branch this run pushed answers from what was pushed, for every spelling
+// of the branch and of the repository, without touching the cache; another
+// branch of the same repository still reads from the cache.
+func TestResolveHeadPrefersWhatWasPushed(t *testing.T) {
+	c := &cascade{
+		heads:  map[string]string{"https://forge.anarch.diy/allod/vm.git\tmain": rev('a')},
+		pushed: map[string]pushedHead{mustIdentity(t, "ssh://git@forge.anarch.diy:2222/allod/vm.git"): {branch: "master", rev: rev('p')}},
+	}
+	for _, ref := range []string{"HEAD", "master", "refs/heads/master"} {
+		if got, ok := c.resolveHead("https://forge.anarch.diy/allod/vm.git", ref); !ok || got != rev('p') {
+			t.Errorf("resolveHead(vm, %q) = %q, %v; want the pushed revision", ref, got, ok)
+		}
+	}
+	if got, _ := c.resolveHead("https://forge.anarch.diy/allod/vm.git", "main"); got != rev('a') {
+		t.Errorf("another branch of the pushed repository answered %q from the push", got)
 	}
 }
 

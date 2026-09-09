@@ -63,12 +63,16 @@ chain `vm` and `nexus` go before `archetypes`, which goes before `deploy`. Two
 repos pinning each other is a pre-flight error naming both. Every workspace pin
 is checked against the head of the branch it names and moved when it is behind,
 whether or not its input was on the command line: a lock commit the run pushes
-upstream is read by the next repo down as that branch's new head, and so is a
-lock PR merged since the last run. A pin already at its head is left alone, so
-a repo whose only stale inputs are external behaves as before. This is the one
-visible change on an existing workspace — a run naming only an external input
-also moves internal pins that are behind — and a repo whose named input is a
-`follows` but that holds a workspace pin is now examined rather than skipped.
+upstream is what the next repo down reads as that branch's new head, with no
+second round trip, and a lock PR merged since the last run is read the same
+way. A pin already at its head is left alone, so a repo whose only stale inputs
+are external behaves as before. Two things change on an existing workspace: a
+run naming only an external input also moves internal pins that are behind,
+and a repo whose named input is a `follows` but that holds a workspace pin is
+now examined rather than skipped — pulled, updated if a pin is behind, and
+subject to the pre-flight checks, so a dirty tree there now blocks the run.
+The order and the cycle check come from the locks as they stand before the
+run's own pulls; everything else is decided on the lock after the pull.
 Transitive nodes such as `archetypes/vm` still move through the intermediate
 repo's own lock bump. Each commit names the paths that moved in that repo, in
 lock order: `flake.lock: update allod-tools, vm/nixpkgs`.
@@ -99,11 +103,20 @@ Each eligible repo gets a branch named `agent/flake-update-<input>`. On
 re-runs, the branch is force-updated and the existing PR is noted rather than a
 new one being created. Requires `forge` on PATH.
 
-A workspace pin can only take a commit on the default branch, so a repo that
-pins one this run moved on a PR branch waits: it is reported with the PR it
-waits on, nothing is committed there, and the run ends by listing every waiting
-repo and its PRs. The exit status stays 0; the same command re-run after the
-PRs merge continues the cascade from there.
+A workspace pin of a default branch can only take a commit once it is on that
+branch, so a repo that pins one this run moved on a PR branch waits: it is
+pulled and reported with the PR it waits on, nothing is committed there — not
+even its own named inputs, which go into the same PR later — and the run ends
+by listing every waiting repo and its PRs. The exit status stays 0; the same
+command re-run after the PRs merge continues the cascade from there, one round
+per level of the chain. A pin of a release branch or a tag never waits. On a
+re-run the existing PR's title and body are refreshed to name what moved that
+time.
+
+The PR branch is still named after the command line, `agent/flake-update-<input>`,
+so a re-run finds its PR; a stale workspace pin therefore appears on the PR of
+whichever input name was run, and running two different names before the first
+PR merges opens two PRs carrying the same pin.
 
 ```
 ==> allod/archetypes
@@ -121,7 +134,9 @@ The plan is printed in dependency order. A pin that would follow a commit this
 run pushes cannot be computed without pushing, so a dry run shows the first
 wave and says so on the repo's own lines (`vm: allod/vm moves in this run; a
 dry run cannot show the revision it will pin`) and again at the end; pins
-behind commits that are already merged are shown in full.
+behind commits that are already merged are shown in full. A protected repo's
+update is shown too, marked `a direct run skips this repository`, and nothing
+downstream is promised on its account.
 
 **What a run costs.** Before asking Nix anything, the tool reads the branch
 head behind each named input and each workspace pin with `git ls-remote` —

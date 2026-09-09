@@ -72,6 +72,13 @@ func planLock(lock *flakelock.Lock, paths []string, resolve func(url, ref string
 // spends one of per named GitHub input per repository just to learn that
 // nothing moved.
 func (c *cascade) resolveHead(url, ref string) (string, bool) {
+	// A branch this run has just pushed is at the revision it pushed; no
+	// remote can say otherwise, so it is not asked.
+	if id, ok := repoIdentity(url); ok {
+		if p, pushed := c.pushed[id]; pushed && (ref == "HEAD" || ref == p.branch || ref == "refs/heads/"+p.branch) {
+			return p.rev, true
+		}
+	}
 	key := url + "\t" + ref
 	head, seen := c.heads[key]
 	if !seen {
@@ -158,6 +165,29 @@ func applyLock(dir, out string, plan lockPlan) error {
 		}
 	}
 	return nil
+}
+
+// A pushedHead is the default branch of a repository this run pushed to and
+// the revision it pushed: what every downstream pin of that branch reads from
+// here on, without a network round trip.
+type pushedHead struct {
+	branch, rev string
+}
+
+// recordPush notes what a direct push left at the head of a repository's
+// default branch — the checkout's HEAD, since preflight put the checkout on
+// that branch. When git cannot say what HEAD is, the cached heads are
+// forgotten instead, so the next reader goes back to the remote.
+func (c *cascade) recordPush(dir, repo, branch string) {
+	identity := c.identity[repo]
+	if identity == "" {
+		return
+	}
+	if rev, ok := gitCapture(dir, "rev-parse", "HEAD"); ok && rev != "" {
+		c.pushed[identity] = pushedHead{branch: branch, rev: rev}
+		return
+	}
+	c.forgetHeads(identity)
 }
 
 // forgetHeads drops every cached head of one repository, so the next

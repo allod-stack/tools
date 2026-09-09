@@ -15,6 +15,12 @@ import (
 type pin struct {
 	input  string // the input's name, which is also its update path
 	target string // the workspace repository it pins
+	ref    string // the branch it names, as the lock declares it
+	// onDefault says the branch is the target's default branch, the only
+	// one a commit this run makes can land on: a pin of a release branch
+	// or a tag is ordered on and read like any other but never waits for,
+	// or is promised, a commit from this run.
+	onDefault bool
 }
 
 // repoIdentity reduces a repository URL to what identifies the repository —
@@ -85,7 +91,13 @@ func (c *cascade) workspacePins(lock *flakelock.Lock) []pin {
 			continue
 		}
 		for _, target := range c.byIdentity[id] {
-			pins = append(pins, pin{input: name, target: target})
+			branch := c.defaultBranchOf(target)
+			pins = append(pins, pin{
+				input:     name,
+				target:    target,
+				ref:       src.Ref,
+				onDefault: src.Ref == "HEAD" || src.Ref == branch || src.Ref == "refs/heads/"+branch,
+			})
 		}
 	}
 	return pins
