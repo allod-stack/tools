@@ -39,7 +39,7 @@ PR commands:
 
 Auth commands:
   forge auth status
-      Check configured credentials (FORGEJO_TOKEN or token file)
+      Check the token in the configured token file
 
 Token commands:
   forge token verify
@@ -104,8 +104,9 @@ Flags:
 
 Config:
   FORGE_URL          Forgejo base URL (default: https://forge.anarch.diy)
-  FORGEJO_TOKEN      API token (takes precedence over token file)
   FORGE_TOKEN_FILE   Path to token file (default: ~/.config/git/forgejo-token)
+                     The token is read only from this mode-0600 file; a set
+                     FORGEJO_TOKEN is refused, never read
 `
 
 var commandUsageTexts = map[string]string{
@@ -383,7 +384,7 @@ Example:
 `,
 	"auth status": `Usage: forge auth status
 
-Check whether the configured credential source (FORGEJO_TOKEN env var
-or token file) is valid. Does not print or expose token material.
+Check whether the token in the configured token file (FORGE_TOKEN_FILE)
+is valid. Does not print or expose token material.
 `,
 }

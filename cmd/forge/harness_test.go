@@ -29,9 +29,9 @@ package main
 //
 // # Environment
 //
-//	useToken(t, fakeToken)            // FORGEJO_TOKEN
+//	useToken(t, fakeToken)            // useTokenFile with the fake token
 //	useTokenFile(t, "value")          // writes a temp file, sets FORGE_TOKEN_FILE
-//	useNoCredentials(t)               // neither is set
+//	useNoCredentials(t)               // no token file; FORGEJO_TOKEN empty
 //	useServer(t, srv)                 // FORGE_URL
 //
 // All of these go through t.Setenv, so they are undone automatically and must
@@ -189,15 +189,17 @@ func useNoInferRepo(t *testing.T) {
 
 // --- Environment ---
 
-// useToken sets FORGEJO_TOKEN.
-func useToken(t *testing.T, tok string) {
+// useToken installs tok through a temp token file. The file is the only
+// credential source (allod/tools#57); FORGEJO_TOKEN is refused, and a test
+// that wants the refusal sets the variable itself.
+func useToken(t *testing.T, tok string) string {
 	t.Helper()
-	t.Setenv("FORGEJO_TOKEN", tok)
+	return useTokenFile(t, tok)
 }
 
 // useTokenFile writes contents to a temp file and points FORGE_TOKEN_FILE at
-// it, with FORGEJO_TOKEN cleared. It returns the path, which appears verbatim
-// in several messages.
+// it, with FORGEJO_TOKEN cleared so a developer's shell cannot trip the
+// refusal. It returns the path, which appears verbatim in several messages.
 func useTokenFile(t *testing.T, contents string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "forgejo-token")
@@ -209,8 +211,8 @@ func useTokenFile(t *testing.T, contents string) string {
 	return path
 }
 
-// useNoCredentials leaves neither credential source available and returns the
-// token file path that will be reported as missing.
+// useNoCredentials points FORGE_TOKEN_FILE at an absent file, with
+// FORGEJO_TOKEN empty, and returns the path that will be reported as missing.
 func useNoCredentials(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "absent-token")
@@ -405,7 +407,7 @@ func TestHelpRouting(t *testing.T) {
 		{"project --help", []string{"project", "--help"}, commandUsageTexts["project"], "unavailable"},
 		{"project subcommand --help", []string{"project", "list", "--help"}, commandUsageTexts["project"], "unavailable"},
 		{"token verify --help", []string{"token", "verify", "--help"}, commandUsageTexts["token verify"], "stdin"},
-		{"auth status -h", []string{"auth", "status", "-h"}, commandUsageTexts["auth status"], "credential"},
+		{"auth status -h", []string{"auth", "status", "-h"}, commandUsageTexts["auth status"], "FORGE_TOKEN_FILE"},
 	}
 
 	for _, tt := range tests {
@@ -515,7 +517,7 @@ func TestLoadTokenErrors(t *testing.T) {
 	t.Run("no credential source", func(t *testing.T) {
 		path := useNoCredentials(t)
 		out, errText, code := runForge(t, "auth", "status")
-		want := "forge: no token found — set FORGEJO_TOKEN or ensure " + path + " exists\n"
+		want := "forge: no token found — ensure " + path + " exists or point FORGE_TOKEN_FILE at a mode-0600 token file\n"
 		if code != 1 || out != "" || errText != want {
 			t.Errorf("got (%q, %q, %d), want (%q, %q, 1)", out, errText, code, "", want)
 		}
@@ -530,14 +532,6 @@ func TestLoadTokenErrors(t *testing.T) {
 		{"backslash", `valid\injection`},
 	}
 	for _, tt := range invalid {
-		t.Run("env "+tt.name, func(t *testing.T) {
-			useToken(t, tt.value)
-			_, errText, code := runForge(t, "auth", "status")
-			want := "forge: FORGEJO_TOKEN contains invalid characters (newline, quote, or backslash)\n"
-			if code != 1 || errText != want {
-				t.Errorf("got (%q, %d), want (%q, 1)", errText, code, want)
-			}
-		})
 		t.Run("file "+tt.name, func(t *testing.T) {
 			path := useTokenFile(t, tt.value)
 			_, errText, code := runForge(t, "auth", "status")
@@ -557,11 +551,12 @@ func TestLoadTokenErrors(t *testing.T) {
 		}
 	})
 
-	// An empty FORGEJO_TOKEN is not a credential: bash tests -n, so the token
-	// file is consulted instead.
+	// An empty FORGEJO_TOKEN is not a credential and not a refusal: only a
+	// set, non-empty variable is refused (allod/tools#57), so the file is
+	// consulted as usual.
 	t.Run("empty env falls through to file", func(t *testing.T) {
 		path := useTokenFile(t, "")
-		useToken(t, "")
+		t.Setenv("FORGEJO_TOKEN", "")
 		_, errText, code := runForge(t, "auth", "status")
 		want := "forge: " + path + " is empty\n"
 		if code != 1 || errText != want {
@@ -570,19 +565,66 @@ func TestLoadTokenErrors(t *testing.T) {
 	})
 }
 
+// diverges from bash: allod/tools#57
+//
+// The token is read only from the token file. A set, non-empty FORGEJO_TOKEN
+// is refused before any request, with one sentence naming the variable and
+// the file, even when a valid token file is also present: the refusal is what
+// stops anyone believing the variable is in use when it is not.
+func TestForgejoTokenEnvRefused(t *testing.T) {
+	commands := [][]string{
+		{"auth", "status"},
+		{"-R", "acme/widget", "label", "list"},
+	}
+	for _, args := range commands {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			path := useTokenFile(t, fakeToken)
+			t.Setenv("FORGEJO_TOKEN", fakeToken)
+			srv := newRecordingServer(t, map[string]cannedResponse{})
+			useServer(t, srv)
+
+			out, errText, code := runForge(t, args...)
+			want := "forge: FORGEJO_TOKEN is no longer read; unset it and put the token in a mode-0600 file named by FORGE_TOKEN_FILE (currently " + path + ")\n"
+			if code != 1 || out != "" || errText != want {
+				t.Errorf("got (%q, %q, %d), want (%q, %q, 1)", out, errText, code, "", want)
+			}
+			if n := srv.count(); n != 0 {
+				t.Errorf("recording server received %d requests, want 0", n)
+			}
+		})
+	}
+
+	// The same token in the file, and nothing in the environment, is the
+	// working path: the header carries the file's contents.
+	t.Run("token file alone is accepted", func(t *testing.T) {
+		path := useTokenFile(t, fakeToken)
+		srv := newRecordingServer(t, userRoutes("testuser"))
+		useServer(t, srv)
+
+		out, errText, code := runForge(t, "auth", "status")
+		if want := "Authenticated as testuser (" + path + ")\n"; code != 0 || out != want || errText != "" {
+			t.Errorf("got (%q, %q, %d), want (%q, %q, 0)", out, errText, code, want, "")
+		}
+		srv.assertRequest(t, 0, "GET", "/api/v1/user")
+		if got := srv.requests()[0].Authorization; got != "token "+fakeToken {
+			t.Errorf("authorization = %s, want the token file contents", srv.requests()[0].authKind())
+		}
+	})
+}
+
 // --- auth status (retired shell-suite scenarios) ---
 
 func TestAuthStatus(t *testing.T) {
-	t.Run("valid env token", func(t *testing.T) {
+	t.Run("valid token", func(t *testing.T) {
 		srv := newRecordingServer(t, userRoutes("testuser"))
 		useServer(t, srv)
-		useToken(t, fakeToken)
+		path := useToken(t, fakeToken)
 
 		out, errText, code := runForge(t, "auth", "status")
 		if code != 0 {
 			t.Errorf("exit code = %d, want 0", code)
 		}
-		if want := "Authenticated as testuser (FORGEJO_TOKEN)\n"; out != want {
+		if want := "Authenticated as testuser (" + path + ")\n"; out != want {
 			t.Errorf("stdout = %q, want %q", out, want)
 		}
 		if errText != "" {
@@ -603,10 +645,10 @@ func TestAuthStatus(t *testing.T) {
 	t.Run("carriage return is stripped", func(t *testing.T) {
 		srv := newRecordingServer(t, userRoutes("testuser"))
 		useServer(t, srv)
-		useToken(t, fakeToken+"\r")
+		path := useToken(t, fakeToken+"\r")
 
 		out, _, code := runForge(t, "auth", "status")
-		if code != 0 || out != "Authenticated as testuser (FORGEJO_TOKEN)\n" {
+		if code != 0 || out != "Authenticated as testuser ("+path+")\n" {
 			t.Errorf("got (%q, %d), want the authenticated line and 0", out, code)
 		}
 		if got := srv.requests()[0].Authorization; got != "token "+fakeToken {
@@ -639,10 +681,10 @@ func TestAuthStatus(t *testing.T) {
 				"/api/v1/user": {Status: tt.status, Body: `{"message":"Unauthorized"}`},
 			})
 			useServer(t, srv)
-			useToken(t, fakeToken)
+			path := useToken(t, fakeToken)
 
 			out, errText, code := runForge(t, "auth", "status")
-			want := "Authentication failed: " + tt.reason + " (FORGEJO_TOKEN)\n"
+			want := "Authentication failed: " + tt.reason + " (" + path + ")\n"
 			if code != 1 || out != "" || errText != want {
 				t.Errorf("got (%q, %q, %d), want (%q, %q, 1)", out, errText, code, "", want)
 			}

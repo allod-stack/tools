@@ -11,10 +11,13 @@ forge [-R|--repo owner/repo] <resource> <command> [args]
 | Variable | Meaning |
 |---|---|
 | `FORGE_URL` | Forgejo base URL; defaults to `https://forge.anarch.diy` |
-| `FORGEJO_TOKEN` | Token value; overrides the token file when set |
 | `FORGE_TOKEN_FILE` | Token file path; defaults to `~/.config/git/forgejo-token` |
 
-When `FORGEJO_TOKEN` is unset, `forge` reads the token from `FORGE_TOKEN_FILE`.
+`forge` reads the token only from `FORGE_TOKEN_FILE`, which should be a mode-0600
+file. `FORGEJO_TOKEN` is no longer read: when it is set and non-empty, `forge`
+exits 1 before making any request and says so, so a stale export cannot be
+mistaken for a working credential. An environment variable is inherited by every
+child process, while a file is read only by code that opens it.
 Repo is inferred from `git remote get-url origin` when `-R`/`--repo` is omitted,
 and `-R`/`--repo` may appear before the resource or after the command.
 
@@ -128,8 +131,9 @@ allod workflow does not accept AGit submissions (see docs/pr-explain.md).
 forge auth status       # verify configured credentials
 ```
 
-`auth status` checks the configured token source (`FORGEJO_TOKEN` env var or
-token file) without exposing token material in output or process arguments.
+`auth status` checks the token in the configured token file (`FORGE_TOKEN_FILE`)
+and names that file as the source, without exposing token material in output or
+process arguments.
 
 ## Token commands
 

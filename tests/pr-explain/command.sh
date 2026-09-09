@@ -51,6 +51,9 @@ export ANTHROPIC_AUTH_TOKEN="anthropic-token-must-not-leak"
 export CLAUDE_CODE_USE_BEDROCK=1
 export CLAUDE_CODE_USE_VERTEX=1
 export CLAUDE_CODE_USE_FOUNDRY=1
+# FORGEJO_TOKEN is a leak canary only: the real forge refuses to run with it
+# set (allod/tools#57), but every forge this suite drives is the mock script
+# behind ALLOD_PR_EXPLAIN_FORGE, which never reads it.
 export FORGEJO_TOKEN="forge-token-must-not-leak"
 export FORGE_TOKEN_FILE="$TEST_TMP/real-forge-token"
 export CODEX_HOME="$TEST_TMP/codex-subscription"

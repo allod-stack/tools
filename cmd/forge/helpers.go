@@ -136,22 +136,29 @@ func validateToken(tok, source string) string {
 
 // loadToken mirrors load_token (forge line 90). It runs at most once per run,
 // like the TOKEN_LOADED guard.
+//
+// diverges from bash: allod/tools#57. The token comes only from the token
+// file. A non-empty FORGEJO_TOKEN is refused rather than ignored, so nobody
+// can believe the variable is in use when it is not: an environment variable
+// is inherited by every child process, while a 0600 file is read only by code
+// that opens it.
 func loadToken() {
 	if tokenLoaded {
 		return
 	}
-	if env := os.Getenv("FORGEJO_TOKEN"); env != "" {
-		token = validateToken(env, "FORGEJO_TOKEN")
-	} else if fileReadable(forgeTokenFile) {
-		// bash: validate_token "$(cat "$FORGE_TOKEN_FILE")" — command
-		// substitution strips every trailing newline. A read failure leaves
-		// the substitution empty, which lands on the "is empty" error.
-		data, _ := os.ReadFile(forgeTokenFile)
-		token = validateToken(chompNewlines(string(data)), forgeTokenFile)
-	} else {
-		fmt.Fprintf(stderr, "forge: no token found — set FORGEJO_TOKEN or ensure %s exists\n", forgeTokenFile)
+	if os.Getenv("FORGEJO_TOKEN") != "" {
+		fmt.Fprintf(stderr, "forge: FORGEJO_TOKEN is no longer read; unset it and put the token in a mode-0600 file named by FORGE_TOKEN_FILE (currently %s)\n", forgeTokenFile)
 		exit(1)
 	}
+	if !fileReadable(forgeTokenFile) {
+		fmt.Fprintf(stderr, "forge: no token found — ensure %s exists or point FORGE_TOKEN_FILE at a mode-0600 token file\n", forgeTokenFile)
+		exit(1)
+	}
+	// bash: validate_token "$(cat "$FORGE_TOKEN_FILE")" — command
+	// substitution strips every trailing newline. A read failure leaves
+	// the substitution empty, which lands on the "is empty" error.
+	data, _ := os.ReadFile(forgeTokenFile)
+	token = validateToken(chompNewlines(string(data)), forgeTokenFile)
 	tokenLoaded = true
 }
 

@@ -102,7 +102,7 @@ func TestUnreadableTokenFileMakesNoRequest(t *testing.T) {
 	useServer(t, srv)
 
 	out, errText, code := runForge(t, "-R", "acme/widget", "label", "list")
-	want := "forge: no token found — set FORGEJO_TOKEN or ensure " + path + " exists\n"
+	want := "forge: no token found — ensure " + path + " exists or point FORGE_TOKEN_FILE at a mode-0600 token file\n"
 	if code != 1 || out != "" || errText != want {
 		t.Errorf("got (%q, %q, %d), want (%q, %q, 1)", out, errText, code, "", want)
 	}

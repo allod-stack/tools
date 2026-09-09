@@ -119,17 +119,15 @@ func authStatus(args []string) {
 	}
 
 	loadToken()
-	sourceDesc := forgeTokenFile
-	if os.Getenv("FORGEJO_TOKEN") != "" {
-		sourceDesc = "FORGEJO_TOKEN"
-	}
 
+	// The token file is the only credential source (allod/tools#57), so it
+	// is always what the report names.
 	status, login := verifyTokenHTTP(token)
 	if status == 200 {
-		fmt.Fprintf(stdout, "Authenticated as %s (%s)\n", login, sourceDesc)
+		fmt.Fprintf(stdout, "Authenticated as %s (%s)\n", login, forgeTokenFile)
 		return
 	}
-	fmt.Fprintf(stderr, "Authentication failed: %s (%s)\n", verifyFailureReason(status), sourceDesc)
+	fmt.Fprintf(stderr, "Authentication failed: %s (%s)\n", verifyFailureReason(status), forgeTokenFile)
 	exit(1)
 }
 

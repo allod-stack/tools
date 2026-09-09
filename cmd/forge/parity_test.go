@@ -389,10 +389,10 @@ func TestCapturedFieldsAreChomped(t *testing.T) {
 			"/api/v1/user": {Body: "{\"login\":\"alice\\n\"}"},
 		})
 		useServer(t, srv)
-		useToken(t, fakeToken)
+		path := useToken(t, fakeToken)
 
 		out, _, code := runForge(t, "auth", "status")
-		if want := "Authenticated as alice (FORGEJO_TOKEN)\n"; out != want || code != 0 {
+		if want := "Authenticated as alice (" + path + ")\n"; out != want || code != 0 {
 			t.Errorf("stdout = %q, want %q", out, want)
 		}
 	})
