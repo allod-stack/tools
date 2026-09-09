@@ -10,7 +10,7 @@ host install them through their Nix composition, with no manual installation aft
 ## Layout
 
 ```
-cmd/allod/                Go main CLI (change, patch, pr, pm; site opt-in)
+cmd/allod/                Go main CLI (change, patch, pr; site opt-in)
 cmd/flake-update-cascade/ flake input update cascade Go command
 cmd/forge/                Forgejo CLI Go command
 internal/flakelock/       flake.lock graph walking for the cascade
@@ -28,7 +28,6 @@ pr-explain/               PR explanation report tool (behind `allod pr explain`)
   report.css              responsive component vocabulary
   report.js               optional progressive enhancements
   component-gallery.html  visual reference and regression fixture
-pm/                       PM board tools (schema, renderer, groom prompt)
 workspace/                daily workspace sync and status
   pull-all                pull every repo under ~/work/
   work-diff               show staged/unstaged changes across repos

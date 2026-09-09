@@ -1,7 +1,6 @@
-// Command allod manages workspace changes, patch transfer, site deploys, PR
-// explanations, and the PM board. The Bash implementation at the repository
-// root remains the compatibility oracle until the Phase 4 cleanup in
-// allod/tools#98.
+// Command allod manages workspace changes, patch transfer, site deploys, and
+// PR explanations. The Bash implementation at the repository root remains the
+// compatibility oracle until the Phase 4 cleanup in allod/tools#98.
 package main
 
 import (
@@ -35,7 +34,7 @@ type namespace struct {
 }
 
 // namespaces is the dispatch table, and it is the whole of it: a namespace
-// that is not in this slice does not exist. The core four are here; an
+// that is not in this slice does not exist. The core three are here; an
 // optional namespace appends itself from the init() of a file its build tag
 // selects, so a build that does not opt in carries neither the code nor the
 // word. That is the point of the arrangement. 'allod site' on a machine that
@@ -51,7 +50,6 @@ var namespaces = []namespace{
 	{"change", "Manage code changes (begin, list, record, submit, cleanup)", changeMain},
 	{"patch", "Transfer patches between environments (fetch, apply, receive)", patchMain},
 	{"pr", "Work with pull requests (explain)", delegatePR},
-	{"pm", "Manage the PM board overlay in the private state repo", delegatePM},
 }
 
 // registerNamespace adds one namespace to the dispatch table. It panics on a

@@ -203,19 +203,3 @@ func delegatePR(args []string) {
 	}, "PR explanation tool files not found; set ALLOD_TOOLS_DIR to an allod/tools checkout")
 	replaceProcess("bash", append([]string{script}, args...), os.Environ())
 }
-
-func delegatePM(args []string) {
-	tools := strings.TrimRight(os.Getenv("ALLOD_TOOLS_DIR"), "/")
-	wd := workDir()
-	configured := ""
-	if tools != "" {
-		configured = filepath.Join(tools, "pm", "pm")
-	}
-	script := findExecutable([]string{
-		configured,
-		filepath.Join(executableDir(), "pm", "pm"),
-		filepath.Join(wd, "allod", "tools", "pm", "pm"),
-	}, "pm tool files not found; set ALLOD_TOOLS_DIR to an allod/tools checkout")
-	env := append(os.Environ(), "WORK_DIR="+wd)
-	replaceProcess("bash", append([]string{script}, args...), env)
-}

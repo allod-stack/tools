@@ -67,7 +67,7 @@ func TestUsageListsEveryRegisteredNamespace(t *testing.T) {
 }
 
 func TestCoreNamespacesAreAlwaysRegistered(t *testing.T) {
-	for _, name := range []string{"change", "patch", "pr", "pm"} {
+	for _, name := range []string{"change", "patch", "pr"} {
 		if _, ok := lookupNamespace(name); !ok {
 			t.Errorf("the %s namespace is not registered", name)
 		}
