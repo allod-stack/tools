@@ -138,20 +138,21 @@ func validateToken(tok, source string) string {
 // like the TOKEN_LOADED guard.
 //
 // diverges from bash: allod/tools#57. The token comes only from the token
-// file. A non-empty FORGEJO_TOKEN is refused rather than ignored, so nobody
-// can believe the variable is in use when it is not: an environment variable
-// is inherited by every child process, while a 0600 file is read only by code
-// that opens it.
+// file (FORGEJO_TOKEN is refused before dispatch; see refuseEnvToken), and
+// the file must not be readable by group or others: the whole point of a
+// file over a variable is that only code which opens it can read it.
 func loadToken() {
 	if tokenLoaded {
 		return
 	}
-	if os.Getenv("FORGEJO_TOKEN") != "" {
-		fmt.Fprintf(stderr, "forge: FORGEJO_TOKEN is no longer read; unset it and put the token in a mode-0600 file named by FORGE_TOKEN_FILE (currently %s)\n", forgeTokenFile)
-		exit(1)
-	}
 	if !fileReadable(forgeTokenFile) {
 		fmt.Fprintf(stderr, "forge: no token found — ensure %s exists or point FORGE_TOKEN_FILE at a mode-0600 token file\n", forgeTokenFile)
+		exit(1)
+	}
+	// os.Stat follows symlinks, so the agenix-delivered file behind
+	// ~/.config/git/forgejo-token is judged by its own mode, not the link's.
+	if info, err := os.Stat(forgeTokenFile); err == nil && info.Mode().Perm()&0o077 != 0 {
+		fmt.Fprintf(stderr, "forge: token file %s is readable by group or others; run chmod 600 on it\n", forgeTokenFile)
 		exit(1)
 	}
 	// bash: validate_token "$(cat "$FORGE_TOKEN_FILE")" — command

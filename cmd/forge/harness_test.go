@@ -568,13 +568,20 @@ func TestLoadTokenErrors(t *testing.T) {
 // diverges from bash: allod/tools#57
 //
 // The token is read only from the token file. A set, non-empty FORGEJO_TOKEN
-// is refused before any request, with one sentence naming the variable and
-// the file, even when a valid token file is also present: the refusal is what
-// stops anyone believing the variable is in use when it is not.
+// is refused before dispatch, with one sentence naming the variable and the
+// file, even when a valid token file is also present: the refusal is what
+// stops anyone believing the variable is in use when it is not. The check
+// sits ahead of every command, so it also covers token verify (which never
+// loads the configured credential) and repo inference (which would spawn git,
+// and so hand the variable to a child process, before any credential is
+// asked for).
 func TestForgejoTokenEnvRefused(t *testing.T) {
 	commands := [][]string{
 		{"auth", "status"},
 		{"-R", "acme/widget", "label", "list"},
+		{"token", "verify"},
+		{"label", "list"}, // no -R: would infer the repo from git first
+		{"pr", "bogus"},   // unknown command: usage would print, refusal wins
 	}
 	for _, args := range commands {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
@@ -582,6 +589,13 @@ func TestForgejoTokenEnvRefused(t *testing.T) {
 			t.Setenv("FORGEJO_TOKEN", fakeToken)
 			srv := newRecordingServer(t, map[string]cannedResponse{})
 			useServer(t, srv)
+			useStdin(t, fakeToken+"\n")
+			prev := inferRepo
+			inferRepo = func() (string, error) {
+				t.Error("repo inference (a git child process) ran before the FORGEJO_TOKEN refusal")
+				return "", gitremote.ErrNoOrigin
+			}
+			t.Cleanup(func() { inferRepo = prev })
 
 			out, errText, code := runForge(t, args...)
 			want := "forge: FORGEJO_TOKEN is no longer read; unset it and put the token in a mode-0600 file named by FORGE_TOKEN_FILE (currently " + path + ")\n"
@@ -593,6 +607,19 @@ func TestForgejoTokenEnvRefused(t *testing.T) {
 			}
 		})
 	}
+
+	// Help output is the one exemption: it makes no request and spawns
+	// nothing, and a user whose environment is wrong still needs to read it.
+	t.Run("help is still printed", func(t *testing.T) {
+		useTokenFile(t, fakeToken)
+		t.Setenv("FORGEJO_TOKEN", fakeToken)
+		for _, args := range [][]string{{}, {"--help"}, {"auth", "status", "-h"}, {"pr", "list", "--help"}} {
+			out, errText, code := runForge(t, args...)
+			if code != 0 || out == "" || errText != "" {
+				t.Errorf("forge %v = (%q, %q, %d), want usage on stdout and 0", args, truncate(out), errText, code)
+			}
+		}
+	})
 
 	// The same token in the file, and nothing in the environment, is the
 	// working path: the header carries the file's contents.
@@ -608,6 +635,90 @@ func TestForgejoTokenEnvRefused(t *testing.T) {
 		srv.assertRequest(t, 0, "GET", "/api/v1/user")
 		if got := srv.requests()[0].Authorization; got != "token "+fakeToken {
 			t.Errorf("authorization = %s, want the token file contents", srv.requests()[0].authKind())
+		}
+	})
+}
+
+// diverges from bash: allod/tools#57
+//
+// The messages promise a mode-0600 token file, so loadToken checks it: any
+// group or other permission bit is refused before the contents are read or a
+// request is made. os.Stat follows symlinks, which is how the agenix-delivered
+// file is reached, so the target's mode is what counts.
+func TestTokenFilePermissions(t *testing.T) {
+	loose := []struct {
+		name string
+		mode os.FileMode
+	}{
+		{"group readable", 0o640},
+		{"other readable", 0o604},
+		{"world readable", 0o644},
+		{"group writable", 0o620},
+	}
+	for _, tt := range loose {
+		t.Run(tt.name, func(t *testing.T) {
+			path := useTokenFile(t, fakeToken)
+			if err := os.Chmod(path, tt.mode); err != nil {
+				t.Fatalf("chmod: %v", err)
+			}
+			srv := newRecordingServer(t, map[string]cannedResponse{})
+			useServer(t, srv)
+
+			out, errText, code := runForge(t, "auth", "status")
+			want := "forge: token file " + path + " is readable by group or others; run chmod 600 on it\n"
+			if code != 1 || out != "" || errText != want {
+				t.Errorf("got (%q, %q, %d), want (%q, %q, 1)", out, errText, code, "", want)
+			}
+			if n := srv.count(); n != 0 {
+				t.Errorf("recording server received %d requests, want 0", n)
+			}
+		})
+	}
+
+	for _, mode := range []os.FileMode{0o600, 0o400} {
+		t.Run(fmt.Sprintf("owner-only %04o is accepted", mode), func(t *testing.T) {
+			path := useTokenFile(t, fakeToken)
+			if err := os.Chmod(path, mode); err != nil {
+				t.Fatalf("chmod: %v", err)
+			}
+			srv := newRecordingServer(t, userRoutes("testuser"))
+			useServer(t, srv)
+
+			out, errText, code := runForge(t, "auth", "status")
+			if want := "Authenticated as testuser (" + path + ")\n"; code != 0 || out != want || errText != "" {
+				t.Errorf("got (%q, %q, %d), want (%q, %q, 0)", out, errText, code, want, "")
+			}
+		})
+	}
+
+	// A symlink is judged by its target: a 0777 link to a 0600 file is fine,
+	// and a link to a 0644 file is refused with the link's own path, which is
+	// the one the user configured.
+	t.Run("symlink follows to the target mode", func(t *testing.T) {
+		target := useTokenFile(t, fakeToken)
+		link := filepath.Join(t.TempDir(), "forgejo-token-link")
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatalf("symlink: %v", err)
+		}
+		t.Setenv("FORGE_TOKEN_FILE", link)
+
+		srv := newRecordingServer(t, userRoutes("testuser"))
+		useServer(t, srv)
+		out, _, code := runForge(t, "auth", "status")
+		if want := "Authenticated as testuser (" + link + ")\n"; code != 0 || out != want {
+			t.Errorf("0600 target through a link: got (%q, %d), want (%q, 0)", out, code, want)
+		}
+
+		if err := os.Chmod(target, 0o644); err != nil {
+			t.Fatalf("chmod: %v", err)
+		}
+		_, errText, code := runForge(t, "auth", "status")
+		want := "forge: token file " + link + " is readable by group or others; run chmod 600 on it\n"
+		if code != 1 || errText != want {
+			t.Errorf("0644 target through a link: got (%q, %d), want (%q, 1)", errText, code, want)
+		}
+		if n := srv.count(); n != 1 {
+			t.Errorf("recording server received %d requests, want only the first run's", n)
 		}
 	})
 }

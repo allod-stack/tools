@@ -105,8 +105,8 @@ Flags:
 Config:
   FORGE_URL          Forgejo base URL (default: https://forge.anarch.diy)
   FORGE_TOKEN_FILE   Path to token file (default: ~/.config/git/forgejo-token)
-                     The token is read only from this mode-0600 file; a set
-                     FORGEJO_TOKEN is refused, never read
+                     The token is read only from this mode-0600 file; a set,
+                     non-empty FORGEJO_TOKEN is refused, never read
 `
 
 var commandUsageTexts = map[string]string{

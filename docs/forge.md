@@ -13,11 +13,14 @@ forge [-R|--repo owner/repo] <resource> <command> [args]
 | `FORGE_URL` | Forgejo base URL; defaults to `https://forge.anarch.diy` |
 | `FORGE_TOKEN_FILE` | Token file path; defaults to `~/.config/git/forgejo-token` |
 
-`forge` reads the token only from `FORGE_TOKEN_FILE`, which should be a mode-0600
-file. `FORGEJO_TOKEN` is no longer read: when it is set and non-empty, `forge`
-exits 1 before making any request and says so, so a stale export cannot be
-mistaken for a working credential. An environment variable is inherited by every
-child process, while a file is read only by code that opens it.
+`forge` reads the token only from `FORGE_TOKEN_FILE`, which must be a mode-0600
+file: a token file with any group or other permission bit is refused with a
+`chmod 600` hint before it is read (symlinks are judged by their target).
+`FORGEJO_TOKEN` is no longer read: when it is set and non-empty, every command
+except help output exits 1 before making any request or starting any child
+process, and says so, so a stale export cannot be mistaken for a working
+credential. An environment variable is inherited by every child process, while
+a file is read only by code that opens it.
 Repo is inferred from `git remote get-url origin` when `-R`/`--repo` is omitted,
 and `-R`/`--repo` may appear before the resource or after the command.
 

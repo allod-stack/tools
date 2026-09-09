@@ -1,9 +1,9 @@
 // Command forge is a Forgejo CLI: gh, but for a self-hosted Forgejo instance.
 //
-// It is a transliteration of the bash `forge` script at the repository root,
-// which remains the specification. Stdout, stderr and exit codes are
-// byte-for-byte identical, bugs included; comments reference the bash line
-// numbers rather than restating the behaviour.
+// It is a transliteration of the since-retired bash `forge` script, whose
+// stdout, stderr and exit codes it preserves byte-for-byte, bugs included,
+// except where a comment says "diverges from bash"; comments reference the
+// bash line numbers rather than restating the behaviour.
 package main
 
 import (
@@ -63,8 +63,44 @@ func run(argv []string) (code int) {
 
 	resetState()
 	resource, command, args := parseGlobalArgs(argv)
+	if !isHelpRequest(resource, command, args) {
+		refuseEnvToken()
+	}
 	dispatch(resource, command, args)
 	return 0
+}
+
+// isHelpRequest reports whether dispatch would only print usage: no resource,
+// the help resource, a help flag in the command slot, or a help flag among the
+// arguments (contains_help_flag, which every command checks first).
+func isHelpRequest(resource, command string, args []string) bool {
+	switch resource {
+	case "help", "--help", "-h", "":
+		return true
+	}
+	switch command {
+	case "-h", "--help":
+		return true
+	}
+	return containsHelpFlag(args)
+}
+
+// refuseEnvToken diverges from bash: allod/tools#57. The token comes only
+// from the token file, and a set, non-empty FORGEJO_TOKEN is refused rather
+// than ignored, so nobody can believe the variable is in use when it is not:
+// an environment variable is inherited by every child process, while a 0600
+// file is read only by code that opens it.
+//
+// It runs before dispatch, not inside loadToken, because loadToken is lazy:
+// token verify never calls it, and requireRepo spawns git before any command
+// asks for a credential. Checking here makes "exit 1 before any request or
+// child process" true on every non-help path.
+func refuseEnvToken() {
+	if os.Getenv("FORGEJO_TOKEN") == "" {
+		return
+	}
+	fmt.Fprintf(stderr, "forge: FORGEJO_TOKEN is no longer read; unset it and put the token in a mode-0600 file named by FORGE_TOKEN_FILE (currently %s)\n", forgeTokenFile)
+	exit(1)
 }
 
 // resetState re-reads the environment and clears the bash globals. bash sets
