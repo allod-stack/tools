@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # allod pr explain — generate a comprehension-first PR explanation report.
-# Dispatched by the `allod` CLI, which resolves this directory from the Nix
-# store via ALLOD_TOOLS_DIR. See docs/pr-explain.md.
+# The `allod` CLI resolves this directory through ALLOD_TOOLS_DIR when set, else beside its own executable,
+# else the ~/work/allod/tools checkout, which is where every current machine finds it. See docs/pr-explain.md.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
