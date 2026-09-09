@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
+# shellcheck source=cascade-under-test.sh
+source "$ROOT/tests/flake/cascade-under-test.sh"
 
 export HOME="$TMP/home"
 export MOCK_LOG="$TMP/commands.log"
@@ -38,8 +40,9 @@ cat > "$REPO/flake.lock" <<'EOF'
 }
 EOF
 
-cat > "$TMP/bin/git" <<'EOF'
-#!/usr/bin/env bash
+{
+  printf '#!%s\n' "$(command -v bash)"
+  cat <<'EOF'
 set -euo pipefail
 
 [[ "$1" == "-C" ]] || { echo "unexpected git invocation: $*" >&2; exit 1; }
@@ -66,6 +69,9 @@ case "$*" in
   "diff --quiet -- flake.lock")
     [[ "${MOCK_MODE:-dry-run}" == direct ]] && exit 1 || exit 0
     ;;
+  "remote get-url origin")
+    printf 'ssh://git@forge.anarch.diy:2222/acme/app.git\n'
+    ;;
   "rev-parse @{u}")
     printf 'origin/master\n'
     ;;
@@ -75,7 +81,7 @@ case "$*" in
   "pull")
     exit 0
     ;;
-  "add flake.lock"|"commit -m flake.lock: update nixpkgs, allod-tools"|"push")
+  "add flake.lock"|"commit -m flake.lock: update allod-tools, vm/nixpkgs"|"push")
     exit 0
     ;;
   *)
@@ -84,9 +90,11 @@ case "$*" in
     ;;
 esac
 EOF
+} > "$TMP/bin/git"
 
-cat > "$TMP/bin/nix" <<'EOF'
-#!/usr/bin/env bash
+{
+  printf '#!%s\n' "$(command -v bash)"
+  cat <<'EOF'
 set -euo pipefail
 printf 'nix\t%s\n' "$*" >> "$MOCK_LOG"
 
@@ -123,6 +131,7 @@ case "$1 $2" in
     ;;
 esac
 EOF
+} > "$TMP/bin/nix"
 
 chmod +x "$TMP/bin/git" "$TMP/bin/nix"
 export PATH="$TMP/bin:$PATH"
@@ -133,7 +142,7 @@ fail() {
 }
 
 before=$(sha256sum "$REPO/flake.lock")
-output=$(bash "$ROOT/flake/flake-update-cascade" nixpkgs allod-tools --dry-run)
+output=$(run_cascade nixpkgs allod-tools --dry-run)
 after=$(sha256sum "$REPO/flake.lock")
 
 [[ "$before" == "$after" ]] || fail "dry-run changed flake.lock"
@@ -149,17 +158,17 @@ grep -Fq \
 
 : > "$MOCK_LOG"
 export MOCK_MODE=direct
-output=$(bash "$ROOT/flake/flake-update-cascade" nixpkgs allod-tools)
+output=$(run_cascade nixpkgs allod-tools)
 [[ "$output" == *"committed and pushed"* ]] ||
   fail "direct update did not complete"
 [[ "$(grep -c $'^nix\tflake update' "$MOCK_LOG")" == 1 ]] ||
   fail "direct mode did not use exactly one combined Nix update"
-grep -Fq $'git\tcommit -m flake.lock: update nixpkgs, allod-tools' "$MOCK_LOG" ||
-  fail "direct mode did not create one combined commit"
+grep -Fq $'git\tcommit -m flake.lock: update allod-tools, vm/nixpkgs' "$MOCK_LOG" ||
+  fail "direct mode did not create one combined commit naming the paths that moved"
 
 : > "$MOCK_LOG"
 export MOCK_MODE=preflight-fail
-if bash "$ROOT/flake/flake-update-cascade" nixpkgs allod-tools --dry-run >/dev/null 2>&1; then
+if run_cascade nixpkgs allod-tools --dry-run >/dev/null 2>&1; then
   fail "pre-flight failure returned success"
 fi
 [[ "$(grep -c $'^nix\t' "$MOCK_LOG" || true)" == 0 ]] ||

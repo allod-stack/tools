@@ -22,7 +22,8 @@ Usage: flake-status [input-name] [--upstream]
 
   (no args)          show all inputs for all repos
   <input-name>       show only that input across all repos
-  --upstream         compare pins against upstream remote HEAD (network)
+  --upstream         compare pins against the head of the branch each lock
+                     names (network)
 
 Examples:
   flake-status
@@ -118,18 +119,35 @@ get_all_inputs() {
   ' "$lockfile"
 }
 
-# Get upstream URL for a named input (github or git type only).
-get_upstream_url() {
+# Get the branch a named input is compared against: "url\tref", where ref is
+# the lock's original.ref, or HEAD (the default branch) when it names none.
+# Outputs nothing when the pin cannot be behind a branch or the tool cannot
+# read one: a declaration that names its own revision, or one that is not a
+# plain github or git reference (a registry entry, a tarball, a path, or a
+# reference carrying dir, host or submodules). These are the rules
+# flake-update-cascade reads heads by (internal/flakelock/source.go), so an
+# arrow here is a move that command can make.
+get_upstream_source() {
   local lockfile="$1" name="$2"
   jq -r --arg name "$name" '
     . as $root
     | .nodes.root.inputs[$name]
     | if . == null or type != "string" then empty
-      else . as $k
-      | $root.nodes[$k].original
-      | if .type == "github" then "https://github.com/\(.owner)/\(.repo)"
-        elif .type == "git" then .url
-        else empty
+      else ($root.nodes[.].original // {})
+      | if has("rev") then empty
+        elif has("ref") and (.ref | type) != "string" then empty
+        else (if (.ref // "") == "" then "HEAD" else .ref end) as $ref
+        | if .type == "github"
+             and (.owner | type) == "string" and .owner != ""
+             and (.repo | type) == "string" and .repo != ""
+             and (keys - ["type", "owner", "repo", "ref"]) == []
+          then ["https://github.com/\(.owner)/\(.repo)", $ref] | @tsv
+          elif .type == "git"
+             and (.url | type) == "string" and .url != ""
+             and (keys - ["type", "url", "ref"]) == []
+          then [.url, $ref] | @tsv
+          else empty
+          end
         end
       end
   ' "$lockfile"
@@ -173,35 +191,72 @@ repo_health_warnings() {
 
 # --- Upstream resolution ---
 
-# Resolve a single URL from $_PTMP/unique_urls (line $1+1) into $_PTMP/upstream/$1.
+# The refs that can carry a ref, most preferred first: HEAD and a full ref as
+# given, anything else as a branch and then as a tag, which is how nix reads a
+# bare name.
+_ref_specs() {
+  local ref="$1"
+  if [[ "$ref" == "HEAD" || "$ref" == refs/* ]]; then
+    printf '%s\n' "$ref"
+  else
+    printf '%s\n' "refs/heads/$ref" "refs/tags/$ref"
+  fi
+}
+
+# Read the head of one branch over the git protocol. ls-remote prints one
+# "<rev>\t<name>" line per ref, an annotated tag also listing its peeled commit
+# as "<name>^{}"; print the revision of the first spec present, preferring the
+# peeled commit, which is what a lock records. Prints nothing when the remote
+# cannot be read or carries none of the specs. Terminal prompts are off so a
+# remote that wants credentials fails instead of asking, and one read is
+# bounded to 60 seconds so a black-holed remote cannot hang the run.
+_ls_remote_head() {
+  local url="$1" ref="$2"
+  local -a specs
+  mapfile -t specs < <(_ref_specs "$ref")
+  GIT_TERMINAL_PROMPT=0 timeout 60 git ls-remote --exit-code "$url" "${specs[@]}" 2>/dev/null </dev/null \
+    | awk -F'\t' -v specs="${specs[*]}" '
+        NF == 2 { revs[$2] = $1 }
+        END {
+          n = split(specs, s, " ")
+          for (i = 1; i <= n; i++) {
+            if ((s[i] "^{}") in revs) { print revs[s[i] "^{}"]; exit }
+            if (s[i] in revs) { print revs[s[i]]; exit }
+          }
+        }' || true
+}
+
+# Resolve one "url\tref" line of $_PTMP/unique_urls (line $1+1) into
+# $_PTMP/upstream/$1.
 _resolve_one_url() {
   local idx="$1"
-  local url
-  url=$(sed -n "$((idx + 1))p" "$_PTMP/unique_urls")
+  local url ref
+  IFS=$'\t' read -r url ref < <(sed -n "$((idx + 1))p" "$_PTMP/unique_urls")
   local rev
-  rev=$(git ls-remote "$url" HEAD 2>/dev/null | cut -f1 | head -1 || true)
+  rev=$(_ls_remote_head "$url" "$ref")
   printf '%s' "${rev:-}" > "$_PTMP/upstream/$idx"
 }
 
-# Collect unique URLs from $_PTMP/urls/*, resolve each in parallel.
+# Collect unique "url\tref" pairs from $_PTMP/urls/*, resolve each in
+# parallel: a branch several repos pin is read once.
 _resolve_all_upstreams() {
   local -a url_files=()
   local f
   for f in "$_PTMP"/urls/*; do [[ -f "$f" ]] && url_files+=("$f"); done
   (( ${#url_files[@]} > 0 )) || return 0
-  cat "${url_files[@]}" | cut -f2 | sort -u > "$_PTMP/unique_urls"
+  cat "${url_files[@]}" | cut -f2,3 | sort -u > "$_PTMP/unique_urls"
   [[ -s "$_PTMP/unique_urls" ]] || return 0
   local count
   count=$(wc -l < "$_PTMP/unique_urls")
   (( count > 0 )) && _parallel_for "$count" _resolve_one_url
 }
 
-# Look up resolved rev for a URL. Prints the rev or nothing.
+# Look up the resolved head of a URL's ref. Prints the rev or nothing.
 _lookup_upstream_rev() {
-  local url="$1"
+  local url="$1" ref="$2"
   [[ -f "$_PTMP/unique_urls" ]] || return 0
   local line_num
-  line_num=$(grep -nxF "$url" "$_PTMP/unique_urls" | head -1 | cut -d: -f1 || true)
+  line_num=$(grep -nxF "$(printf '%s\t%s' "$url" "$ref")" "$_PTMP/unique_urls" | head -1 | cut -d: -f1 || true)
   [[ -n "$line_num" ]] || return 0
   local file="$_PTMP/upstream/$((line_num - 1))"
   [[ -f "$file" ]] && cat "$file" || true
@@ -211,7 +266,8 @@ _lookup_upstream_rev() {
 
 # Collect data for one repo. Writes a single TSV line to $_PTMP/repo/$1:
 #   status \t rev \t date \t health
-# Also writes "$INPUT_NAME \t url" to $_PTMP/urls/$1 when upstream is requested.
+# Also writes "$INPUT_NAME \t url \t ref" to $_PTMP/urls/$1 when upstream is
+# requested and the pin has a branch to compare against.
 _collect_named() {
   local i="$1"
   local repo="${REPOS[$i]}"
@@ -238,9 +294,9 @@ _collect_named() {
     printf 'ok\t%s\t%s\t%s\n' "$rev" "$date" "$health" > "$out"
 
     if [[ "$CHECK_UPSTREAM" == true ]]; then
-      local url=""
-      url=$(get_upstream_url "${dir}/flake.lock" "$INPUT_NAME")
-      [[ -n "$url" ]] && printf '%s\t%s\n' "$INPUT_NAME" "$url" > "$_PTMP/urls/$i"
+      local source=""
+      source=$(get_upstream_source "${dir}/flake.lock" "$INPUT_NAME")
+      [[ -n "$source" ]] && printf '%s\t%s\n' "$INPUT_NAME" "$source" > "$_PTMP/urls/$i"
     fi
   fi
 }
@@ -252,7 +308,7 @@ show_named_input() {
   _parallel_for "${#REPOS[@]}" _collect_named
 
   # Read collected data in workspace order
-  local -a names=() revs=() dates=() statuses=() healths=()
+  local -a names=() revs=() dates=() statuses=() healths=() repo_idx=()
   local i
   for (( i=0; i<${#REPOS[@]}; i++ )); do
     local file="$_PTMP/repo/$i"
@@ -264,6 +320,7 @@ show_named_input() {
     [[ "$status" == "skip" ]] && continue
 
     names+=("${REPOS[$i]}")
+    repo_idx+=("$i")
     statuses+=("$status")
     revs+=("$rev")
     dates+=("$date")
@@ -342,18 +399,22 @@ show_named_input() {
   if [[ "$CHECK_UPSTREAM" == true && "$ok_count" -gt 0 ]]; then
     _resolve_all_upstreams
 
-    local upstream_url=""
-    for (( i=0; i<${#REPOS[@]}; i++ )); do
-      local uf="$_PTMP/urls/$i"
+    # The line judges the majority revision, so it is compared to the branch
+    # a repo holding that revision names; the first repo with the input may
+    # pin a different branch of the same repository.
+    local upstream_url="" upstream_ref=""
+    for i in "${!statuses[@]}"; do
+      [[ "${statuses[$i]}" == "ok" && "${revs[$i]}" == "$majority_rev" ]] || continue
+      local uf="$_PTMP/urls/${repo_idx[$i]}"
       [[ -f "$uf" ]] || continue
-      upstream_url=$(head -1 "$uf" | cut -f2)
+      IFS=$'\t' read -r _ upstream_url upstream_ref < "$uf"
       [[ -n "$upstream_url" ]] && break
     done
 
     echo ""
     if [[ -n "$upstream_url" ]]; then
       local upstream_rev=""
-      upstream_rev=$(_lookup_upstream_rev "$upstream_url")
+      upstream_rev=$(_lookup_upstream_rev "$upstream_url" "$upstream_ref")
       if [[ -n "$upstream_rev" ]]; then
         local short_upstream="${upstream_rev:0:7}"
         if [[ "$majority_rev" == "$short_upstream" ]]; then
@@ -375,7 +436,8 @@ show_named_input() {
 # Collect data for one repo. Writes to $_PTMP/repo/$1:
 #   Line 1: included \t health
 #   Lines 2+: name \t rev \t date (one per input)
-# Also writes "name \t url" lines to $_PTMP/urls/$1 when upstream is requested.
+# Also writes "name \t url \t ref" lines to $_PTMP/urls/$1 when upstream is
+# requested, one per input that has a branch to compare against.
 _collect_all() {
   local i="$1"
   local repo="${REPOS[$i]}"
@@ -405,9 +467,9 @@ _collect_all() {
   if [[ "$CHECK_UPSTREAM" == true ]]; then
     local urls_out="$_PTMP/urls/$i"
     while IFS=$'\t' read -r name _rev _date; do
-      local url=""
-      url=$(get_upstream_url "${dir}/flake.lock" "$name")
-      [[ -n "$url" ]] && printf '%s\t%s\n' "$name" "$url"
+      local source=""
+      source=$(get_upstream_source "${dir}/flake.lock" "$name")
+      [[ -n "$source" ]] && printf '%s\t%s\n' "$name" "$source"
     done <<< "$inputs" > "$urls_out"
     [[ -s "$urls_out" ]] || rm -f "$urls_out"
   fi
@@ -443,14 +505,16 @@ show_all_inputs() {
     while IFS=$'\t' read -r name rev date; do
       local suffix=""
       if [[ "$CHECK_UPSTREAM" == true ]]; then
-        local url=""
+        local url="" ref=""
         local urls_file="$_PTMP/urls/$i"
         if [[ -f "$urls_file" ]]; then
-          url=$(awk -F'\t' -v n="$name" '$1==n{print $2;exit}' "$urls_file")
+          # A here-string so an input with no branch to compare (no line in
+          # the file) leaves both empty instead of failing the read.
+          IFS=$'\t' read -r url ref <<< "$(awk -F'\t' -v n="$name" '$1==n{print $2 "\t" $3;exit}' "$urls_file")"
         fi
         if [[ -n "$url" ]]; then
           local urev=""
-          urev=$(_lookup_upstream_rev "$url")
+          urev=$(_lookup_upstream_rev "$url" "$ref")
           if [[ -n "$urev" ]]; then
             local short_urev="${urev:0:7}"
             if [[ "$rev" != "$short_urev" ]]; then
@@ -470,13 +534,14 @@ show_all_inputs() {
 
   if [[ ${#_outdated_local[@]} -gt 0 || ${#_outdated_external[@]} -gt 0 ]]; then
     echo ""
+    # Associative-array order is unspecified; sort so the line is stable.
     if [[ ${#_outdated_local[@]} -gt 0 ]]; then
       echo "Outdated (local):"
-      echo "  flake-update-cascade ${!_outdated_local[*]}"
+      echo "  flake-update-cascade $(printf '%s\n' "${!_outdated_local[@]}" | sort | paste -sd' ')"
     fi
     if [[ ${#_outdated_external[@]} -gt 0 ]]; then
       echo "Outdated (external):"
-      echo "  flake-update-cascade ${!_outdated_external[*]}"
+      echo "  flake-update-cascade $(printf '%s\n' "${!_outdated_external[@]}" | sort | paste -sd' ')"
     fi
   fi
 }

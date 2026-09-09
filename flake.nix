@@ -43,6 +43,21 @@
         };
       };
 
+      flakeUpdateCascade = pkgs.buildGoModule {
+        pname = "flake-update-cascade";
+        version = "0.1.0";
+        src = ./.;
+        # Standard library only, by design: no module dependencies to vendor.
+        vendorHash = null;
+        subPackages = [ "cmd/flake-update-cascade" ];
+
+        meta = {
+          description = "Update named flake inputs across every workspace repository that pins them";
+          mainProgram = "flake-update-cascade";
+          platforms = pkgs.lib.platforms.unix;
+        };
+      };
+
       # buildGoModule's check phase only tests the packages named in
       # subPackages, so the internal ones need a check of their own. This also
       # covers formatting and vet, which nothing else would.
@@ -119,16 +134,87 @@
 
         touch "$out"
       '';
+
+      # The mock-driven cascade suites, run against the packaged program. The
+      # nixConfig suite is left out: it drives the real nix under a pty, which
+      # the sandbox cannot host; run it by hand.
+      cascadeSuites = pkgs.runCommand "flake-update-cascade-suites"
+        {
+          nativeBuildInputs = [
+            pkgs.bash
+            pkgs.coreutils
+            pkgs.gnugrep
+            pkgs.jq
+            pkgs.util-linux
+          ];
+          src = ./.;
+        } ''
+        export HOME="$TMPDIR/home"
+        cp -r "$src" source
+        chmod -R u+w source
+        cd source
+        patchShebangs .
+
+        suites="tests/flake/flake-update-cascade/dependency-order.sh
+          tests/flake/flake-update-cascade/dry-run.sh
+          tests/flake/flake-update-cascade/external-remote.sh
+          tests/flake/flake-update-cascade/failures.sh
+          tests/flake/flake-update-cascade/lock-contention.sh
+          tests/flake/flake-update-cascade/post-pull-lock.sh
+          tests/flake/flake-update-cascade/preflight.sh
+          tests/flake/flake-update-cascade/pr-mode.sh
+          tests/flake/flake-update-cascade/validation.sh
+          tests/flake/flake-update-cascade/resolve-heads.sh
+          tests/flake/flake-update-cascade-multiple-inputs.sh
+          tests/flake/flake-update-cascade-follows.sh"
+
+        export CASCADE_UNDER_TEST=${flakeUpdateCascade}/bin/flake-update-cascade
+        for suite in $suites; do
+          echo "== $suite"
+          bash "$suite"
+        done
+
+        touch "$out"
+      '';
+
+      # The flake-status suite drives the Bash program against fixture locks
+      # and a mock git, so it needs no network and no real git.
+      flakeStatusSuite = pkgs.runCommand "flake-status-suite"
+        {
+          nativeBuildInputs = [
+            pkgs.bash
+            pkgs.coreutils
+            pkgs.gawk
+            pkgs.gnugrep
+            pkgs.gnused
+            pkgs.jq
+          ];
+          src = ./.;
+        } ''
+        export HOME="$TMPDIR/home"
+        cp -r "$src" source
+        chmod -R u+w source
+        cd source
+        patchShebangs .
+
+        bash tests/flake/flake-status.sh
+
+        touch "$out"
+      '';
     in
     {
       packages.${system} = {
         inherit allod forge;
+        flake-update-cascade = flakeUpdateCascade;
         default = forge;
       };
 
       checks.${system} = {
         inherit allod forge;
+        flake-update-cascade = flakeUpdateCascade;
         allod-parity = allodParity;
+        cascade-suites = cascadeSuites;
+        flake-status-suite = flakeStatusSuite;
         go-checks = goChecks;
       };
 

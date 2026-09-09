@@ -1,8 +1,9 @@
 # allod/tools
 
 Command-line tools for managing a multi-repo NixOS dev environment. Shell tools
-are packaged with `pkgs.writeShellApplication`; `forge` and `allod` are
-standard-library-only Go binaries built with `pkgs.buildGoModule`. Dev VMs and the
+are packaged with `pkgs.writeShellApplication`; `forge`, `allod`, and
+`flake-update-cascade` are standard-library-only Go binaries built with
+`pkgs.buildGoModule`. Dev VMs and the
 host install them through their Nix composition, with no manual installation after
 `nixos-rebuild switch`.
 
@@ -10,7 +11,9 @@ host install them through their Nix composition, with no manual installation aft
 
 ```
 cmd/allod/                Go main CLI (change, patch, pr, pm; site opt-in)
+cmd/flake-update-cascade/ flake input update cascade Go command
 cmd/forge/                Forgejo CLI Go command
+internal/flakelock/       flake.lock graph walking for the cascade
 internal/forgeapi/        in-process Forgejo API client
 internal/gitremote/       Git remote parsing shared by Go commands
 pr-explain/               PR explanation report tool (behind `allod pr explain`)
@@ -31,7 +34,6 @@ workspace/                daily workspace sync and status
   work-diff               show staged/unstaged changes across repos
 flake/                    nix flake pin management
   flake-status            inspect flake input pins across repos
-  flake-update-cascade    update flake inputs across repos
   fleet-diff              check which machines a change rebuilds
 git-hooks/                git hook policy and setup
   protected-refs-policy   branch protection, signing, remote restrictions
@@ -90,7 +92,7 @@ check runs both: each compiles code and tests the other does not.
 ## Shared Library
 
 `lib/workspace.sh` provides repo discovery and default-branch helpers used by
-`pull-all`, `work-diff`, `flake-status`, and `flake-update-cascade`.
+`pull-all`, `work-diff`, and `flake-status`.
 It also sets `WORK_DIR` (defaults to `~/work/`, overridable via the environment).
 
 `workspace_collect_repos` returns exactly the checkouts under `WORK_DIR`, which

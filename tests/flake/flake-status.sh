@@ -40,13 +40,107 @@ write_lock "$HOME/work/gamma" "$REV_A" false
 mkdir -p "$HOME/work/no-lock/.git"
 : > "$HOME/work/no-lock/.git/HEAD"
 
-cat > "$TMP/bin/git" <<'EOF'
-#!/usr/bin/env bash
+# epsilon holds the pins --upstream must compare to the branch each lock
+# names, not to the remote's default branch: stable sits at the head of its
+# release branch while the default branch has moved on; lagging is behind its
+# release branch; pinned names its own revision; tagged is an annotated tag
+# behind the tag, whose peeled commit (not the tag object) is the target.
+# charlie pins stable's default branch at its head, sorting before epsilon;
+# zeta pins the release branch like epsilon, so the release branch holds the
+# majority and the named-input line must be judged against it.
+REV_STABLE=dddddddddddddddddddddddddddddddddddddddd
+REV_LAGGING=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+REV_PINNED=0123456789012345678901234567890123456789
+REV_TAG_OLD=3333333333333333333333333333333333333333
+for repo in charlie zeta; do
+  mkdir -p "$HOME/work/$repo/.git"
+  : > "$HOME/work/$repo/.git/HEAD"
+done
+cat > "$HOME/work/charlie/flake.lock" <<'EOF'
+{
+  "nodes": {
+    "root": {"inputs": {"stable": "stable-node"}},
+    "stable-node": {
+      "locked": {"rev": "cccccccccccccccccccccccccccccccccccccccc", "lastModified": 0},
+      "original": {"type": "git", "url": "https://example.org/acme/stable.git"}
+    }
+  }
+}
+EOF
+cat > "$HOME/work/zeta/flake.lock" <<EOF
+{
+  "nodes": {
+    "root": {"inputs": {"stable": "stable-node"}},
+    "stable-node": {
+      "locked": {"rev": "$REV_STABLE", "lastModified": 0},
+      "original": {"type": "github", "owner": "acme", "repo": "stable", "ref": "release-1.0"}
+    }
+  }
+}
+EOF
+mkdir -p "$HOME/work/epsilon/.git"
+: > "$HOME/work/epsilon/.git/HEAD"
+cat > "$HOME/work/epsilon/flake.lock" <<EOF
+{
+  "nodes": {
+    "root": {"inputs": {"stable": "stable-node", "lagging": "lagging-node",
+                        "pinned": "pinned-node", "tagged": "tagged-node"}},
+    "stable-node": {
+      "locked": {"rev": "$REV_STABLE", "lastModified": 0},
+      "original": {"type": "github", "owner": "acme", "repo": "stable", "ref": "release-1.0"}
+    },
+    "lagging-node": {
+      "locked": {"rev": "$REV_LAGGING", "lastModified": 0},
+      "original": {"type": "git", "url": "https://example.org/acme/lagging.git", "ref": "release-1.0"}
+    },
+    "pinned-node": {
+      "locked": {"rev": "$REV_PINNED", "lastModified": 0},
+      "original": {"type": "github", "owner": "acme", "repo": "pinned", "rev": "$REV_PINNED"}
+    },
+    "tagged-node": {
+      "locked": {"rev": "$REV_TAG_OLD", "lastModified": 0},
+      "original": {"type": "github", "owner": "acme", "repo": "tagged", "ref": "v1"}
+    }
+  }
+}
+EOF
+
+export LS_REMOTE_LOG="$TMP/ls-remote.log"
+: > "$LS_REMOTE_LOG"
+
+# The interpreter is named outright: the check sandbox has no /usr/bin/env.
+{
+printf '#!%s\n' "$(command -v bash)"
+cat <<'EOF'
 set -euo pipefail
 
+# ls-remote answers per remote and per ref, the way a real remote does: the
+# default branch of acme/demo and acme/stable (under either URL) is ccccccc;
+# release-1.0 of acme/stable is at the lock's revision, release-1.0 of
+# acme/lagging is ahead of it; acme/tagged carries only an annotated tag v1
+# whose peeled commit is ahead of the lock. Every call is logged so the suite
+# can see which refs were asked for.
 if [[ "$1" == "ls-remote" ]]; then
-  printf 'cccccccccccccccccccccccccccccccccccccccc\tHEAD\n'
-  exit 0
+  shift
+  [[ "$1" == "--exit-code" ]] && shift
+  url="$1"; shift
+  printf '%s %s\n' "$url" "$*" >> "$LS_REMOTE_LOG"
+  found=0
+  for spec in "$@"; do
+    case "$url $spec" in
+      "https://github.com/acme/demo HEAD"|"https://github.com/acme/stable HEAD"|"https://example.org/acme/stable.git HEAD")
+        printf 'cccccccccccccccccccccccccccccccccccccccc\tHEAD\n'; found=1 ;;
+      "https://github.com/acme/stable refs/heads/release-1.0")
+        printf 'dddddddddddddddddddddddddddddddddddddddd\trefs/heads/release-1.0\n'; found=1 ;;
+      "https://example.org/acme/lagging.git refs/heads/release-1.0")
+        printf 'ffffffffffffffffffffffffffffffffffffffff\trefs/heads/release-1.0\n'; found=1 ;;
+      "https://github.com/acme/tagged refs/tags/v1")
+        printf '2222222222222222222222222222222222222222\trefs/tags/v1\n'
+        printf '1111111111111111111111111111111111111111\trefs/tags/v1^{}\n'; found=1 ;;
+    esac
+  done
+  (( found )) && exit 0
+  exit 2
 fi
 
 [[ "$1" == "-C" ]] || { echo "unexpected git invocation: $*" >&2; exit 1; }
@@ -81,6 +175,7 @@ case "$command" in
     ;;
 esac
 EOF
+} > "$TMP/bin/git"
 chmod +x "$TMP/bin/git"
 export PATH="$TMP/bin:$PATH"
 
@@ -156,6 +251,7 @@ assert_contains "$all" "demo                  aaaaaaa  1970-01-01" \
 assert_not_contains "$all" "followed" \
   "omits follows inputs from all-input mode"
 
+: > "$LS_REMOTE_LOG"
 all_upstream=$(bash "$ROOT/flake/flake-status" --upstream)
 assert_contains "$all_upstream" "→ ccccccc" \
   "shows upstream arrow inline in all-input mode"
@@ -165,6 +261,56 @@ assert_contains "$all_upstream" "flake-update-cascade demo" \
   "suggests flake-update-cascade for outdated inputs"
 assert_contains "$all_upstream" "Outdated (external):" \
   "labels github inputs as external"
+
+# A pin is compared to the branch its lock names (allod/tools#170). Each
+# "no arrow" assertion follows one that proves the row is present, so an
+# absent row cannot pass it.
+row() { grep -E "^  $2 " <<< "$1" || true; }
+stable_rows=$(row "$all_upstream" stable)
+assert_contains "$stable_rows" "stable                ddddddd  1970-01-01" \
+  "shows a release-branch pin at its head"
+assert_contains "$stable_rows" "stable                ccccccc  1970-01-01" \
+  "shows a default-branch pin at its head"
+assert_not_contains "$stable_rows" "→" \
+  "puts no arrow on a pin at the head of the branch its lock names"
+assert_contains "$(row "$all_upstream" lagging)" "→ fffffff" \
+  "puts an arrow on a pin behind the branch its lock names"
+pinned_row=$(row "$all_upstream" pinned)
+assert_contains "$pinned_row" "pinned                0123456  1970-01-01" \
+  "shows a pin that names its own revision"
+assert_not_contains "$pinned_row" "→" \
+  "puts no arrow on a pin that names its own revision"
+assert_contains "$(row "$all_upstream" tagged)" "→ 1111111" \
+  "arrows a tag pin to the tag's peeled commit, not the tag object"
+external=$(grep -A1 'Outdated (external):' <<< "$all_upstream" | tail -1)
+assert_equal_line() {
+  local actual="$1" expected="$2" description="$3"
+  if [[ "$actual" == "$expected" ]]; then
+    pass "$description"
+  else
+    fail "$description" "expected line: $expected" "actual line:" "$actual"
+  fi
+}
+assert_equal_line "$external" "  flake-update-cascade demo lagging tagged" \
+  "lists exactly the pins behind their own branch, sorted"
+assert_contains "$(cat "$LS_REMOTE_LOG")" \
+  "https://github.com/acme/stable refs/heads/release-1.0 refs/tags/release-1.0" \
+  "asks the remote for the locked ref as a branch, then as a tag"
+assert_contains "$(cat "$LS_REMOTE_LOG")" \
+  "https://github.com/acme/tagged refs/heads/v1 refs/tags/v1" \
+  "asks the remote for a tag ref as a branch, then as a tag"
+assert_not_contains "$(cat "$LS_REMOTE_LOG")" "https://github.com/acme/stable HEAD" \
+  "does not ask for the default branch when the lock names a ref"
+assert_not_contains "$(cat "$LS_REMOTE_LOG")" "acme/pinned" \
+  "does not ask the remote about a pin that names its own revision"
+
+# charlie sorts first and pins the default branch, but the majority revision
+# is the release branch's, so the verdict is judged against release-1.0.
+named_stable=$(bash "$ROOT/flake/flake-status" stable --upstream)
+assert_contains "$named_stable" "stable — INCONSISTENT (1 repo differs)" \
+  "named-input mode reports the default-branch pin as the odd one out"
+assert_contains "$named_stable" "upstream: up to date at ddddddd" \
+  "named-input mode judges the majority against the branch its lock names"
 
 help=$(bash "$ROOT/flake/flake-status" --help)
 assert_contains "$help" "Usage: flake-status" "prints usage for --help"

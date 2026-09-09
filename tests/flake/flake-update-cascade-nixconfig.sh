@@ -13,9 +13,17 @@
 # config, and leaves the repository untouched.
 set -euo pipefail
 
+# Nix enables its prompt logger only on a non-dumb terminal with neither
+# color-disable variable set. Agent runners commonly supply these variables;
+# fix the terminal conditions for both arms so the control really prompts.
+export TERM=xterm
+unset NO_COLOR NOCOLOR
+
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
+# shellcheck source=cascade-under-test.sh
+source "$ROOT/tests/flake/cascade-under-test.sh"
 
 fail() {
   echo "FAIL: $1" >&2
@@ -72,8 +80,9 @@ echo change > "$TMP/dep/extra"
 # --- Mock git for the cascade's own invocations (repo discovery, pre-flight,
 # pull). Setup above already used the real git; nix fetches via libgit2 and
 # never consults PATH.
-cat > "$TMP/bin/git" <<'EOF'
-#!/usr/bin/env bash
+{
+  printf '#!%s\n' "$(command -v bash)"
+  cat <<'EOF'
 set -euo pipefail
 
 [[ "$1" == "-C" ]] || { echo "unexpected git invocation: $*" >&2; exit 1; }
@@ -95,6 +104,9 @@ case "$*" in
   "diff --quiet"|"diff --cached --quiet"|"pull")
     exit 0
     ;;
+  "remote get-url origin")
+    printf 'ssh://git@forge.anarch.diy:2222/acme/app.git\n'
+    ;;
   "rev-parse @{u}")
     printf 'origin/master\n'
     ;;
@@ -107,6 +119,7 @@ case "$*" in
     ;;
 esac
 EOF
+} > "$TMP/bin/git"
 chmod +x "$TMP/bin/git"
 export PATH="$TMP/bin:$PATH"
 
@@ -134,24 +147,31 @@ grep -Fq "do you want to allow configuration setting" "$TMP/arm1.out" \
 
 # --- Arm 2: the cascade over the same repo, same pty conditions, must
 # complete promptly, decline the foreign config, and leave the repo unchanged.
-arm2_cmd="bash $(printf '%q' "$ROOT/flake/flake-update-cascade") dep --dry-run"
-before=$(sha256sum "$REPO/flake.lock")
-set +e
-timeout 60 script -qec "$arm2_cmd" /dev/null <&3 >"$TMP/arm2.out" 2>&1
-arm2_rc=$?
-set -e
-exec 3<&-
-after=$(sha256sum "$REPO/flake.lock")
+arm2() {
+  local label="$1"
+  shift
+  local cmd before after rc
+  cmd="$(printf '%q ' "$@")dep --dry-run"
+  before=$(sha256sum "$REPO/flake.lock")
+  set +e
+  timeout 60 script -qec "$cmd" /dev/null <&3 >"$TMP/arm2.out" 2>&1
+  rc=$?
+  set -e
+  after=$(sha256sum "$REPO/flake.lock")
 
-[[ "$arm2_rc" == 0 ]] \
-  || fail "cascade did not complete (exit $arm2_rc; 124 means it wedged at the prompt)" \
-    "$(cat "$TMP/arm2.out")"
-grep -Fq "==> app" "$TMP/arm2.out" \
-  || fail "cascade did not process the fixture repo" "$(cat "$TMP/arm2.out")"
-grep -Fq "already up to date" "$TMP/arm2.out" \
-  || fail "cascade did not finish the dry-run update" "$(cat "$TMP/arm2.out")"
-grep -Fq "ignoring untrusted flake configuration setting" "$TMP/arm2.out" \
-  || fail "cascade did not decline the foreign nixConfig" "$(cat "$TMP/arm2.out")"
-[[ "$before" == "$after" ]] || fail "dry-run changed flake.lock"
+  [[ "$rc" == 0 ]] \
+    || fail "$label: cascade did not complete (exit $rc; 124 means it wedged at the prompt)" \
+      "$(cat "$TMP/arm2.out")"
+  grep -Fq "==> app" "$TMP/arm2.out" \
+    || fail "$label: cascade did not process the fixture repo" "$(cat "$TMP/arm2.out")"
+  grep -Fq "already up to date" "$TMP/arm2.out" \
+    || fail "$label: cascade did not finish the dry-run update" "$(cat "$TMP/arm2.out")"
+  grep -Fq "ignoring untrusted flake configuration setting" "$TMP/arm2.out" \
+    || fail "$label: cascade did not decline the foreign nixConfig" "$(cat "$TMP/arm2.out")"
+  [[ "$before" == "$after" ]] || fail "$label: dry-run changed flake.lock"
+}
+
+arm2 "cascade" "$CASCADE_UNDER_TEST"
+exec 3<&-
 
 echo "flake-update-cascade nixConfig non-interactivity tests passed"
