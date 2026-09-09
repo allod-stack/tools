@@ -1,6 +1,6 @@
 // Package flakelock reads the parts of a flake.lock that flake-update-cascade
-// needs: which reachable direct pins carry a requested input name, and which
-// revision a pin path resolves to.
+// needs: which reachable direct pins carry a requested input name, which
+// inputs the flake pins itself, and which revision a pin path resolves to.
 //
 // The walks tolerate the shapes a lock can take: a missing node, a missing
 // `inputs`, an edge that is a `follows` array rather than a node name. They are
@@ -122,6 +122,19 @@ func (l *Lock) UpdatePaths(names []string) []string {
 	}
 	sort.Strings(paths)
 	return paths
+}
+
+// RootPins returns the names of root's inputs that are pins — declared by the
+// flake itself and locked here rather than redirected by a follows — sorted.
+func (l *Lock) RootPins() []string {
+	var names []string
+	for name, e := range l.nodes["root"].inputs {
+		if e.kind == edgePin {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 // Rev resolves a slash-joined input path from root and returns the locked

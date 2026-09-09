@@ -111,3 +111,15 @@ func TestParseRejectsMalformedJSON(t *testing.T) {
 		t.Fatal("malformed lock parsed")
 	}
 }
+
+// RootPins lists the inputs the flake pins itself — a follows is not a pin,
+// and the walk never enters nested nodes.
+func TestRootPins(t *testing.T) {
+	lock := mustParse(t, multiInputLock)
+	if got := lock.RootPins(); !reflect.DeepEqual(got, []string{"allod-tools", "vm"}) {
+		t.Fatalf("RootPins = %v", got)
+	}
+	if got := mustParse(t, `{"nodes":{}}`).RootPins(); len(got) != 0 {
+		t.Fatalf("RootPins of a lock with no root = %v", got)
+	}
+}

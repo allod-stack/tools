@@ -43,15 +43,35 @@ output suggests `flake-update-cascade` commands for outdated inputs.
 ## `flake-update-cascade`
 
 Updates one or more named flake inputs across all repos that pin them directly,
-running pre-flight checks before touching anything.
+running pre-flight checks before touching anything, and brings the pins the
+workspace repos hold on one another up to date in the same run.
 
 ```
 flake-update-cascade <input-name>... [--pr] [--dry-run]
 ```
 
 The requested names are resolved through each repository's lock graph. All
-reachable direct pins with those names are passed to one `nix flake update`
-invocation, producing at most one commit and one PR per repository.
+reachable direct pins with those names are updated together, producing at most
+one commit and one PR per repository.
+
+**Dependency order and propagation.** A root input whose declared repository
+is another repo in the workspace — compared by host and path, whatever the
+scheme, user, port or `.git` suffix, and only for repos inside the push
+boundary below — is a *workspace pin*. Repos are processed so that each comes
+after every repo it pins, ties broken by directory order, so on the public
+chain `vm` and `nexus` go before `archetypes`, which goes before `deploy`. Two
+repos pinning each other is a pre-flight error naming both. Every workspace pin
+is checked against the head of the branch it names and moved when it is behind,
+whether or not its input was on the command line: a lock commit the run pushes
+upstream is read by the next repo down as that branch's new head, and so is a
+lock PR merged since the last run. A pin already at its head is left alone, so
+a repo whose only stale inputs are external behaves as before. This is the one
+visible change on an existing workspace — a run naming only an external input
+also moves internal pins that are behind — and a repo whose named input is a
+`follows` but that holds a workspace pin is now examined rather than skipped.
+Transitive nodes such as `archetypes/vm` still move through the intermediate
+repo's own lock bump. Each commit names the paths that moved in that repo, in
+lock order: `flake.lock: update allod-tools, vm/nixpkgs`.
 
 **Modes:**
 
@@ -66,7 +86,7 @@ invocation, producing at most one commit and one PR per repository.
 - Dirty working tree -> error
 - Unpushed commits -> error
 - No `flake.lock` -> skip with notice
-- Input not present / is a `follows` -> skip with notice
+- Input not present / is a `follows`, and no workspace pin -> skip with notice
 - Listed in `~/.config/git/active-pr-branches` -> skip with notice (GPG-signed commits required)
 - `origin` outside the forge and not matched by `~/.config/git/allowed-external-remotes` -> skip with notice, in every mode; the repo is never pulled, updated, committed to or pushed
 - No `origin` remote -> skip with notice
@@ -79,9 +99,34 @@ Each eligible repo gets a branch named `agent/flake-update-<input>`. On
 re-runs, the branch is force-updated and the existing PR is noted rather than a
 new one being created. Requires `forge` on PATH.
 
-**What a run costs.** Before asking Nix anything, the tool reads each named
-input's branch head with `git ls-remote` — once per branch per run, however
-many repositories pin it — and compares it to the lock. A repository whose
+A workspace pin can only take a commit on the default branch, so a repo that
+pins one this run moved on a PR branch waits: it is reported with the PR it
+waits on, nothing is committed there, and the run ends by listing every waiting
+repo and its PRs. The exit status stays 0; the same command re-run after the
+PRs merge continues the cascade from there.
+
+```
+==> allod/archetypes
+  waiting on PR #42 (allod/vm)
+
+Waiting on unmerged PRs:
+  allod/archetypes: PR #42 (allod/vm)
+  allod/deploy: PR #42 (allod/vm)
+Re-run the same command after they merge to continue the cascade.
+```
+
+**`--dry-run` details:**
+
+The plan is printed in dependency order. A pin that would follow a commit this
+run pushes cannot be computed without pushing, so a dry run shows the first
+wave and says so on the repo's own lines (`vm: allod/vm moves in this run; a
+dry run cannot show the revision it will pin`) and again at the end; pins
+behind commits that are already merged are shown in full.
+
+**What a run costs.** Before asking Nix anything, the tool reads the branch
+head behind each named input and each workspace pin with `git ls-remote` —
+once per branch per run, however many repositories pin it, and once more for
+a repository this run has just pushed — and compares it to the lock. A repository whose
 inputs are all at their heads prints `already up to date` with no `nix` call,
 and a moved input is pinned to the revision just read with `nix flake lock
 --override-input`, so Nix never resolves the branch itself. This matters for
@@ -101,16 +146,21 @@ instead`.
 Every suite under `tests/flake` runs the program `CASCADE_UNDER_TEST` names,
 building it from the working tree when the variable is unset. `nix flake check`
 runs the mock-driven suites against the packaged program;
-`tests/flake/flake-update-cascade-nixconfig.sh` drives the real `nix` under a
-pty and is run by hand:
+two suites drive the real `nix` and are run by hand:
+`tests/flake/flake-update-cascade-nixconfig.sh` under a pty, and
+`tests/flake/flake-update-cascade-chain.sh` over three repositories with bare
+origins in a temporary directory, the mutating path of a chained run:
 
 ```bash
 CASCADE_UNDER_TEST="$(nix build .#flake-update-cascade --print-out-paths)/bin/flake-update-cascade" \
   bash tests/flake/flake-update-cascade-nixconfig.sh
+CASCADE_UNDER_TEST="$(nix build .#flake-update-cascade --print-out-paths)/bin/flake-update-cascade" \
+  bash tests/flake/flake-update-cascade-chain.sh
 ```
 
-Repositories are processed in directory order; dependency ordering and pin
-propagation are allod/tools#171.
+The paths a repository is updated on are read from its lock after the tool's
+own `git pull`, so a checkout whose pull changed its input graph is judged on
+its current inputs.
 
 **Examples:**
 

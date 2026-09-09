@@ -16,11 +16,19 @@ export MOCK_LOG="$TMP/commands.log"
   cat <<'EOF'
 set -euo pipefail
 
-# Branch heads. MOCK_HEAD is the revision every asked-for ref resolves to, or
-# `unreachable` for a remote that cannot be read; the answer is given for the
-# first ref requested, as a branch that exists is.
+# Branch heads. A repository with a file under MOCK_HEADS, named as the last
+# component of its URL, has that file's content as the head of every ref —
+# the per-repository tracking head a push advances. Otherwise MOCK_HEAD is the
+# revision every asked-for ref resolves to, or `unreachable` for a remote that
+# cannot be read. The answer is given for the first ref requested, as a branch
+# that exists is.
 if [[ "$1" == "ls-remote" ]]; then
   printf 'git\tls-remote\t%s\n' "${*:2}" >> "$MOCK_LOG"
+  head_file="${MOCK_HEADS:-}/$(basename "$3" .git)"
+  if [[ -n "${MOCK_HEADS:-}" && -f "$head_file" ]]; then
+    printf '%s\t%s\n' "$(cat "$head_file")" "$4"
+    exit 0
+  fi
   case "${MOCK_HEAD:-}" in
     unreachable) exit 128 ;;
     "") echo "unexpected ls-remote with no MOCK_HEAD: $*" >&2; exit 1 ;;
@@ -63,6 +71,20 @@ case "$command" in
     [[ "${MOCK_SCENARIO:-}" == unpushed ]] && printf '1\n' || printf '0\n'
     ;;
   "pull")
+    # A pull that brings in a lock commit: the file under MOCK_PULLED_LOCKS
+    # named after the repository replaces its flake.lock.
+    if [[ -n "${MOCK_PULLED_LOCKS:-}" && -f "$MOCK_PULLED_LOCKS/$repo" ]]; then
+      cp "$MOCK_PULLED_LOCKS/$repo" "$dir/flake.lock"
+    fi
+    exit 0
+    ;;
+  "push")
+    # A push to the default branch advances the repository's tracking head
+    # to a revision derived from the lock it pushed, so a downstream pin can
+    # be checked against exactly what was pushed.
+    if [[ -n "${MOCK_HEADS:-}" ]]; then
+      sha256sum "$dir/flake.lock" | cut -c1-40 > "$MOCK_HEADS/$repo"
+    fi
     exit 0
     ;;
   "diff --quiet -- flake.lock")
@@ -75,7 +97,7 @@ case "$command" in
       *) printf 'ssh://git@forge.anarch.diy:2222/acme/%s.git\n' "$repo" ;;
     esac
     ;;
-  "add flake.lock"|"push"|"checkout -B agent/flake-update-demo"|"commit -m flake.lock: update demo"|"fetch origin agent/flake-update-demo"|"update-ref -d refs/remotes/origin/agent/flake-update-demo"|"push --force-with-lease origin agent/flake-update-demo"|"checkout master"|"checkout -- flake.lock"|"restore --staged flake.lock"|"reset HEAD flake.lock")
+  "add flake.lock"|"checkout -B agent/flake-update-demo"|"commit -m flake.lock: update "*|"fetch origin agent/flake-update-demo"|"update-ref -d refs/remotes/origin/agent/flake-update-demo"|"push --force-with-lease origin agent/flake-update-demo"|"checkout master"|"checkout -- flake.lock"|"restore --staged flake.lock"|"reset HEAD flake.lock")
     exit 0
     ;;
   *)
@@ -216,6 +238,27 @@ write_follow_lock() {
   printf '%s\n' '{"nodes":{"root":{"inputs":{"demo":["base","demo"]}}}}' > "$dir/flake.lock"
 }
 
+# A chain of three repositories: <leaf> pins the external demo input, <mid>
+# pins <leaf>, and <top> pins <mid>, each pin a branch at the forge whose URL
+# names the repository the mock gives that origin. Every repository's tracking
+# head starts at the a revision the locks hold, so nothing is behind until a
+# push or the suite moves a head. The repositories are named by directory so a
+# suite can choose which order the directory walk finds them in.
+write_chain() {
+  local leaf="$1" mid="$2" top="$3"
+  export MOCK_HEADS="$HOME/heads"
+  mkdir -p "$MOCK_HEADS"
+  write_github_lock "$HOME/work/$leaf"
+  write_declared_lock "$HOME/work/$mid" \
+    "$leaf" "{\"type\":\"git\",\"url\":\"https://forge.anarch.diy/acme/$leaf.git\"}"
+  write_declared_lock "$HOME/work/$top" \
+    "$mid" "{\"type\":\"git\",\"url\":\"https://forge.anarch.diy/acme/$mid.git\"}"
+  local repo
+  for repo in "$leaf" "$mid" "$top"; do
+    printf '%s\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa > "$MOCK_HEADS/$repo"
+  done
+}
+
 new_home() {
   export HOME="$TMP/home-$1"
   rm -rf "$HOME"
@@ -223,6 +266,7 @@ new_home() {
   : > "$HOME/.config/git/active-pr-branches"
   : > "$HOME/.config/git/protected-branches"
   : > "$MOCK_LOG"
+  unset MOCK_HEADS MOCK_PULLED_LOCKS
 }
 
 pass() {
@@ -277,6 +321,26 @@ assert_log_contains() {
     fail "$description" "expected command log entry: $expected" \
       "actual command log:" "$(cat "$MOCK_LOG")"
   fi
+}
+
+# assert_log_order <description> <entry>... passes when every entry is in the
+# command log and each appears after the one before it.
+assert_log_order() {
+  local description="$1"
+  shift
+  local previous=0 line entry
+  for entry in "$@"; do
+    line=$(grep -Fn -m1 "$entry" "$MOCK_LOG" | cut -d: -f1)
+    if [[ -z "$line" ]]; then
+      fail "$description" "missing command log entry: $entry" \
+        "actual command log:" "$(cat "$MOCK_LOG")"
+    elif (( line <= previous )); then
+      fail "$description" "out of order at: $entry" \
+        "actual command log:" "$(cat "$MOCK_LOG")"
+    fi
+    previous=$line
+  done
+  pass "$description"
 }
 
 finish_tests() {

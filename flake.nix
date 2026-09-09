@@ -155,10 +155,12 @@
         cd source
         patchShebangs .
 
-        suites="tests/flake/flake-update-cascade/dry-run.sh
+        suites="tests/flake/flake-update-cascade/dependency-order.sh
+          tests/flake/flake-update-cascade/dry-run.sh
           tests/flake/flake-update-cascade/external-remote.sh
           tests/flake/flake-update-cascade/failures.sh
           tests/flake/flake-update-cascade/lock-contention.sh
+          tests/flake/flake-update-cascade/post-pull-lock.sh
           tests/flake/flake-update-cascade/preflight.sh
           tests/flake/flake-update-cascade/pr-mode.sh
           tests/flake/flake-update-cascade/validation.sh

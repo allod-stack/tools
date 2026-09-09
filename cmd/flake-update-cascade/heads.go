@@ -159,3 +159,18 @@ func applyLock(dir, out string, plan lockPlan) error {
 	}
 	return nil
 }
+
+// forgetHeads drops every cached head of one repository, so the next
+// repository that pins it reads the head this run has just pushed rather than
+// the one read before the push.
+func (c *cascade) forgetHeads(identity string) {
+	if identity == "" {
+		return
+	}
+	for key := range c.heads {
+		url, _, _ := strings.Cut(key, "\t")
+		if id, ok := repoIdentity(url); ok && id == identity {
+			delete(c.heads, key)
+		}
+	}
+}

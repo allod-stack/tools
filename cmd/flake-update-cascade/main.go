@@ -2,11 +2,15 @@
 // repository in the workspace that pins them directly, with one combined
 // update, commit, and optional PR per repository.
 //
+// Repositories are processed in dependency order — a repository after every
+// workspace repository it pins — and a pin of a workspace repository that is
+// behind its branch head is moved along with the named inputs, so a commit
+// the run pushes upstream reaches every downstream lock in the same run
+// (allod/tools#171).
+//
 // A failure the program does not guard — a restore that fails after a failed
 // update, say — ends the run with the failing command's status, via mustGit,
-// rather than carrying on with a checkout in an unknown state. Repositories are
-// processed in directory order; dependency ordering and pin propagation are
-// allod/tools#171.
+// rather than carrying on with a checkout in an unknown state.
 package main
 
 import (
@@ -31,11 +35,17 @@ const usageText = `Usage: flake-update-cascade <input-name>... [--dry-run] [--pr
 Update flake.lock for <input-name> across all repos that use them.
 Each repo receives one combined update, commit, and optional PR.
 
+Repos are processed in dependency order, each after the workspace repos it
+pins, and a pin of a workspace repo that is behind that repo's branch head
+is updated too, so one run carries an upstream lock commit downstream.
+
 Modes:
   (default)   Commit directly to the default branch. Skips repos whose
               default branch is in ~/.config/git/protected-branches.
   --pr        Create/update a PR branch instead of committing directly.
-              Works for all eligible repos including protected ones.
+              Works for all eligible repos including protected ones. A repo
+              pinning one that moved only on a PR branch waits for that PR;
+              re-run the same command after it merges.
   --dry-run   Show what would change without modifying anything.
 
 Examples:
@@ -144,6 +154,9 @@ func run(args []string) int {
 		inputLabel:    strings.Join(opts.names, ", "),
 		inputSlug:     strings.Join(opts.names, "-"),
 		heads:         make(map[string]string),
+		prMoved:       make(map[string]string),
+		waiting:       make(map[string][]blocker),
+		wouldMove:     make(map[string]bool),
 	}
 	c.repos = collectRepos(c.workDir)
 	return c.runCombinedCycle()
@@ -168,12 +181,19 @@ const (
 	skipNoLock   repoStatus = "skip:no-lock" // no flake.lock found
 	skipNoOrigin repoStatus = "skip:no-origin"
 	skipExternal repoStatus = "skip:external-remote" // origin outside the push boundary (every mode)
-	skipNoInput  repoStatus = "skip:no-input"        // no requested input has a reachable direct pin
+	skipNoInput  repoStatus = "skip:no-input"        // no requested input has a reachable direct pin, and no workspace pin
 	skipActivePR repoStatus = "skip:active-pr"
 	skipProtect  repoStatus = "skip:protected" // default branch is protected (direct mode only)
 	eligible     repoStatus = "eligible"
 	preflightErr repoStatus = "error"
 )
+
+// A blocker is a PR this run pushed a lock commit to, named with the
+// repository it belongs to, that a downstream repository cannot pin until it
+// merges.
+type blocker struct {
+	pr, repo string
+}
 
 type cascade struct {
 	options
@@ -183,17 +203,37 @@ type cascade struct {
 	protectedFile string
 	inputLabel    string
 	inputSlug     string
-	repos         []string
+	repos         []string // in directory order
+	order         []string // in dependency order
 
-	status      map[string]repoStatus
-	errorMsg    map[string]string
-	updatePaths map[string][]string
-	remote      map[string]string
-	errorRepos  []string
+	status     map[string]repoStatus
+	errorMsg   map[string]string
+	remote     map[string]string
+	errorRepos []string
+
+	// identity is each repository's origin reduced to what names the
+	// repository, and byIdentity the inverse, for matching a pin's URL to
+	// the workspace repository it names. Only repositories inside the push
+	// boundary are entered: a pin of anything else is external.
+	identity   map[string]string
+	byIdentity map[string][]string
+	// pins holds each repository's workspace pins as read before anything
+	// is pulled: the graph the order is built from.
+	pins map[string][]pin
 
 	// heads caches the branch heads read this run, keyed by URL and ref; an
 	// empty value records a failed read so it is not retried.
 	heads map[string]string
+
+	// prMoved records, per repository this run pushed a lock commit for on a
+	// PR branch, the PR carrying it; waiting records the PRs each deferred
+	// repository is waiting on, in waitingOrder. wouldMove is the dry-run
+	// counterpart of both: the repositories a real run would push to.
+	prMoved      map[string]string
+	waiting      map[string][]blocker
+	waitingOrder []string
+	wouldMove    map[string]bool
+	pendingRepos []string // dry-run repositories with a pin that could not be shown
 
 	// lockFile is the per-repository exclusion lock, held on one descriptor
 	// that each repository reopens, so at most one repository is locked at a
@@ -293,45 +333,64 @@ func (c *cascade) runCombinedCycle() int {
 	return c.execute()
 }
 
-// preflight classifies every repository before anything is touched.
+// preflight classifies every repository before anything is touched, and
+// decides the order they are processed in.
 func (c *cascade) preflight() {
 	c.status = make(map[string]repoStatus)
 	c.errorMsg = make(map[string]string)
-	c.updatePaths = make(map[string][]string)
 	c.remote = make(map[string]string)
+	c.identity = make(map[string]string)
+	c.byIdentity = make(map[string][]string)
+	c.pins = make(map[string][]pin)
 
+	// Every repository's origin is read first, so a pin can be matched to
+	// the repository it names before any lock is classified. The remote
+	// check runs in every mode: a repository whose origin is outside the
+	// push boundary is left alone before anything else about it is read,
+	// and it is not a repository a pin can name either.
 	for _, repo := range c.repos {
 		dir := c.repoDir(repo)
-
 		if !isDir(dir) {
 			c.status[repo] = skipSilent
 			continue
 		}
+		remoteURL, _ := gitCapture(dir, "remote", "get-url", "origin")
+		c.remote[repo] = remoteURL
+		if remoteURL == "" || !c.remoteIsAllowed(remoteURL) {
+			continue
+		}
+		if id, ok := repoIdentity(remoteURL); ok {
+			c.identity[repo] = id
+			c.byIdentity[id] = append(c.byIdentity[id], repo)
+		}
+	}
+
+	for _, repo := range c.repos {
+		if c.status[repo] == skipSilent {
+			continue
+		}
+		dir := c.repoDir(repo)
+
 		if !isFile(dir + "/flake.lock") {
 			c.status[repo] = skipNoLock
 			continue
 		}
-
-		// The remote check runs in every mode: a repository whose origin is
-		// outside the push boundary is reported and left alone before anything
-		// else about it is read.
-		remoteURL, _ := gitCapture(dir, "remote", "get-url", "origin")
+		remoteURL := c.remote[repo]
 		if remoteURL == "" {
 			c.status[repo] = skipNoOrigin
 			continue
 		}
 		if !c.remoteIsAllowed(remoteURL) {
 			c.status[repo] = skipExternal
-			c.remote[repo] = remoteURL
 			continue
 		}
 
-		paths := readLock(dir + "/flake.lock").UpdatePaths(c.names)
-		if len(paths) == 0 {
+		lock := readLock(dir + "/flake.lock")
+		c.pins[repo] = c.workspacePins(lock)
+		if len(c.updateSet(lock)) == 0 {
 			c.status[repo] = skipNoInput
 			continue
 		}
-		c.updatePaths[repo] = paths
 
 		if fileHasLine(c.activePRFile, repo) {
 			c.status[repo] = skipActivePR
@@ -379,13 +438,38 @@ func (c *cascade) preflight() {
 		}
 
 		if len(repoErrors) > 0 {
-			c.status[repo] = preflightErr
-			c.errorMsg[repo] = strings.Join(repoErrors, ",")
-			c.errorRepos = append(c.errorRepos, repo)
+			c.addError(repo, strings.Join(repoErrors, ","))
 		} else {
 			c.status[repo] = eligible
 		}
 	}
+
+	// The order: every repository after the ones it pins, directory order
+	// among the rest. Repositories that pin each other have no order, and
+	// the run stops here naming them.
+	deps := make(map[string][]string)
+	for _, repo := range c.repos {
+		for _, p := range c.pins[repo] {
+			deps[repo] = append(deps[repo], p.target)
+		}
+	}
+	order, cycle := dependencyOrder(c.repos, deps)
+	for _, repo := range cycle {
+		c.addError(repo, cycleMessage(cycle, repo))
+	}
+	c.order = order
+}
+
+// addError records a preflight error against a repository, joining it to any
+// the repository already has the way the per-repository checks do.
+func (c *cascade) addError(repo, msg string) {
+	if c.status[repo] == preflightErr {
+		c.errorMsg[repo] += "," + msg
+		return
+	}
+	c.status[repo] = preflightErr
+	c.errorMsg[repo] = msg
+	c.errorRepos = append(c.errorRepos, repo)
 }
 
 // atoi reads a count the way `[[ $n -gt 0 ]]` does for the values git
@@ -401,11 +485,21 @@ func atoi(text string) int {
 	return n
 }
 
+// An outcome is what processing one repository came to: whether it succeeded,
+// whether it produced a lock commit downstream repositories should see — one
+// pushed to the default branch, one on a PR branch, or one a dry run would
+// push — and in PR mode which PR carries it.
+type outcome struct {
+	ok    bool
+	moved bool
+	pr    string
+}
+
 func (c *cascade) execute() int {
 	overallExit := 0
 	first := true
 
-	for _, repo := range c.repos {
+	for _, repo := range c.order {
 		dir := c.repoDir(repo)
 		status, ok := c.status[repo]
 		if !ok {
@@ -443,6 +537,20 @@ func (c *cascade) execute() int {
 			continue
 		}
 
+		// A repository pinning one this run moved only on a PR branch cannot
+		// pin that commit until the PR merges; it waits, untouched, and the
+		// same command re-run after the merge continues from here.
+		if c.prMode {
+			if blockers := c.blockers(repo); len(blockers) > 0 {
+				for _, b := range blockers {
+					say("  waiting on %s (%s)", b.pr, b.repo)
+				}
+				c.waiting[repo] = blockers
+				c.waitingOrder = append(c.waitingOrder, repo)
+				continue
+			}
+		}
+
 		repoSlug := strings.ReplaceAll(repo, "/", "_")
 		if !c.acquireLock("/tmp/flake-update-cascade-" + repoSlug + ".lock") {
 			say("  another instance is running for %s, skipping", repo)
@@ -451,7 +559,6 @@ func (c *cascade) execute() int {
 		}
 
 		defaultBranch := defaultBranch(dir)
-		updatePaths := c.updatePaths[repo]
 
 		say("  pulling...")
 		if !gitInherit(dir, "pull") {
@@ -460,32 +567,128 @@ func (c *cascade) execute() int {
 			continue
 		}
 
+		// The pull may have changed the input graph, so the checkout is
+		// judged on the lock it has now, not the one preflight classified
+		// (allod/tools#175).
+		lock := readLock(dir + "/flake.lock")
+		updatePaths := c.updateSet(lock)
+		if len(updatePaths) == 0 {
+			say("  no directly pinned %s input found, skipping", c.inputLabel)
+			continue
+		}
+
+		// A dry run cannot show the pin a downstream repository would take
+		// from a commit this run would push, because nothing is pushed; it
+		// says so and shows the rest.
+		pending := false
+		if c.dryRun {
+			for _, p := range c.workspacePins(lock) {
+				if c.wouldMove[p.target] {
+					say("  %s: %s moves in this run; a dry run cannot show the revision it will pin", p.input, p.target)
+					pending = true
+				}
+			}
+			if pending {
+				c.pendingRepos = append(c.pendingRepos, repo)
+			}
+		}
+
 		// Read the branch head behind each path and keep only what moved, so
 		// a repository that is already current costs no nix call at all.
-		plan := planLock(readLock(dir+"/flake.lock"), updatePaths, c.resolveHead)
+		plan := planLock(lock, updatePaths, c.resolveHead)
 		for _, u := range plan.unresolved {
 			say("  %s: could not resolve %s at %s; asking nix instead", u.path, u.ref, u.url)
 		}
 		if plan.empty() {
-			say("  already up to date")
+			if pending {
+				say("  no other changes (dry-run)")
+				c.wouldMove[repo] = true
+			} else {
+				say("  already up to date")
+			}
 			continue
 		}
 
-		var succeeded bool
+		var result outcome
 		switch {
 		case c.dryRun:
-			succeeded = c.dryRunRepo(dir, repoSlug, updatePaths, plan)
+			result = c.dryRunRepo(dir, repoSlug, updatePaths, plan)
 		case c.prMode:
-			succeeded = c.prRepo(dir, repoSlug, defaultBranch, updatePaths, plan)
+			result = c.prRepo(dir, repoSlug, defaultBranch, updatePaths, plan)
 		default:
-			succeeded = c.directRepo(dir, repoSlug, updatePaths, plan)
+			result = c.directRepo(dir, repoSlug, updatePaths, plan)
 		}
-		if !succeeded {
+		if !result.ok {
 			overallExit = 1
+		}
+		switch {
+		case c.dryRun:
+			if result.moved || pending {
+				c.wouldMove[repo] = true
+			}
+		case c.prMode:
+			if result.moved {
+				c.prMoved[repo] = result.pr
+			}
+		default:
+			// The push moved the branch head every downstream pin reads, so
+			// the cached head is dropped and read again where it is next
+			// needed.
+			if result.moved {
+				c.forgetHeads(c.identity[repo])
+			}
 		}
 	}
 
+	c.summarize()
 	return overallExit
+}
+
+// blockers lists the PRs a repository waits on: one for each workspace pin
+// whose target this run moved on a PR branch, and the ones each waiting
+// target is itself waiting on, since a repository is processed after every
+// repository it pins.
+func (c *cascade) blockers(repo string) []blocker {
+	var blockers []blocker
+	seen := make(map[blocker]bool)
+	add := func(b blocker) {
+		if !seen[b] {
+			seen[b] = true
+			blockers = append(blockers, b)
+		}
+	}
+	for _, p := range c.pins[repo] {
+		if pr, ok := c.prMoved[p.target]; ok {
+			add(blocker{pr: pr, repo: p.target})
+		}
+		for _, b := range c.waiting[p.target] {
+			add(b)
+		}
+	}
+	return blockers
+}
+
+// summarize ends the run with what it could not finish: in PR mode the
+// repositories waiting on unmerged PRs, in a dry run the repositories whose
+// pins of commits this run would push could not be shown. Neither is a
+// failure.
+func (c *cascade) summarize() {
+	if len(c.waitingOrder) > 0 {
+		say("")
+		say("Waiting on unmerged PRs:")
+		for _, repo := range c.waitingOrder {
+			var prs []string
+			for _, b := range c.waiting[repo] {
+				prs = append(prs, b.pr+" ("+b.repo+")")
+			}
+			say("  %s: %s", repo, strings.Join(prs, ", "))
+		}
+		say("Re-run the same command after they merge to continue the cascade.")
+	}
+	if len(c.pendingRepos) > 0 {
+		say("")
+		say("Dry run: %s also take the commits above once they are pushed; a dry run cannot show the revisions they will pin.", strings.Join(c.pendingRepos, ", "))
+	}
 }
 
 // acquireLock takes the per-repository exclusion lock, releasing whichever
@@ -506,17 +709,19 @@ func (c *cascade) acquireLock(path string) bool {
 	return err == nil
 }
 
-func (c *cascade) reportRevisions(oldLock, newLock *flakelock.Lock, paths []string) bool {
-	changed := false
+// reportRevisions prints each path whose revision differs between the two
+// locks and returns those paths, in the order given.
+func (c *cascade) reportRevisions(oldLock, newLock *flakelock.Lock, paths []string) []string {
+	var moved []string
 	for _, path := range paths {
 		oldRev := oldLock.Rev(path)
 		newRev := newLock.Rev(path)
 		if oldRev != newRev {
 			say("  %s: %s → %s", path, short(oldRev), short(newRev))
-			changed = true
+			moved = append(moved, path)
 		}
 	}
-	return changed
+	return moved
 }
 
 func short(rev string) string {
@@ -526,37 +731,38 @@ func short(rev string) string {
 	return rev
 }
 
-func (c *cascade) dryRunRepo(dir, repoSlug string, updatePaths []string, plan lockPlan) bool {
+func (c *cascade) dryRunRepo(dir, repoSlug string, updatePaths []string, plan lockPlan) outcome {
 	tmpLock := "/tmp/" + repoSlug + ".flake.lock.new"
 
 	say("  updating %s (dry-run)...", strings.Join(plan.paths, " "))
 	if err := applyLock(dir, tmpLock, plan); err != nil {
 		say("  %v, skipping", err)
 		os.Remove(tmpLock)
-		return false
+		return outcome{}
 	}
 
 	if !nixQuiet("flake", "metadata", "--json", dir, "--reference-lock-file", tmpLock) {
 		say("  broken evaluation with updated lock, skipping")
 		os.Remove(tmpLock)
-		return false
+		return outcome{}
 	}
 
-	changed := c.reportRevisions(readLock(dir+"/flake.lock"), readLock(tmpLock), updatePaths)
-	if changed {
+	moved := c.reportRevisions(readLock(dir+"/flake.lock"), readLock(tmpLock), updatePaths)
+	if len(moved) > 0 {
 		say("  dry-run: no changes made")
 	} else {
 		say("  already up to date")
 	}
 
 	os.Remove(tmpLock)
-	return true
+	return outcome{ok: true, moved: len(moved) > 0}
 }
 
 // updateAndCheck is the shared front half of the two mutating modes: snapshot
 // the lock, write the planned update, gate on evaluation, and report what
-// moved. It returns the outcome and whether the caller should go on to commit.
-func (c *cascade) updateAndCheck(dir, repoSlug string, updatePaths []string, plan lockPlan) (ok, proceed bool) {
+// moved. It returns the label naming what moved — the commit message and PR
+// take it — the outcome so far, and whether the caller should go on to commit.
+func (c *cascade) updateAndCheck(dir, repoSlug string, updatePaths []string, plan lockPlan) (label string, ok, proceed bool) {
 	oldLock := "/tmp/" + repoSlug + ".flake.lock.old"
 	copyFile(dir+"/flake.lock", oldLock)
 
@@ -565,38 +771,44 @@ func (c *cascade) updateAndCheck(dir, repoSlug string, updatePaths []string, pla
 		say("  %v, skipping", err)
 		mustGit(dir, "checkout", "--", "flake.lock")
 		os.Remove(oldLock)
-		return false, false
+		return "", false, false
 	}
 
 	if !nixQuiet("flake", "metadata", "--json", dir) {
 		say("  broken evaluation after update — reverting flake.lock")
 		mustGit(dir, "checkout", "--", "flake.lock")
 		os.Remove(oldLock)
-		return false, false
+		return "", false, false
 	}
 
 	if gitInherit(dir, "diff", "--quiet", "--", "flake.lock") {
 		say("  already up to date")
 		os.Remove(oldLock)
-		return true, false
+		return "", true, false
 	}
 
-	c.reportRevisions(readLock(oldLock), readLock(dir+"/flake.lock"), updatePaths)
+	// The commit names the inputs that moved in this repository. When the
+	// lock changed without any of them changing revision — nix rewrote
+	// something else about a node — it names what nix was asked about.
+	moved := c.reportRevisions(readLock(oldLock), readLock(dir+"/flake.lock"), updatePaths)
+	if len(moved) == 0 {
+		moved = plan.paths
+	}
 	os.Remove(oldLock)
-	return true, true
+	return strings.Join(moved, ", "), true, true
 }
 
-func (c *cascade) prRepo(dir, repoSlug, defaultBranch string, updatePaths []string, plan lockPlan) bool {
+func (c *cascade) prRepo(dir, repoSlug, defaultBranch string, updatePaths []string, plan lockPlan) outcome {
 	prBranch := "agent/flake-update-" + c.inputSlug
 
-	ok, proceed := c.updateAndCheck(dir, repoSlug, updatePaths, plan)
+	label, ok, proceed := c.updateAndCheck(dir, repoSlug, updatePaths, plan)
 	if !proceed {
-		return ok
+		return outcome{ok: ok}
 	}
 
 	mustGit(dir, "add", "flake.lock")
 	mustGit(dir, "checkout", "-B", prBranch)
-	mustGit(dir, "commit", "-m", "flake.lock: update "+c.inputLabel)
+	mustGit(dir, "commit", "-m", "flake.lock: update "+label)
 
 	// Refresh the tracking ref before force-pushing. If the branch was
 	// deleted after a prior PR merge, the fetch fails and the stale local ref
@@ -609,7 +821,7 @@ func (c *cascade) prRepo(dir, repoSlug, defaultBranch string, updatePaths []stri
 		say("  push failed")
 		mustGit(dir, "checkout", defaultBranch)
 		mustGit(dir, "checkout", "--", "flake.lock")
-		return false
+		return outcome{}
 	}
 
 	// An origin URL with no owner/repo component ends the run here, after the
@@ -619,49 +831,52 @@ func (c *cascade) prRepo(dir, repoSlug, defaultBranch string, updatePaths []stri
 	if !ok {
 		fatal(1)
 	}
+	var pr string
 	existingPR, _ := capture(nil, "forge", "-R", forgeRepo, "pr", "find-by-head", prBranch)
 	if existingPR == "" {
 		prURL, _ := capture(nil, "forge", "-R", forgeRepo, "pr", "create",
-			"--title", "flake.lock: update "+c.inputLabel,
+			"--title", "flake.lock: update "+label,
 			"--head", prBranch,
 			"--base", defaultBranch,
-			"--body", "Automated flake.lock update for inputs `"+c.inputLabel+"`.")
+			"--body", "Automated flake.lock update for inputs `"+label+"`.")
 		if prURL == "" {
 			prURL = "PR created (could not fetch URL)"
 		}
 		say("  %s", prURL)
+		pr = prURL
 	} else {
 		say("  PR #%s updated", existingPR)
+		pr = "PR #" + existingPR
 	}
 
 	mustGit(dir, "checkout", defaultBranch)
 	mustGit(dir, "checkout", "--", "flake.lock")
-	return true
+	return outcome{ok: true, moved: true, pr: pr}
 }
 
-func (c *cascade) directRepo(dir, repoSlug string, updatePaths []string, plan lockPlan) bool {
-	ok, proceed := c.updateAndCheck(dir, repoSlug, updatePaths, plan)
+func (c *cascade) directRepo(dir, repoSlug string, updatePaths []string, plan lockPlan) outcome {
+	label, ok, proceed := c.updateAndCheck(dir, repoSlug, updatePaths, plan)
 	if !proceed {
-		return ok
+		return outcome{ok: ok}
 	}
 
 	mustGit(dir, "add", "flake.lock")
-	if !gitInherit(dir, "commit", "-m", "flake.lock: update "+c.inputLabel) {
+	if !gitInherit(dir, "commit", "-m", "flake.lock: update "+label) {
 		say("  commit failed (hook blocked?) — reverting")
 		if !gitRun(dir, os.Stdin, os.Stdout, nil, "restore", "--staged", "flake.lock") {
 			mustGit(dir, "reset", "HEAD", "flake.lock")
 		}
 		mustGit(dir, "checkout", "--", "flake.lock")
-		return false
+		return outcome{}
 	}
 
 	if !gitInherit(dir, "push") {
 		say("  push failed")
-		return false
+		return outcome{}
 	}
 
 	say("  committed and pushed")
-	return true
+	return outcome{ok: true, moved: true}
 }
 
 // copyFile copies the lock aside; a failure ends the run.

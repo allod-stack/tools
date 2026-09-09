@@ -81,7 +81,7 @@ case "$*" in
   "pull")
     exit 0
     ;;
-  "add flake.lock"|"commit -m flake.lock: update nixpkgs, allod-tools"|"push")
+  "add flake.lock"|"commit -m flake.lock: update allod-tools, vm/nixpkgs"|"push")
     exit 0
     ;;
   *)
@@ -163,8 +163,8 @@ output=$(run_cascade nixpkgs allod-tools)
   fail "direct update did not complete"
 [[ "$(grep -c $'^nix\tflake update' "$MOCK_LOG")" == 1 ]] ||
   fail "direct mode did not use exactly one combined Nix update"
-grep -Fq $'git\tcommit -m flake.lock: update nixpkgs, allod-tools' "$MOCK_LOG" ||
-  fail "direct mode did not create one combined commit"
+grep -Fq $'git\tcommit -m flake.lock: update allod-tools, vm/nixpkgs' "$MOCK_LOG" ||
+  fail "direct mode did not create one combined commit naming the paths that moved"
 
 : > "$MOCK_LOG"
 export MOCK_MODE=preflight-fail
