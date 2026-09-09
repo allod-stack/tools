@@ -9,7 +9,7 @@ Shows which flake inputs each repo pins and at what revision.
 ```
 flake-status                           # all inputs, all repos
 flake-status <input-name>              # one input across all repos
-flake-status <input-name> --upstream   # compare pins to upstream HEAD
+flake-status <input-name> --upstream   # compare pins to the branch each lock names
 ```
 
 **No args** -- full table per repo:
@@ -34,9 +34,19 @@ allod-tools — all repos consistent at 97b57e1 (2026-06-03)
 If repos are out of sync, the header says `INCONSISTENT` and the stale rows are
 marked `<- stale`.
 
-**`--upstream`** makes a network call to compare local pins against the input's
-remote HEAD. In all-inputs mode, stale pins are marked with `-> <rev>` and the
-output suggests `flake-update-cascade` commands for outdated inputs.
+**`--upstream`** makes a network call to compare each local pin against the
+head of the branch its lock names: the `ref` in the lock's `original` entry, or
+the remote's default branch when it names none. A `nixpkgs` pin tracking
+`nixos-26.05` is measured against `nixos-26.05`, not `master`, so a pin at the
+tip of its release branch reads as current. A pin that names its own revision
+is never behind. In all-inputs mode, stale pins are marked with `-> <rev>` and
+the output suggests `flake-update-cascade` commands for outdated inputs; the
+arrow is a move that command can make, because both read heads by the same
+rules: a bare ref is asked for as a branch, then as a tag, over `git ls-remote`,
+and only plain `github` and `git` references are read. An input the tool cannot
+read that way (a registry reference, a tarball, a `path:`, or a reference
+carrying `dir`, `host` or `submodules`) shows no arrow, as does a remote that
+cannot be reached.
 
 ---
 

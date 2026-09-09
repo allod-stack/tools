@@ -176,6 +176,31 @@
 
         touch "$out"
       '';
+
+      # The flake-status suite drives the Bash program against fixture locks
+      # and a mock git, so it needs no network and no real git.
+      flakeStatusSuite = pkgs.runCommand "flake-status-suite"
+        {
+          nativeBuildInputs = [
+            pkgs.bash
+            pkgs.coreutils
+            pkgs.gawk
+            pkgs.gnugrep
+            pkgs.gnused
+            pkgs.jq
+          ];
+          src = ./.;
+        } ''
+        export HOME="$TMPDIR/home"
+        cp -r "$src" source
+        chmod -R u+w source
+        cd source
+        patchShebangs .
+
+        bash tests/flake/flake-status.sh
+
+        touch "$out"
+      '';
     in
     {
       packages.${system} = {
@@ -189,6 +214,7 @@
         flake-update-cascade = flakeUpdateCascade;
         allod-parity = allodParity;
         cascade-suites = cascadeSuites;
+        flake-status-suite = flakeStatusSuite;
         go-checks = goChecks;
       };
 
