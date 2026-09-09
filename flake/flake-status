@@ -208,12 +208,13 @@ _ref_specs() {
 # as "<name>^{}"; print the revision of the first spec present, preferring the
 # peeled commit, which is what a lock records. Prints nothing when the remote
 # cannot be read or carries none of the specs. Terminal prompts are off so a
-# remote that wants credentials fails instead of asking.
+# remote that wants credentials fails instead of asking, and one read is
+# bounded to 60 seconds so a black-holed remote cannot hang the run.
 _ls_remote_head() {
   local url="$1" ref="$2"
   local -a specs
   mapfile -t specs < <(_ref_specs "$ref")
-  GIT_TERMINAL_PROMPT=0 git ls-remote --exit-code "$url" "${specs[@]}" 2>/dev/null </dev/null \
+  GIT_TERMINAL_PROMPT=0 timeout 60 git ls-remote --exit-code "$url" "${specs[@]}" 2>/dev/null </dev/null \
     | awk -F'\t' -v specs="${specs[*]}" '
         NF == 2 { revs[$2] = $1 }
         END {
@@ -307,7 +308,7 @@ show_named_input() {
   _parallel_for "${#REPOS[@]}" _collect_named
 
   # Read collected data in workspace order
-  local -a names=() revs=() dates=() statuses=() healths=()
+  local -a names=() revs=() dates=() statuses=() healths=() repo_idx=()
   local i
   for (( i=0; i<${#REPOS[@]}; i++ )); do
     local file="$_PTMP/repo/$i"
@@ -319,6 +320,7 @@ show_named_input() {
     [[ "$status" == "skip" ]] && continue
 
     names+=("${REPOS[$i]}")
+    repo_idx+=("$i")
     statuses+=("$status")
     revs+=("$rev")
     dates+=("$date")
@@ -397,9 +399,13 @@ show_named_input() {
   if [[ "$CHECK_UPSTREAM" == true && "$ok_count" -gt 0 ]]; then
     _resolve_all_upstreams
 
+    # The line judges the majority revision, so it is compared to the branch
+    # a repo holding that revision names; the first repo with the input may
+    # pin a different branch of the same repository.
     local upstream_url="" upstream_ref=""
-    for (( i=0; i<${#REPOS[@]}; i++ )); do
-      local uf="$_PTMP/urls/$i"
+    for i in "${!statuses[@]}"; do
+      [[ "${statuses[$i]}" == "ok" && "${revs[$i]}" == "$majority_rev" ]] || continue
+      local uf="$_PTMP/urls/${repo_idx[$i]}"
       [[ -f "$uf" ]] || continue
       IFS=$'\t' read -r _ upstream_url upstream_ref < "$uf"
       [[ -n "$upstream_url" ]] && break

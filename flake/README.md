@@ -9,7 +9,7 @@ Shows which flake inputs each repo pins and at what revision.
 ```
 flake-status                           # all inputs, all repos
 flake-status <input-name>              # one input across all repos
-flake-status <input-name> --upstream   # compare pins to the branch each lock names
+flake-status [<input-name>] --upstream # compare pins to the branch each lock names
 ```
 
 **No args** -- full table per repo:
@@ -39,8 +39,10 @@ head of the branch its lock names: the `ref` in the lock's `original` entry, or
 the remote's default branch when it names none. A `nixpkgs` pin tracking
 `nixos-26.05` is measured against `nixos-26.05`, not `master`, so a pin at the
 tip of its release branch reads as current. A pin that names its own revision
-is never behind. In all-inputs mode, stale pins are marked with `-> <rev>` and
-the output suggests `flake-update-cascade` commands for outdated inputs; the
+is never behind. In named-input mode the single `upstream:` line judges the
+majority revision against the branch a repo holding it names. In all-inputs
+mode, stale pins are marked with `→ <rev>` and the output suggests
+`flake-update-cascade` commands for outdated inputs, names sorted; the
 arrow is a move that command can make, because both read heads by the same
 rules: a bare ref is asked for as a branch, then as a tag, over `git ls-remote`,
 and only plain `github` and `git` references are read. An input the tool cannot
