@@ -93,6 +93,13 @@ type rcloneConfigSelection struct {
 // own parser, and refuses ambiguity from naming the option twice. A separated
 // value may not look like another option: --config=<path> is the unambiguous
 // spelling for the unusual case where a relative path begins with a dash.
+//
+// command is the calling siteCommand's own name (deploy, check, or config),
+// used both in the message text, as before, and — since every error here
+// goes through siteCommandUsageError rather than a bare die() — to select
+// that command's own usage line and its own '--help' pointer, so a bad
+// --config reports itself the same way any other bad argument to that
+// command does.
 func (selection *rcloneConfigSelection) consume(args []string, command string) ([]string, bool) {
 	if len(args) == 0 {
 		return args, false
@@ -102,10 +109,10 @@ func (selection *rcloneConfigSelection) consume(args []string, command string) (
 	switch {
 	case args[0] == "--config":
 		if len(args) < 2 {
-			die(1, "--config requires a path for site %s", command)
+			siteCommandUsageError(command, "--config requires a path for site %s", command)
 		}
 		if strings.HasPrefix(args[1], "-") {
-			die(1, "--config requires a path for site %s; use --config=<path> when the path begins with '-'", command)
+			siteCommandUsageError(command, "--config requires a path for site %s; use --config=<path> when the path begins with '-'", command)
 		}
 		path, args = args[1], args[2:]
 	case strings.HasPrefix(args[0], "--config="):
@@ -115,13 +122,13 @@ func (selection *rcloneConfigSelection) consume(args []string, command string) (
 	}
 
 	if path == "" {
-		die(1, "--config requires a non-empty path for site %s", command)
+		siteCommandUsageError(command, "--config requires a non-empty path for site %s", command)
 	}
 	if !validConfigValue(path) {
-		die(1, "--config path must be one line of printable text for site %s", command)
+		siteCommandUsageError(command, "--config path must be one line of printable text for site %s", command)
 	}
 	if selection.explicit {
-		die(1, "--config may only be specified once for site %s", command)
+		siteCommandUsageError(command, "--config may only be specified once for site %s", command)
 	}
 	selection.path, selection.explicit = path, true
 	return args, true
@@ -175,7 +182,7 @@ func siteConfigure(args []string) {
 		switch args[0] {
 		case "--force":
 			if forceSeen {
-				die(1, "--force may only be specified once for site config")
+				siteCommandUsageError("config", "--force may only be specified once for site config")
 			}
 			forceSeen = true
 			force, args = true, args[1:]
@@ -207,14 +214,14 @@ func siteConfigure(args []string) {
 		case "update":
 			operation = remoteConfigUpdate
 			if len(positionals) < 2 {
-				die(1, "site config update requires exactly one field: host, user, or password")
+				siteCommandUsageError("config", "site config update requires exactly one field: host, user, or password")
 			}
 			if len(positionals) > 2 {
-				die(1, "site config update takes one field, not %q and %q", positionals[1], positionals[2])
+				siteCommandUsageError("config", "site config update takes one field, not %q and %q", positionals[1], positionals[2])
 			}
 			field = remoteConfigField(positionals[1])
 			if field != remoteConfigHost && field != remoteConfigUser && field != remoteConfigPassword {
-				die(1, "unknown field for site config update: %s; expected host, user, or password", field)
+				siteCommandUsageError("config", "unknown field for site config update: %s; expected host, user, or password", field)
 			}
 		default:
 			siteCommandUsageError("config", "unexpected argument for site config: %s", positionals[0])
@@ -222,7 +229,7 @@ func siteConfigure(args []string) {
 	}
 	if force {
 		if operation != remoteConfigCreate {
-			die(1, "--force cannot be combined with a site config action; use 'site config replace' by itself")
+			siteCommandUsageError("config", "--force cannot be combined with a site config action; use 'site config replace' by itself")
 		}
 		operation = remoteConfigReplace
 	}

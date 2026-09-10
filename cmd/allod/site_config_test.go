@@ -918,7 +918,7 @@ func TestSiteConfigRejectsUnsafeUnicodeConfigPathsBeforeEffects(t *testing.T) {
 		{"line separator", "/run/credentials/\u2028forged"},
 		{"paragraph separator", "/run/credentials/\u2029forged"},
 	}
-	wantErr := "allod: --config path must be one line of printable text for site config\n"
+	wantErr := "allod: --config path must be one line of printable text for site config\n" + siteCommandUsageBlock(t, "config")
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

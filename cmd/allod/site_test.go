@@ -251,13 +251,17 @@ func TestSiteHelpIncludesDetailProse(t *testing.T) {
 
 // TestSiteCommandHelpMentionsOnlyItsOwnCommand pins the per-command help
 // contract: 'allod site <command> --help' prints that command's own usage
-// lines and detail, and nothing that names another command's usage.
+// lines and detail, and none of any other command's own usage line — its
+// exact registered 'allod site <name> ...' syntax line, not merely the words
+// 'allod site <name>', since a command's own detail may legitimately point
+// the reader at another command by its full invocation, e.g. check's detail
+// naming 'allod site config update user'.
 func TestSiteCommandHelpMentionsOnlyItsOwnCommand(t *testing.T) {
 	ownUsage := map[string]string{
-		"preview": "allod site preview ",
-		"deploy":  "allod site deploy ",
-		"check":   "allod site check ",
-		"config":  "allod site config ",
+		"preview": "allod site preview [--port <n>] [--interface <addr>] [--base-url <url>] [--drafts] [--open] [-- <zola args>...]",
+		"deploy":  "allod site deploy [--config <path>] [--dry-run]",
+		"check":   "allod site check [--config <path>]",
+		"config":  "allod site config [--config <path>] [--force]",
 	}
 	for command, usage := range ownUsage {
 		t.Run(command, func(t *testing.T) {
@@ -327,6 +331,20 @@ func TestSiteArgumentErrorPrintsOwnUsageOnly(t *testing.T) {
 			"allod: --port requires a value\n",
 			"Usage:\n  allod site preview ",
 			"\nRun 'allod site preview --help' for details.\n",
+		},
+		{
+			"deploy --config missing value",
+			[]string{"site", "deploy", "--config"},
+			"allod: --config requires a path for site deploy\n",
+			"Usage:\n  allod site deploy ",
+			"\nRun 'allod site deploy --help' for details.\n",
+		},
+		{
+			"config --force specified twice",
+			[]string{"site", "config", "--force", "--force"},
+			"allod: --force may only be specified once for site config\n",
+			"Usage:\n  allod site config ",
+			"\nRun 'allod site config --help' for details.\n",
 		},
 	}
 	for _, test := range tests {

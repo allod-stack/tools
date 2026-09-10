@@ -15,6 +15,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -39,6 +40,28 @@ func runAllod(t *testing.T, args ...string) (stdoutText, stderrText string, code
 	code = run(args)
 	restore()
 	return outBuffer.String(), errBuffer.String(), code
+}
+
+// siteCommandUsageBlock builds the part of a site command's argument-error
+// output that follows its one-line message: the "Usage:\n" block for name
+// and the "Run 'allod site <name> --help' for details.\n" pointer, exactly
+// as siteCommandUsageError (site_common.go) appends them. It reads the same
+// siteCommands table that function does, so a test pins the usage lines
+// without retyping them — and without drifting from that table's declared
+// order or contents whichever build carries it.
+func siteCommandUsageBlock(t *testing.T, name string) string {
+	t.Helper()
+	entry, ok := siteCommandEntry(name)
+	if !ok {
+		t.Fatalf("siteCommandUsageBlock: unregistered site command: %s", name)
+	}
+	var block strings.Builder
+	block.WriteString("Usage:\n")
+	for _, line := range entry.usage {
+		fmt.Fprintf(&block, "  %s\n", line)
+	}
+	fmt.Fprintf(&block, "\nRun 'allod site %s --help' for details.\n", name)
+	return block.String()
 }
 
 // stubTools puts unusable executables of the given names on an otherwise empty

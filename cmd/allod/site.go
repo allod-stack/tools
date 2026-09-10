@@ -711,7 +711,8 @@ deployed and is not serving.
 
 const siteCheckDetail = `'check' opens the 'shared' remote without reading a site repo, building, syncing,
 or publishing. A rejected FTP login can identify only the username or password
-as the cause, so its failure points to both single-field update commands.
+as the cause, so its failure points to 'allod site config update user' and
+'allod site config update password'.
 `
 
 const siteConfigDetail = `'config' with no action creates the remote and refuses to replace one that is
