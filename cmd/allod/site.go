@@ -34,6 +34,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -563,6 +564,22 @@ func probeSite(url string) (int, error) {
 	return response.StatusCode, nil
 }
 
+// siteDeployTransfers, siteDeployCheckers, and siteDeployFTPConcurrency bound
+// how many FTP connections a deploy's sync can hold open at once. rclone's
+// FTP backend documentation requires concurrency to be at least one more
+// than the sum of transfers and checkers for a sync to avoid deadlock: a
+// checker listing a directory and a transfer sending a file can each hold a
+// connection open waiting on the other, and concurrency has to leave room
+// for one more to make progress. The values are small and fixed rather than
+// tuned to any one host: shared hosting commonly allows only a handful of
+// simultaneous connections per client, and what matters is that the total
+// stays under that, not the exact number.
+const (
+	siteDeployTransfers      = 2
+	siteDeployCheckers       = 2
+	siteDeployFTPConcurrency = siteDeployTransfers + siteDeployCheckers + 1
+)
+
 func siteDeploy(args []string) {
 	dryRun := false
 	var configSelection rcloneConfigSelection
@@ -636,6 +653,9 @@ func siteDeploy(args []string) {
 	syncArgs = append(syncArgs,
 		"--backup-dir", siteRemoteName+":deploy-trash/"+config.domain,
 		"--verbose",
+		"--transfers", strconv.Itoa(siteDeployTransfers),
+		"--checkers", strconv.Itoa(siteDeployCheckers),
+		"--ftp-concurrency", strconv.Itoa(siteDeployFTPConcurrency),
 	)
 	if dryRun {
 		syncArgs = append(syncArgs, "--dry-run")
@@ -695,6 +715,8 @@ Each profile's exclusion filter belongs to this command rather than to the site
 repo. A non-empty filter is written to a temporary file per run and passed as
 --filter-from, so every site on the deployment gets the same list. Replaced and
 deleted files are moved to shared:deploy-trash/<domain> rather than destroyed.
+The sync is bounded to a fixed number of simultaneous FTP connections, so it
+finishes instead of tripping a shared host's per-client connection limit.
 
 site.toml still has exactly one key and cannot select the hosting profile:
 

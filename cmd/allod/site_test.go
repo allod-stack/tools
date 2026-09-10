@@ -962,6 +962,9 @@ func TestSiteDeployDirectAdminDefaultIsUnchanged(t *testing.T) {
 		"--filter-from", filter,
 		"--backup-dir", "shared:deploy-trash/example.com",
 		"--verbose",
+		"--transfers", "2",
+		"--checkers", "2",
+		"--ftp-concurrency", "5",
 	}
 	if fmt.Sprint(stub.syncArgs) != fmt.Sprint(want) {
 		t.Errorf("rclone args =\n%v\nwant\n%v", stub.syncArgs, want)
@@ -1295,6 +1298,9 @@ func TestSiteDeployPublicHTMLProfile(t *testing.T) {
 		"sync", "/nix/store/aaa-site", "shared:public_html/example.com",
 		"--backup-dir", "shared:deploy-trash/example.com",
 		"--verbose",
+		"--transfers", "2",
+		"--checkers", "2",
+		"--ftp-concurrency", "5",
 	}
 	if fmt.Sprint(stub.syncArgs) != fmt.Sprint(want) {
 		t.Errorf("rclone args =\n%v\nwant\n%v", stub.syncArgs, want)
@@ -1385,12 +1391,21 @@ func TestSiteDeployDryRun(t *testing.T) {
 	if stub.syncCalls != 1 {
 		t.Fatalf("rclone ran %d times, want 1", stub.syncCalls)
 	}
-	if last := stub.syncArgs[len(stub.syncArgs)-1]; last != "--dry-run" {
-		t.Errorf("last rclone arg = %q, want %q\ngot: %v", last, "--dry-run", stub.syncArgs)
+	// --dry-run is the only difference from a real deploy's argv: the same
+	// connection budget applies to the listing a dry run does.
+	filter := argAfter(t, stub.syncArgs, "--filter-from")
+	want := []string{
+		"sync", "/nix/store/aaa-site", "shared:domains/example.com/public_html",
+		"--filter-from", filter,
+		"--backup-dir", "shared:deploy-trash/example.com",
+		"--verbose",
+		"--transfers", "2",
+		"--checkers", "2",
+		"--ftp-concurrency", "5",
+		"--dry-run",
 	}
-	// The destination is the same one a real deploy would use.
-	if stub.syncArgs[2] != "shared:domains/example.com/public_html" {
-		t.Errorf("rclone destination = %q, want %q", stub.syncArgs[2], "shared:domains/example.com/public_html")
+	if fmt.Sprint(stub.syncArgs) != fmt.Sprint(want) {
+		t.Errorf("rclone args =\n%v\nwant\n%v", stub.syncArgs, want)
 	}
 	if stub.verifyCalls != 0 {
 		t.Errorf("verification ran %d times on a dry run, want 0", stub.verifyCalls)
