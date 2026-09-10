@@ -180,7 +180,7 @@ func siteConfigure(args []string) {
 			forceSeen = true
 			force, args = true, args[1:]
 		case "-h", "--help":
-			fmt.Fprint(stdout, siteUsageText())
+			fmt.Fprint(stdout, siteCommandHelp("config"))
 			return
 		default:
 			if strings.HasPrefix(args[0], "-") {

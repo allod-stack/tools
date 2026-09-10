@@ -36,8 +36,9 @@ func TestSiteNamespaceExistsWithPreviewOnly(t *testing.T) {
 
 // TestUntaggedSiteDeployCheckConfigAreUnknown pins the behaviour an operator
 // sees: 'allod site deploy', 'check', and 'config' on a machine that does
-// not publish sites fail exactly the way a typo does, and say so in the same
-// words 'unknown site command' always has.
+// not publish sites fail exactly the way a typo does, saying so in the same
+// words 'unknown site command' always has and then, like any unknown site
+// command, printing the short usage rather than nothing.
 func TestUntaggedSiteDeployCheckConfigAreUnknown(t *testing.T) {
 	for _, command := range []string{"deploy", "check", "config"} {
 		t.Run(command, func(t *testing.T) {
@@ -45,7 +46,7 @@ func TestUntaggedSiteDeployCheckConfigAreUnknown(t *testing.T) {
 			if code != 1 {
 				t.Errorf("exit code = %d, want 1", code)
 			}
-			want := "allod: unknown site command: " + command + "\n"
+			want := "allod: unknown site command: " + command + "\n" + siteShortUsage()
 			if errText != want {
 				t.Errorf("stderr = %q, want %q", errText, want)
 			}
@@ -65,7 +66,7 @@ func TestUntaggedSiteDeployWithArgsIsStillUnknown(t *testing.T) {
 	if code != 1 {
 		t.Errorf("exit code = %d, want 1", code)
 	}
-	if want := "allod: unknown site command: deploy\n"; errText != want {
+	if want := "allod: unknown site command: deploy\n" + siteShortUsage(); errText != want {
 		t.Errorf("stderr = %q, want %q", errText, want)
 	}
 	if out != "" {
@@ -103,6 +104,33 @@ func TestUntaggedSiteUsageListsOnlyPreview(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestUntaggedSiteBareInvocationHasNoDetailProse pins the short-usage
+// contract in the build that carries only 'preview': a bare 'allod site'
+// stays short even with one command registered, and '--help' still carries
+// the detail prose the bare form omits.
+func TestUntaggedSiteBareInvocationHasNoDetailProse(t *testing.T) {
+	const detailOnly = "mirror zola's own flags of the same names"
+
+	_, errText, code := runAllod(t, "site")
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	if strings.Contains(errText, detailOnly) {
+		t.Errorf("bare invocation printed preview's detail prose %q\ngot: %q", detailOnly, errText)
+	}
+	if want := "\nRun 'allod site --help' for details on each command.\n"; !strings.HasSuffix(errText, want) {
+		t.Errorf("bare invocation stderr does not end with %q\ngot: %q", want, errText)
+	}
+
+	out, errText, code := runAllod(t, "site", "--help")
+	if code != 0 || errText != "" {
+		t.Fatalf("exit=%d stderr=%q, want success with empty stderr", code, errText)
+	}
+	if !strings.Contains(out, detailOnly) {
+		t.Errorf("'site --help' is missing preview's detail prose %q\ngot: %q", detailOnly, out)
 	}
 }
 

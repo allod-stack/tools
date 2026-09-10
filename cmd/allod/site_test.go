@@ -202,6 +202,90 @@ func TestSiteUsage(t *testing.T) {
 	}
 }
 
+// siteDetailOnlySentences names one sentence from each command's detail
+// prose that appears nowhere in any Usage: or Commands: line, so its
+// presence or absence distinguishes the short usage from the long one.
+var siteDetailOnlySentences = map[string]string{
+	"deploy":  "deployment-owned hosting layout compiled in",
+	"check":   "A rejected FTP login can identify only the username or password",
+	"config":  "Passwords are not echoed as they are typed",
+	"preview": "mirror zola's own flags of the same names",
+}
+
+// TestSiteBareInvocationHasNoDetailProse pins the short-usage contract: a
+// bare 'allod site' prints only the Usage: and Commands: blocks and the
+// pointer to '--help', never any command's detail prose, so an operator who
+// mistypes a command gets one screen, not the whole manual.
+func TestSiteBareInvocationHasNoDetailProse(t *testing.T) {
+	out, errText, code := runAllod(t, "site")
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	if out != "" {
+		t.Errorf("stdout = %q, want empty", out)
+	}
+	for command, sentence := range siteDetailOnlySentences {
+		if strings.Contains(errText, sentence) {
+			t.Errorf("bare invocation printed %s's detail prose %q\ngot: %q", command, sentence, errText)
+		}
+	}
+	if want := "\nRun 'allod site --help' for details on each command.\n"; !strings.HasSuffix(errText, want) {
+		t.Errorf("bare invocation stderr does not end with %q\ngot: %q", want, errText)
+	}
+}
+
+// TestSiteHelpIncludesDetailProse is the other half of the contract above:
+// 'allod site --help' prints every command's detail prose, which is exactly
+// what the bare invocation must not.
+func TestSiteHelpIncludesDetailProse(t *testing.T) {
+	out, errText, code := runAllod(t, "site", "--help")
+	if code != 0 || errText != "" {
+		t.Fatalf("exit=%d stderr=%q, want success with empty stderr", code, errText)
+	}
+	for command, sentence := range siteDetailOnlySentences {
+		if !strings.Contains(out, sentence) {
+			t.Errorf("'site --help' is missing %s's detail prose %q\ngot: %q", command, sentence, out)
+		}
+	}
+}
+
+// TestSiteCommandHelpMentionsOnlyItsOwnCommand pins the per-command help
+// contract: 'allod site <command> --help' prints that command's own usage
+// lines and detail, and nothing that names another command's usage.
+func TestSiteCommandHelpMentionsOnlyItsOwnCommand(t *testing.T) {
+	ownUsage := map[string]string{
+		"preview": "allod site preview ",
+		"deploy":  "allod site deploy ",
+		"check":   "allod site check ",
+		"config":  "allod site config ",
+	}
+	for command, usage := range ownUsage {
+		t.Run(command, func(t *testing.T) {
+			out, errText, code := runAllod(t, "site", command, "--help")
+			if code != 0 || errText != "" {
+				t.Fatalf("exit=%d stderr=%q, want success with empty stderr", code, errText)
+			}
+			if !strings.Contains(out, usage) {
+				t.Errorf("'site %s --help' does not contain its own usage %q\ngot: %q", command, usage, out)
+			}
+			if sentence := siteDetailOnlySentences[command]; !strings.Contains(out, sentence) {
+				t.Errorf("'site %s --help' does not contain its own detail prose %q\ngot: %q", command, sentence, out)
+			}
+			for other, otherUsage := range ownUsage {
+				if other == command {
+					continue
+				}
+				if strings.Contains(out, otherUsage) {
+					t.Errorf("'site %s --help' mentions %s's usage %q\ngot: %q", command, other, otherUsage, out)
+				}
+				if sentence := siteDetailOnlySentences[other]; strings.Contains(out, sentence) {
+					t.Errorf("'site %s --help' mentions %s's detail prose %q\ngot: %q", command, other, sentence, out)
+				}
+			}
+		})
+	}
+}
+
 func TestSiteUsageKeepsHostingSelectionAtBuildTime(t *testing.T) {
 	out, errText, code := runAllod(t, "site", "--help")
 	if code != 0 || errText != "" {

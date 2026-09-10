@@ -501,7 +501,7 @@ func siteCheck(args []string) {
 		}
 		switch args[0] {
 		case "-h", "--help":
-			fmt.Fprint(stdout, siteUsageText())
+			fmt.Fprint(stdout, siteCommandHelp("check"))
 			return
 		default:
 			if strings.HasPrefix(args[0], "-") {
@@ -564,7 +564,7 @@ func siteDeploy(args []string) {
 		case "--dry-run":
 			dryRun, args = true, args[1:]
 		case "-h", "--help":
-			fmt.Fprint(stdout, siteUsageText())
+			fmt.Fprint(stdout, siteCommandHelp("deploy"))
 			return
 		default:
 			// There is deliberately no option or argument that names a
@@ -657,7 +657,9 @@ func siteDeploy(args []string) {
 // prose blocks this file contributes to 'allod site' usage, in the same
 // words the single siteUsageText constant carried before the command table
 // split them out. siteUsageText() in site_common.go joins them with the
-// other commands' blocks in siteCommands order.
+// other commands' blocks in siteCommands order for 'allod site --help';
+// siteCommandHelp() joins a single one with its own usage lines for that
+// command's own '-h'/'--help'.
 const siteDeployDetail = `'deploy' walks up from the current directory to the site.toml that marks the
 site repository root, builds that repo with 'nix build --no-link
 --print-out-paths', and syncs the resulting store path through the 'shared'

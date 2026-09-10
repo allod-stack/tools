@@ -66,7 +66,7 @@ func sitePreview(args []string) {
 			zolaArgs = append(zolaArgs, args[1:]...)
 			args = nil
 		case "-h", "--help":
-			fmt.Fprint(stdout, siteUsageText())
+			fmt.Fprint(stdout, siteCommandHelp("preview"))
 			return
 		default:
 			if strings.HasPrefix(args[0], "-") {
@@ -126,7 +126,7 @@ rather than a constant.
 // siteCommands is declared with no initializer in site_common.go, and every
 // entry is added here or in site.go's init() rather than in a var literal:
 // a siteCommand's run field is a function (sitePreview here, siteDeploy and
-// friends in site.go) whose body calls siteUsageText, which reads
+// friends in site.go) whose body calls siteCommandHelp, which reads
 // siteCommands back — a var initializer that built such a value directly
 // would be a compile-time initialization cycle, since Go's dependency
 // analysis follows a function reference into that function's own body. This

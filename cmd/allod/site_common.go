@@ -219,7 +219,7 @@ type siteCommand struct {
 // holds once every init() function has run. It is declared with no
 // initializer, and every entry — 'preview' included — is added from an
 // init() rather than a var literal: a siteCommand's run field holds a
-// function (sitePreview, siteDeploy, ...) whose body calls siteUsageText,
+// function (sitePreview, siteDeploy, ...) whose body calls siteCommandHelp,
 // which reads siteCommands, so a var initializer that built a siteCommand
 // value directly would be a compile-time initialization cycle. init()
 // function bodies are not part of that dependency analysis, only var
@@ -234,9 +234,17 @@ var siteCommands []siteCommand
 // it carries. On an untagged build that is 'preview' alone: 'deploy',
 // 'check', and 'config' fall through to the same "unknown site command" a
 // typo would, because in that build they are exactly as absent as a typo.
+//
+// A bare invocation and an unknown command both print the short usage — the
+// Usage: and Commands: blocks, without any command's detail prose — so an
+// operator who mistypes a command gets the options on one screen instead of
+// the whole manual. Only '-h'/'--help' on the namespace itself prints the
+// long form; a parse error inside one command (an unknown option, an
+// unexpected argument, a missing value) stays the one-line message it always
+// was, from that command's own argument loop.
 func siteMain(args []string) {
 	if len(args) == 0 {
-		fmt.Fprint(stderr, siteUsageText())
+		fmt.Fprint(stderr, siteShortUsage())
 		exit(1)
 	}
 	command, rest := args[0], args[1:]
@@ -251,15 +259,15 @@ func siteMain(args []string) {
 			return
 		}
 	}
-	die(1, "unknown site command: %s", command)
+	fmt.Fprintf(stderr, "allod: unknown site command: %s\n", command)
+	fmt.Fprint(stderr, siteShortUsage())
+	exit(1)
 }
 
-// siteUsageText renders 'allod site' usage from siteCommands, so a build
-// advertises exactly the commands it carries and no others. Every command's
-// '-h'/'--help' prints this same whole text, which is the existing shape:
-// there was never a per-command help subset before this command table
-// existed either.
-func siteUsageText() string {
+// siteUsageHeader renders the Usage: and Commands: blocks from siteCommands
+// that the short and long usage forms share, so a build advertises exactly
+// the commands it carries and no others.
+func siteUsageHeader() string {
 	var text strings.Builder
 	text.WriteString("Usage:\n")
 	for _, entry := range siteCommands {
@@ -271,9 +279,54 @@ func siteUsageText() string {
 	for _, entry := range siteCommands {
 		fmt.Fprintf(&text, "  %-8s %s\n", entry.name, entry.summary)
 	}
+	return text.String()
+}
+
+// siteShortUsage is what a bare 'allod site' and an unknown site command
+// print: the Usage: and Commands: blocks, with no command's detail prose,
+// and a pointer to where that prose lives. It fits on one screen regardless
+// of how many commands a build carries.
+func siteShortUsage() string {
+	return siteUsageHeader() + "\nRun 'allod site --help' for details on each command.\n"
+}
+
+// siteUsageText renders the long form of 'allod site' usage: the same
+// Usage: and Commands: blocks as siteShortUsage, followed by every
+// registered command's own detail prose. Only 'allod site --help' and
+// 'allod site -h' print this; a single command's own '-h'/'--help' prints
+// siteCommandHelp for that command alone, not this.
+func siteUsageText() string {
+	var text strings.Builder
+	text.WriteString(siteUsageHeader())
 	for _, entry := range siteCommands {
 		text.WriteString("\n")
 		text.WriteString(entry.detail)
 	}
 	return text.String()
+}
+
+// siteCommandHelp renders one registered command's own usage lines followed
+// by its own detail prose, and nothing about any other command. Every
+// command's '-h'/'--help' case calls this with its own name rather than
+// printing siteUsageText, so this is implemented once instead of once per
+// command.
+//
+// name must be a name already registered in siteCommands — every caller
+// passes its own siteCommand.name — so an unmatched name is a mistake in
+// this program, not in its input.
+func siteCommandHelp(name string) string {
+	for _, entry := range siteCommands {
+		if entry.name != name {
+			continue
+		}
+		var text strings.Builder
+		text.WriteString("Usage:\n")
+		for _, line := range entry.usage {
+			fmt.Fprintf(&text, "  %s\n", line)
+		}
+		text.WriteString("\n")
+		text.WriteString(entry.detail)
+		return text.String()
+	}
+	panic("siteCommandHelp: unregistered site command: " + name)
 }
