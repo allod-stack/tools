@@ -170,7 +170,7 @@ func TestSiteUsage(t *testing.T) {
 		errHas     string
 		errIsEmpty bool
 	}{
-		{"namespace listed in top-level usage", []string{}, 1, "site     Preview a site locally", "", true},
+		{"namespace listed in top-level usage", []string{}, 1, "site     Preview a static site", "", true},
 		{"no command prints usage to stderr", []string{"site"}, 1, "", "allod site deploy [--config <path>] [--dry-run]", false},
 		{"--help prints usage to stdout", []string{"site", "--help"}, 0, "allod site deploy [--config <path>] [--dry-run]", "", true},
 		{"-h prints usage to stdout", []string{"site", "-h"}, 0, "allod site config [--config <path>] [--force]", "", true},

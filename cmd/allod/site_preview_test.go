@@ -4,32 +4,60 @@ package main
 // site_test.go, because preview compiles into every build: both
 // 'go test ./...' and 'go test -tags site ./...' must run it.
 //
-// The seam these tests swap is package-level mutable state, so no test here
-// calls t.Parallel.
+// The seam these tests swap (sitePreviewRun) sits at the exec boundary, not
+// around argv construction: it is given the program name and the full argv
+// sitePreviewArgs built, and only runs the process. Argv construction stays
+// in production code and is never replaced here, so pinning the argv these
+// tests capture checks the real thing — including where '--root' lands
+// relative to 'serve', which zola is strict about — rather than a test that
+// reimplements the same logic and could not catch a mistake in it.
+//
+// The seam is package-level mutable state, so no test here calls t.Parallel.
 
 import (
 	"strings"
 	"testing"
 )
 
-// previewStub records the argv sitePreview asked to run and answers with
+// previewStub records the command sitePreview asked to run and answers with
 // whatever status the test set up.
 type previewStub struct {
-	root     string
-	zolaArgs []string
-	calls    int
-	status   int
+	name   string
+	args   []string
+	calls  int
+	status int
 }
 
 func usePreviewStub(t *testing.T, stub *previewStub) string {
 	t.Helper()
 	previous := sitePreviewRun
-	sitePreviewRun = func(root string, zolaArgs []string) int {
-		stub.root, stub.zolaArgs, stub.calls = root, zolaArgs, stub.calls+1
+	sitePreviewRun = func(name string, args []string) int {
+		stub.name, stub.args, stub.calls = name, args, stub.calls+1
 		return stub.status
 	}
 	t.Cleanup(func() { sitePreviewRun = previous })
 	return stubTools(t, "nix")
+}
+
+// wantSitePreviewArgs is the expected argv for a preview run against root,
+// with any zola flags appended after 'serve'. It is written out by hand
+// rather than calling sitePreviewArgs, precisely so a test using it is
+// checking sitePreviewArgs's actual output, not comparing that function
+// against itself.
+func wantSitePreviewArgs(root string, zolaFlags ...string) []string {
+	args := []string{"shell", "--inputs-from", root, "nixpkgs#zola", "--command", "zola", "--root", root, "serve"}
+	return append(args, zolaFlags...)
+}
+
+// TestSitePreviewArgsRootPrecedesServe exercises sitePreviewArgs directly,
+// with no CLI dispatch or site repository involved: '--root' is a global
+// zola option and must come before 'serve', not after it.
+func TestSitePreviewArgsRootPrecedesServe(t *testing.T) {
+	got := sitePreviewArgs("/site/root", []string{"--port", "2111"})
+	want := []string{"shell", "--inputs-from", "/site/root", "nixpkgs#zola", "--command", "zola", "--root", "/site/root", "serve", "--port", "2111"}
+	if !equalArgs(got, want) {
+		t.Errorf("sitePreviewArgs = %v, want %v", got, want)
+	}
 }
 
 func TestSitePreviewOutsideSiteRepo(t *testing.T) {
@@ -53,8 +81,11 @@ func TestSitePreviewOutsideSiteRepo(t *testing.T) {
 	}
 }
 
-// TestSitePreviewDefaultArgv pins the argv built when no flags are given:
-// the root, and nothing the user did not ask for.
+// TestSitePreviewDefaultArgv pins the exact command run when no flags are
+// given, including that 'nix' is the program and that '--root' precedes
+// 'serve': zola rejects it after 'serve' ("unexpected argument '--root'
+// found" against zola 0.22.1), so this is the property the seam split in
+// this file exists to protect.
 func TestSitePreviewDefaultArgv(t *testing.T) {
 	stub := &previewStub{}
 	usePreviewStub(t, stub)
@@ -67,21 +98,23 @@ func TestSitePreviewDefaultArgv(t *testing.T) {
 	if stub.calls != 1 {
 		t.Fatalf("preview ran %d times, want 1", stub.calls)
 	}
-	if stub.root != root {
-		t.Errorf("root = %q, want %q", stub.root, root)
+	if stub.name != "nix" {
+		t.Errorf("program = %q, want %q", stub.name, "nix")
 	}
-	if len(stub.zolaArgs) != 0 {
-		t.Errorf("zola args = %v, want none: a flag the user did not give must not appear", stub.zolaArgs)
+	want := wantSitePreviewArgs(root)
+	if !equalArgs(stub.args, want) {
+		t.Errorf("argv = %v, want %v", stub.args, want)
 	}
 }
 
 // TestSitePreviewFlags pins the exact argv built for each flag zola accepts,
-// individually and combined.
+// individually and combined: every flag lands after 'serve', in the order
+// given.
 func TestSitePreviewFlags(t *testing.T) {
 	tests := []struct {
-		name string
-		args []string
-		want []string
+		name  string
+		args  []string
+		flags []string
 	}{
 		{"port", []string{"--port", "2111"}, []string{"--port", "2111"}},
 		{"interface", []string{"--interface", "0.0.0.0"}, []string{"--interface", "0.0.0.0"}},
@@ -99,7 +132,7 @@ func TestSitePreviewFlags(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			stub := &previewStub{}
 			usePreviewStub(t, stub)
-			useSiteRepo(t, "domain = \"example.com\"\n")
+			root := useSiteRepo(t, "domain = \"example.com\"\n")
 
 			args := append([]string{"site", "preview"}, test.args...)
 			_, errText, code := runAllod(t, args...)
@@ -109,8 +142,9 @@ func TestSitePreviewFlags(t *testing.T) {
 			if stub.calls != 1 {
 				t.Fatalf("preview ran %d times, want 1", stub.calls)
 			}
-			if !equalArgs(stub.zolaArgs, test.want) {
-				t.Errorf("zola args = %v, want %v", stub.zolaArgs, test.want)
+			want := wantSitePreviewArgs(root, test.flags...)
+			if !equalArgs(stub.args, want) {
+				t.Errorf("argv = %v, want %v", stub.args, want)
 			}
 		})
 	}
@@ -121,15 +155,15 @@ func TestSitePreviewFlags(t *testing.T) {
 func TestSitePreviewPassthrough(t *testing.T) {
 	stub := &previewStub{}
 	usePreviewStub(t, stub)
-	useSiteRepo(t, "domain = \"example.com\"\n")
+	root := useSiteRepo(t, "domain = \"example.com\"\n")
 
 	_, errText, code := runAllod(t, "site", "preview", "--port", "2111", "--", "--extra-flag", "value")
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr: %q", code, errText)
 	}
-	want := []string{"--port", "2111", "--extra-flag", "value"}
-	if !equalArgs(stub.zolaArgs, want) {
-		t.Errorf("zola args = %v, want %v", stub.zolaArgs, want)
+	want := wantSitePreviewArgs(root, "--port", "2111", "--extra-flag", "value")
+	if !equalArgs(stub.args, want) {
+		t.Errorf("argv = %v, want %v", stub.args, want)
 	}
 }
 
@@ -139,15 +173,15 @@ func TestSitePreviewPassthrough(t *testing.T) {
 func TestSitePreviewPassthroughOnly(t *testing.T) {
 	stub := &previewStub{}
 	usePreviewStub(t, stub)
-	useSiteRepo(t, "domain = \"example.com\"\n")
+	root := useSiteRepo(t, "domain = \"example.com\"\n")
 
 	_, errText, code := runAllod(t, "site", "preview", "--", "--port", "9999")
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr: %q", code, errText)
 	}
-	want := []string{"--port", "9999"}
-	if !equalArgs(stub.zolaArgs, want) {
-		t.Errorf("zola args = %v, want %v", stub.zolaArgs, want)
+	want := wantSitePreviewArgs(root, "--port", "9999")
+	if !equalArgs(stub.args, want) {
+		t.Errorf("argv = %v, want %v", stub.args, want)
 	}
 }
 
@@ -222,7 +256,7 @@ func TestSitePreviewPropagatesExitCode(t *testing.T) {
 func TestSitePreviewMissingNix(t *testing.T) {
 	stub := &previewStub{}
 	previous := sitePreviewRun
-	sitePreviewRun = func(root string, zolaArgs []string) int {
+	sitePreviewRun = func(name string, args []string) int {
 		stub.calls++
 		return 0
 	}

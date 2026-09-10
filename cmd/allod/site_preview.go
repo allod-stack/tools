@@ -3,11 +3,13 @@ package main
 // 'allod site preview' starts a live-reloading local server for the site
 // found by walking up from the current directory, rendered by that site
 // repository's own locked zola rather than whatever zola happens to be on
-// PATH: 'nix shell --inputs-from <root> nixpkgs#zola --command zola serve
-// --root <root>' plus whatever flags below were given. That is the same nix
-// expression 'allod site deploy' builds from, so a channel bump in the site
-// repository's flake moves what preview shows and what deploy publishes
-// together.
+// PATH: 'nix shell --inputs-from <root> nixpkgs#zola --command zola --root
+// <root> serve' plus whatever flags below were given. '--root' is zola's own
+// global option and must precede 'serve' — 'zola serve --root <root>' is
+// rejected ("unexpected argument '--root' found"); 'zola --root <root>
+// serve' is accepted. That is the same nix expression 'allod site deploy'
+// builds from, so a channel bump in the site repository's flake moves what
+// preview shows and what deploy publishes together.
 //
 // The generator is hardcoded to zola because every site this command knows
 // about builds with zola; the site derivation, not this command, owns that
@@ -28,17 +30,25 @@ import (
 	"strings"
 )
 
-// sitePreviewRun is the test seam: every effect this command has outside the
-// process goes through it, so tests can capture the argv it builds without a
-// nix daemon or a network. Production runs the real thing, with stdin,
-// stdout, and stderr passed straight through and zola's own exit code
-// propagated as-is.
-var sitePreviewRun = runSitePreviewZola
+// sitePreviewArgs builds the full argv for the 'nix' invocation that starts
+// zola. It stays in production code and is never replaced by a test, unlike
+// sitePreviewRun below: a test that swapped this out to build its own argv
+// would be checking its own reimplementation, not this command's, and could
+// not catch a mistake here — such as '--root' landing after 'serve', where
+// zola rejects it.
+func sitePreviewArgs(root string, zolaArgs []string) []string {
+	args := []string{"shell", "--inputs-from", root, "nixpkgs#zola", "--command", "zola", "--root", root, "serve"}
+	return append(args, zolaArgs...)
+}
 
-func runSitePreviewZola(root string, zolaArgs []string) int {
-	args := []string{"shell", "--inputs-from", root, "nixpkgs#zola", "--command", "zola", "serve", "--root", root}
-	args = append(args, zolaArgs...)
-	return runCommand("", stdin, stdout, stderr, "nix", args...)
+// sitePreviewRun is the test seam, placed at the exec boundary rather than
+// around argv construction: it runs one command, given its full argv, and
+// returns its exit code. Production wraps runCommand, with stdin, stdout,
+// and stderr passed straight through and the child's own exit code
+// propagated as-is; tests replace it to capture what sitePreviewArgs built,
+// without a nix daemon or a network.
+var sitePreviewRun = func(name string, args []string) int {
+	return runCommand("", stdin, stdout, stderr, name, args...)
 }
 
 func sitePreview(args []string) {
@@ -70,7 +80,7 @@ func sitePreview(args []string) {
 	if _, err := exec.LookPath("nix"); err != nil {
 		die(1, "'nix' not found on PATH")
 	}
-	exit(sitePreviewRun(root, zolaArgs))
+	exit(sitePreviewRun("nix", sitePreviewArgs(root, zolaArgs)))
 }
 
 const sitePreviewSummary = "Serve a site locally with the generator its deploy build pins"
@@ -82,7 +92,7 @@ var sitePreviewUsage = []string{
 const sitePreviewDetail = `'preview' walks up from the current directory to the site.toml that marks
 the site repository root, the way every site command does, then starts that
 repository's own locked zola: 'nix shell --inputs-from <root> nixpkgs#zola
---command zola serve --root <root>' plus the flags below. Standard input,
+--command zola --root <root> serve' plus the flags below. Standard input,
 output, and error connect straight through to zola, and preview exits with
 zola's own exit code.
 
@@ -124,14 +134,16 @@ rather than a constant.
 // whether this init() or site.go's runs first; file init() order is decided
 // by the compiler's file-name ordering, not by this program.
 //
-// The namespace summary names all four commands and states which need the
-// tag, which is true whether or not this particular binary carries it: a
-// static line, chosen for exactly this reason, needs no coordination with
-// site.go's init() to stay accurate in both shapes.
+// The namespace summary states a fact about the build variant, not about
+// this particular binary, which is what keeps it true in both shapes: it
+// would read wrong on a tagged build if it said the other three commands
+// "need" the tag, since on that build they are right there. A static line,
+// chosen for exactly this reason, needs no coordination with site.go's
+// init() to stay accurate either way.
 func init() {
 	registerNamespace(namespace{
 		name:    "site",
-		summary: "Preview a site locally; deploy, check, config need a site-tagged build",
+		summary: "Preview a static site; deploy, check, config are present in site-tagged builds",
 		main:    siteMain,
 	})
 	siteCommands = append([]siteCommand{{

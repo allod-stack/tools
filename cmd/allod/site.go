@@ -20,11 +20,11 @@ package main
 // itself — see that file and site_common.go. A machine that publishes no
 // site has no rclone remote and no business carrying a command that syncs to
 // one, so it does not carry these three: this file's init() only appends
-// them to the command table site_common.go already registered, and an
-// untagged build never compiles this file, so 'allod site deploy' there
-// falls through to "unknown site command" — which is true, and is what an
-// absent capability should look like. A command that is present and
-// permanently broken says something false about the machine.
+// them to the command table site_preview.go's init() already populated with
+// 'preview', and an untagged build never compiles this file, so 'allod site
+// deploy' there falls through to "unknown site command" — which is true, and
+// is what an absent capability should look like. A command that is present
+// and permanently broken says something false about the machine.
 
 import (
 	"bytes"
@@ -232,11 +232,11 @@ var (
 	siteVerify      = probeSite
 )
 
-// init extends the 'site' namespace site_common.go already registered,
-// adding the three commands this build's tag opts it into. It appends to
-// siteCommands rather than replacing it, and never calls registerNamespace:
-// that would panic on the duplicate word, and site_common.go's init() is the
-// only one allowed to call it.
+// init extends the 'site' namespace site_preview.go's init() already
+// registered, adding the three commands this build's tag opts it into. It
+// appends to siteCommands rather than replacing it, and never calls
+// registerNamespace: that would panic on the duplicate word, and
+// site_preview.go's init() is the only one allowed to call it.
 func init() {
 	siteCommands = append(siteCommands,
 		siteCommand{
