@@ -964,7 +964,8 @@ func TestSiteDeployDirectAdminDefaultIsUnchanged(t *testing.T) {
 		"--verbose",
 		"--transfers", "2",
 		"--checkers", "2",
-		"--ftp-concurrency", "5",
+		"--ftp-concurrency", "3",
+		"--check-first",
 	}
 	if fmt.Sprint(stub.syncArgs) != fmt.Sprint(want) {
 		t.Errorf("rclone args =\n%v\nwant\n%v", stub.syncArgs, want)
@@ -1300,7 +1301,8 @@ func TestSiteDeployPublicHTMLProfile(t *testing.T) {
 		"--verbose",
 		"--transfers", "2",
 		"--checkers", "2",
-		"--ftp-concurrency", "5",
+		"--ftp-concurrency", "3",
+		"--check-first",
 	}
 	if fmt.Sprint(stub.syncArgs) != fmt.Sprint(want) {
 		t.Errorf("rclone args =\n%v\nwant\n%v", stub.syncArgs, want)
@@ -1401,7 +1403,8 @@ func TestSiteDeployDryRun(t *testing.T) {
 		"--verbose",
 		"--transfers", "2",
 		"--checkers", "2",
-		"--ftp-concurrency", "5",
+		"--ftp-concurrency", "3",
+		"--check-first",
 		"--dry-run",
 	}
 	if fmt.Sprint(stub.syncArgs) != fmt.Sprint(want) {

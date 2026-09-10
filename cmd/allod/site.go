@@ -565,19 +565,32 @@ func probeSite(url string) (int, error) {
 }
 
 // siteDeployTransfers, siteDeployCheckers, and siteDeployFTPConcurrency bound
-// how many FTP connections a deploy's sync can hold open at once. rclone's
-// FTP backend documentation requires concurrency to be at least one more
-// than the sum of transfers and checkers for a sync to avoid deadlock: a
-// checker listing a directory and a transfer sending a file can each hold a
-// connection open waiting on the other, and concurrency has to leave room
-// for one more to make progress. The values are small and fixed rather than
-// tuned to any one host: shared hosting commonly allows only a handful of
-// simultaneous connections per client, and what matters is that the total
-// stays under that, not the exact number.
+// how many FTP connections one rclone filesystem instance can hold open at
+// once. rclone's FTP backend documentation says: "If you are doing a sync or
+// copy then make sure concurrency is one more than the sum of --transfers
+// and --checkers. If you use --check-first then it just needs to be one more
+// than the maximum of --checkers and --transfers. So for concurrency 3 you'd
+// use --checkers 2 --transfers 2 --check-first or --checkers 1 --transfers
+// 1." The sync passes --check-first, so concurrency only has to be
+// max(transfers, checkers) + 1 = 3 rather than transfers + checkers + 1 = 5;
+// --check-first also means the listing phase - the phase that tripped the
+// connection limit - runs to completion before any file starts moving.
+//
+// The cap is per rclone filesystem instance, not per deploy: '--backup-dir
+// shared:deploy-trash/<domain>' on the same remote is a second filesystem
+// instance with its own connection pool alongside the one syncing to the
+// docroot, so a deploy's worst case is two instances each opening up to
+// siteDeployFTPConcurrency connections - up to 2*siteDeployFTPConcurrency = 6
+// connections total, not siteDeployFTPConcurrency alone. The values are
+// small and fixed rather than tuned to any one host: shared hosting commonly
+// allows only a handful of simultaneous connections per client, and what
+// matters is that the total stays under that, not the exact number.
 const (
-	siteDeployTransfers      = 2
-	siteDeployCheckers       = 2
-	siteDeployFTPConcurrency = siteDeployTransfers + siteDeployCheckers + 1
+	siteDeployTransfers = 2
+	siteDeployCheckers  = 2
+	// siteDeployFTPConcurrency is max(siteDeployTransfers, siteDeployCheckers) + 1,
+	// per the --check-first rule quoted above.
+	siteDeployFTPConcurrency = max(siteDeployTransfers, siteDeployCheckers) + 1
 )
 
 func siteDeploy(args []string) {
@@ -656,6 +669,7 @@ func siteDeploy(args []string) {
 		"--transfers", strconv.Itoa(siteDeployTransfers),
 		"--checkers", strconv.Itoa(siteDeployCheckers),
 		"--ftp-concurrency", strconv.Itoa(siteDeployFTPConcurrency),
+		"--check-first",
 	)
 	if dryRun {
 		syncArgs = append(syncArgs, "--dry-run")
@@ -715,8 +729,10 @@ Each profile's exclusion filter belongs to this command rather than to the site
 repo. A non-empty filter is written to a temporary file per run and passed as
 --filter-from, so every site on the deployment gets the same list. Replaced and
 deleted files are moved to shared:deploy-trash/<domain> rather than destroyed.
-The sync is bounded to a fixed number of simultaneous FTP connections, so it
-finishes instead of tripping a shared host's per-client connection limit.
+The sync bounds each rclone filesystem instance to a fixed number of
+simultaneous FTP connections; because the docroot and the backup directory
+are two such instances, a deploy opens at most twice that many, staying
+under a shared host's per-client connection limit instead of tripping it.
 
 site.toml still has exactly one key and cannot select the hosting profile:
 
