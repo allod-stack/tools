@@ -15,12 +15,15 @@ package main
 // The same reasoning explains why there is no way to name the target: see
 // siteDeploy.
 //
-// The whole namespace is behind the 'site' build tag. A machine that publishes
-// no site has no rclone remote and no business carrying a command that syncs
-// to one, so it does not carry it: the init() below is the only thing that
-// puts 'site' in the dispatch table, and an untagged build never compiles this
-// file. There, 'allod site' is an unknown namespace — which is true, and is
-// what an absent capability should look like. A command that is present and
+// 'deploy', 'check', and 'config' are behind the 'site' build tag; 'preview'
+// is not, and lives in site_preview.go along with the namespace registration
+// itself — see that file and site_common.go. A machine that publishes no
+// site has no rclone remote and no business carrying a command that syncs to
+// one, so it does not carry these three: this file's init() only appends
+// them to the command table site_common.go already registered, and an
+// untagged build never compiles this file, so 'allod site deploy' there
+// falls through to "unknown site command" — which is true, and is what an
+// absent capability should look like. A command that is present and
 // permanently broken says something false about the machine.
 
 import (
@@ -35,14 +38,6 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
-)
-
-// siteConfigName marks a site repository root, the way .git marks a git
-// repository root. siteDomainKey is the only key this version reads.
-const (
-	siteConfigName        = "site.toml"
-	siteDomainKey         = "domain"
-	siteDomainPlaceholder = "<domain>"
 )
 
 // siteRemoteName is the rclone remote every deploy targets. It is configured
@@ -237,206 +232,40 @@ var (
 	siteVerify      = probeSite
 )
 
-// init is what makes the namespace exist, and it runs only in a build that
-// asked for this file with -tags site.
+// init extends the 'site' namespace site_common.go already registered,
+// adding the three commands this build's tag opts it into. It appends to
+// siteCommands rather than replacing it, and never calls registerNamespace:
+// that would panic on the duplicate word, and site_common.go's init() is the
+// only one allowed to call it.
 func init() {
-	registerNamespace(namespace{
-		name:    "site",
-		summary: "Deploy a static site to shared hosting (deploy, check, config)",
-		main:    siteMain,
-	})
-}
-
-func siteMain(args []string) {
-	if len(args) == 0 {
-		fmt.Fprint(stderr, siteUsageText)
-		exit(1)
-	}
-	command, args := args[0], args[1:]
-	switch command {
-	case "deploy":
-		siteDeploy(args)
-	case "check":
-		siteCheck(args)
-	case "config":
-		siteConfigure(args)
-	case "-h", "--help":
-		fmt.Fprint(stdout, siteUsageText)
-	default:
-		die(1, "unknown site command: %s", command)
-	}
-}
-
-// findSiteRoot walks up from start looking for site.toml, the way git walks up
-// looking for .git. It returns the directory holding the file.
-func findSiteRoot(start string) (string, bool) {
-	dir, err := filepath.Abs(start)
-	if err != nil {
-		return "", false
-	}
-	for {
-		if info, err := os.Stat(filepath.Join(dir, siteConfigName)); err == nil && info.Mode().IsRegular() {
-			return dir, true
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return "", false
-		}
-		dir = parent
-	}
-}
-
-func resolveSiteRoot() string {
-	wd, err := os.Getwd()
-	if err != nil {
-		die(1, "could not determine the current directory")
-	}
-	root, ok := findSiteRoot(wd)
-	if !ok {
-		fmt.Fprintf(stderr, "allod: no %s in %s or any parent directory\n", siteConfigName, wd)
-		fmt.Fprintln(stderr, "allod: while resolving: the site repository root")
-		fmt.Fprintf(stderr, "allod: to fix: run this from inside a site repository, or create %s at its root containing: %s = \"example.com\"\n", siteConfigName, siteDomainKey)
-		exit(1)
-	}
-	return root
-}
-
-type siteConfig struct {
-	domain string
-}
-
-// parseSiteConfig reads the subset of TOML that site.toml needs: blank lines,
-// '#' comments, [table] headers, and single-line 'key = value' pairs whose
-// value is a quoted string.
-//
-// It is deliberately lenient about everything it does not understand. A line
-// it cannot interpret, and any key other than the top-level 'domain', is
-// skipped rather than rejected, so a site.toml that grows keys for a later
-// version of this command still deploys with an older binary. The three hard
-// errors all concern the one key that is actually read: it is absent, it is
-// not a quoted string, or it is set twice.
-func parseSiteConfig(text string) (siteConfig, error) {
-	config, table, domainSet := siteConfig{}, "", false
-	for index, raw := range strings.Split(text, "\n") {
-		line := strings.TrimSpace(raw)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if strings.HasPrefix(line, "[") {
-			if end := strings.LastIndex(line, "]"); end > 0 {
-				table = strings.TrimSpace(line[1:end])
-			}
-			continue
-		}
-		equals := strings.IndexByte(line, '=')
-		if equals < 0 {
-			continue
-		}
-		// A 'domain' under a [table] is a different key entirely, and this
-		// version has no table it reads, so it is skipped like any other.
-		if table != "" || strings.TrimSpace(line[:equals]) != siteDomainKey {
-			continue
-		}
-		value, ok := parseTOMLString(strings.TrimSpace(line[equals+1:]))
-		if !ok {
-			return siteConfig{}, fmt.Errorf("line %d: %s must be a quoted string, as in: %s = \"example.com\"", index+1, siteDomainKey, siteDomainKey)
-		}
-		if domainSet {
-			return siteConfig{}, fmt.Errorf("line %d: %s is set more than once", index+1, siteDomainKey)
-		}
-		config.domain, domainSet = value, true
-	}
-	if !domainSet {
-		return siteConfig{}, fmt.Errorf("no %s key", siteDomainKey)
-	}
-	return config, nil
-}
-
-// parseTOMLString reads one TOML string value: a basic string in double quotes
-// with the common backslash escapes, or a literal string in single quotes with
-// none. Whatever follows the closing quote must be blank or a comment.
-// Multi-line strings are not accepted; site.toml has no use for one.
-func parseTOMLString(value string) (string, bool) {
-	if len(value) < 2 || (value[0] != '"' && value[0] != '\'') {
-		return "", false
-	}
-	quote := value[0]
-	var out strings.Builder
-	for index := 1; index < len(value); index++ {
-		character := value[index]
-		if quote == '"' && character == '\\' {
-			index++
-			if index >= len(value) {
-				return "", false
-			}
-			switch value[index] {
-			case 'n':
-				out.WriteByte('\n')
-			case 't':
-				out.WriteByte('\t')
-			case 'r':
-				out.WriteByte('\r')
-			case '"':
-				out.WriteByte('"')
-			case '\\':
-				out.WriteByte('\\')
-			default:
-				return "", false
-			}
-			continue
-		}
-		if character == quote {
-			rest := strings.TrimSpace(value[index+1:])
-			if rest != "" && !strings.HasPrefix(rest, "#") {
-				return "", false
-			}
-			return out.String(), true
-		}
-		out.WriteByte(character)
-	}
-	return "", false
-}
-
-// validDomain accepts a plain hostname and nothing else. This is a safety
-// check, not a politeness one: the domain is interpolated into the rclone
-// destination, so a '/' or a '..' in it would aim the sync at another site's
-// docroot, and every docroot on the host belongs to the same account.
-func validDomain(domain string) bool {
-	if domain == "" || len(domain) > 253 || !strings.Contains(domain, ".") {
-		return false
-	}
-	for _, label := range strings.Split(domain, ".") {
-		if label == "" || len(label) > 63 {
-			return false
-		}
-		if strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
-			return false
-		}
-		for _, r := range label {
-			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
-				(r >= '0' && r <= '9') || r == '-' {
-				continue
-			}
-			return false
-		}
-	}
-	return true
-}
-
-func loadSiteConfig(root string) siteConfig {
-	path := filepath.Join(root, siteConfigName)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		die(1, "could not read %s", path)
-	}
-	config, err := parseSiteConfig(string(data))
-	if err != nil {
-		die(1, "invalid %s: %s", path, err)
-	}
-	if !validDomain(config.domain) {
-		die(1, "invalid %s '%s' in %s; expected a hostname such as \"example.com\"", siteDomainKey, config.domain, path)
-	}
-	return config
+	siteCommands = append(siteCommands,
+		siteCommand{
+			name:    "deploy",
+			summary: "Build the site repo and sync the result to its shared-hosting docroot",
+			usage:   []string{"allod site deploy [--config <path>] [--dry-run]"},
+			detail:  siteDeployDetail,
+			run:     siteDeploy,
+		},
+		siteCommand{
+			name:    "check",
+			summary: "Verify the stored hosting credential without deploying",
+			usage:   []string{"allod site check [--config <path>]"},
+			detail:  siteCheckDetail,
+			run:     siteCheck,
+		},
+		siteCommand{
+			name:    "config",
+			summary: "Create, inspect, update, or replace the 'shared' rclone remote",
+			usage: []string{
+				"allod site config [--config <path>] [--force]",
+				"allod site config show [--config <path>]",
+				"allod site config update {host|user|password} [--config <path>]",
+				"allod site config replace [--config <path>]",
+			},
+			detail: siteConfigDetail,
+			run:    siteConfigure,
+		},
+	)
 }
 
 func deployFilterText(rules []string) string {
@@ -672,7 +501,7 @@ func siteCheck(args []string) {
 		}
 		switch args[0] {
 		case "-h", "--help":
-			fmt.Fprint(stdout, siteUsageText)
+			fmt.Fprint(stdout, siteUsageText())
 			return
 		default:
 			if strings.HasPrefix(args[0], "-") {
@@ -735,7 +564,7 @@ func siteDeploy(args []string) {
 		case "--dry-run":
 			dryRun, args = true, args[1:]
 		case "-h", "--help":
-			fmt.Fprint(stdout, siteUsageText)
+			fmt.Fprint(stdout, siteUsageText())
 			return
 		default:
 			// There is deliberately no option or argument that names a
@@ -824,20 +653,12 @@ func siteDeploy(args []string) {
 	fmt.Fprintf(stdout, "Verified: %s returned %d\n", url, code)
 }
 
-const siteUsageText = `Usage:
-  allod site deploy [--config <path>] [--dry-run]
-  allod site check [--config <path>]
-  allod site config [--config <path>] [--force]
-  allod site config show [--config <path>]
-  allod site config update {host|user|password} [--config <path>]
-  allod site config replace [--config <path>]
-
-Commands:
-  deploy   Build the site repo and sync the result to its shared-hosting docroot
-  check    Verify the stored hosting credential without deploying
-  config   Create, inspect, update, or replace the 'shared' rclone remote
-
-'deploy' walks up from the current directory to the site.toml that marks the
+// siteDeployDetail, siteCheckDetail, and siteConfigDetail are the three
+// prose blocks this file contributes to 'allod site' usage, in the same
+// words the single siteUsageText constant carried before the command table
+// split them out. siteUsageText() in site_common.go joins them with the
+// other commands' blocks in siteCommands order.
+const siteDeployDetail = `'deploy' walks up from the current directory to the site.toml that marks the
 site repository root, builds that repo with 'nix build --no-link
 --print-out-paths', and syncs the resulting store path through the 'shared'
 rclone remote. Deploy never handles a credential, and checks that the remote
@@ -885,12 +706,14 @@ the changes it would make, but the docroot is untouched and the HTTPS check is
 skipped. Without it, deploy checks that https://<domain>/ answers 200 and exits
 7 if it does not, which distinguishes a site that did not deploy from one that
 deployed and is not serving.
+`
 
-'check' opens the 'shared' remote without reading a site repo, building, syncing,
+const siteCheckDetail = `'check' opens the 'shared' remote without reading a site repo, building, syncing,
 or publishing. A rejected FTP login can identify only the username or password
 as the cause, so its failure points to both single-field update commands.
+`
 
-'config' with no action creates the remote and refuses to replace one that is
+const siteConfigDetail = `'config' with no action creates the remote and refuses to replace one that is
 already present. 'config show' safely prints its config path, type, host, and
 user, but never its plaintext-equivalent obscured password. 'config update'
 asks only for the selected field and changes only that value. 'config replace'

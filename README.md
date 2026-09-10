@@ -10,7 +10,7 @@ host install them through their Nix composition, with no manual installation aft
 ## Layout
 
 ```
-cmd/allod/                Go main CLI (change, patch, pr; site opt-in)
+cmd/allod/                Go main CLI (change, patch, pr, site preview; deploy/check/config opt-in)
 cmd/flake-update-cascade/ flake input update cascade Go command
 cmd/forge/                Forgejo CLI Go command
 internal/flakelock/       flake.lock graph walking for the cascade
@@ -43,10 +43,17 @@ lib/                      shared shell libraries
 
 ### Optional namespaces
 
-`allod site` is behind the `site` build tag. A machine that publishes no site
-has no rclone remote to publish through, so it does not carry the command at
-all: `allod site` there is an unknown namespace, exactly like any other word
-the CLI does not know. A machine that does deploy opts in when it builds:
+`allod site preview` is compiled into every build: it starts a local
+`zola serve` from a site repository's own locked generator, and it is meant
+to run on exactly the machines where a site is edited. Those machines carry
+no hosting credential and no rclone configuration, and preview reads neither.
+
+`allod site deploy`, `check`, and `config` are behind the `site` build tag. A
+machine that publishes no site has no rclone remote to publish through, so it
+does not carry these three at all: `allod site deploy` there fails as
+"unknown site command", exactly the way a typo would, and `allod site` on
+its own lists `preview` only. A machine that does deploy opts in when it
+builds:
 
 ```nix
 buildGoModule {

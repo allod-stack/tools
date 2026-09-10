@@ -16,6 +16,8 @@ package main
 import (
 	"bytes"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -37,6 +39,41 @@ func runAllod(t *testing.T, args ...string) (stdoutText, stderrText string, code
 	code = run(args)
 	restore()
 	return outBuffer.String(), errBuffer.String(), code
+}
+
+// stubTools puts unusable executables of the given names on an otherwise empty
+// PATH, so the LookPath preflights pass and anything that actually ran one of
+// them would fail loudly. It returns the directory PATH was set to.
+func stubTools(t *testing.T, names ...string) string {
+	t.Helper()
+	binDir := t.TempDir()
+	for _, name := range names {
+		path := filepath.Join(binDir, name)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 1\n"), 0755); err != nil {
+			t.Fatalf("could not write stub %s: %v", name, err)
+		}
+	}
+	t.Setenv("PATH", binDir)
+	return binDir
+}
+
+// useSiteRepo creates a site repository with the given site.toml and makes it
+// the current directory. It lives here, not in site_test.go, because
+// site_preview_test.go needs it in an untagged build too.
+func useSiteRepo(t *testing.T, config string) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, siteConfigName), []byte(config), 0644); err != nil {
+		t.Fatalf("could not write %s: %v", siteConfigName, err)
+	}
+	t.Chdir(root)
+	// t.TempDir can hand back a path through a symlink (/tmp -> /private/tmp
+	// and the like); the command reports the resolved one.
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("could not resolve %s: %v", root, err)
+	}
+	return resolved
 }
 
 // --- Dispatch ---

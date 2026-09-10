@@ -107,39 +107,11 @@ func cloneSiteHostingProfiles(profiles []siteHostingProfile) []siteHostingProfil
 	return clone
 }
 
-// stubTools puts unusable executables of the given names on an otherwise empty
-// PATH, so the LookPath preflights pass and anything that actually ran one of
-// them would fail loudly. It returns the directory PATH was set to.
-func stubTools(t *testing.T, names ...string) string {
-	t.Helper()
-	binDir := t.TempDir()
-	for _, name := range names {
-		path := filepath.Join(binDir, name)
-		if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 1\n"), 0755); err != nil {
-			t.Fatalf("could not write stub %s: %v", name, err)
-		}
-	}
-	t.Setenv("PATH", binDir)
-	return binDir
-}
+// stubTools lives in main_test.go: it is not specific to the tagged
+// commands, and site_preview_test.go needs it in an untagged build too.
 
-// useSiteRepo creates a site repository with the given site.toml and makes it
-// the current directory.
-func useSiteRepo(t *testing.T, config string) string {
-	t.Helper()
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, siteConfigName), []byte(config), 0644); err != nil {
-		t.Fatalf("could not write %s: %v", siteConfigName, err)
-	}
-	t.Chdir(root)
-	// t.TempDir can hand back a path through a symlink (/tmp -> /private/tmp
-	// and the like); the command reports the resolved one.
-	resolved, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		t.Fatalf("could not resolve %s: %v", root, err)
-	}
-	return resolved
-}
+// useSiteRepo lives in main_test.go: it is not specific to the tagged
+// commands, and site_preview_test.go needs it in an untagged build too.
 
 // argAfter returns the value following flag in args.
 func argAfter(t *testing.T, args []string, flag string) string {
@@ -167,6 +139,28 @@ func hasArg(args []string, want string) bool {
 
 // --- Dispatch and usage ---
 
+// TestSiteTaggedBuildCarriesAllFourCommands pins the shape a site-tagged
+// build carries: 'preview' from the untagged files plus the three this
+// file's init() adds, and nothing else.
+func TestSiteTaggedBuildCarriesAllFourCommands(t *testing.T) {
+	want := []string{"preview", "deploy", "check", "config"}
+	if got := len(siteCommands); got != len(want) {
+		t.Fatalf("siteCommands has %d entries in a tagged build, want %d: %+v", got, len(want), siteCommands)
+	}
+	for _, name := range want {
+		found := false
+		for _, entry := range siteCommands {
+			if entry.name == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("siteCommands has no %q entry: %+v", name, siteCommands)
+		}
+	}
+}
+
 func TestSiteUsage(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -176,7 +170,7 @@ func TestSiteUsage(t *testing.T) {
 		errHas     string
 		errIsEmpty bool
 	}{
-		{"namespace listed in top-level usage", []string{}, 1, "site     Deploy a static site", "", true},
+		{"namespace listed in top-level usage", []string{}, 1, "site     Preview a site locally", "", true},
 		{"no command prints usage to stderr", []string{"site"}, 1, "", "allod site deploy [--config <path>] [--dry-run]", false},
 		{"--help prints usage to stdout", []string{"site", "--help"}, 0, "allod site deploy [--config <path>] [--dry-run]", "", true},
 		{"-h prints usage to stdout", []string{"site", "-h"}, 0, "allod site config [--config <path>] [--force]", "", true},
@@ -185,6 +179,7 @@ func TestSiteUsage(t *testing.T) {
 		{"config --help prints usage to stdout", []string{"site", "config", "--help"}, 0, "allod site config [--config <path>] [--force]", "", true},
 		{"config help discovers updates", []string{"site", "config", "update", "--help"}, 0, "allod site config update {host|user|password}", "", true},
 		{"help states update needs a stanza", []string{"site", "--help"}, 0, "Update requires an existing 'shared' stanza", "", true},
+		{"help also lists preview", []string{"site", "--help"}, 0, "allod site preview ", "", true},
 		{"unknown command", []string{"site", "publish"}, 1, "", "unknown site command: publish", false},
 	}
 
