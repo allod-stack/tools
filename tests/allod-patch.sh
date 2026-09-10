@@ -537,6 +537,43 @@ assert_status 0 "fetch empty commits exits 0 (format-patch produces a patch file
 artifact_path=$(printf '%s' "$CAPTURE_OUTPUT" | grep 'artifact dir:' | sed 's/.*artifact dir: //')
 rm -rf "$artifact_path"
 
+# --- Whitespace error in export range ---
+# The gate runs on the source before anything is exported: one SSH call, no
+# remote temp dir, no local artifact.
+source_repo="$TMP/repos/fetch-whitespace"
+init_repo "$source_repo" master
+printf 'trailing whitespace   \n' > "$source_repo/tracked.txt"
+git -C "$source_repo" add tracked.txt
+git -C "$source_repo" commit -qm "whitespace commit"
+
+tmp_before=$(find /tmp -maxdepth 1 -type d -name "allod-patch.*" 2>/dev/null | wc -l)
+reset_mock_ssh
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:$source_repo"
+assert_status 17 "fetch whitespace error exits 17"
+assert_contains "$CAPTURE_OUTPUT" "git diff --check" "fetch whitespace error names the check"
+assert_contains "$CAPTURE_OUTPUT" "tracked.txt:1: trailing whitespace" "fetch whitespace error names the offending line"
+assert_not_contains "$CAPTURE_OUTPUT" "artifact dir:" "fetch whitespace error exports nothing"
+assert_equal "$(get_ssh_call_count)" "1" "fetch whitespace error stops after the generate call"
+tmp_after=$(find /tmp -maxdepth 1 -type d -name "allod-patch.*" 2>/dev/null | wc -l)
+assert_equal "$tmp_after" "$tmp_before" "fetch whitespace error leaves no temp dir"
+
+# Blank line at end of file is the same gate; root exports check from the empty tree.
+source_repo="$TMP/repos/fetch-whitespace-root"
+root_remote="$TMP/remotes/fetch-whitespace-root.git"
+git init -q --bare -b main "$root_remote"
+git init -q -b main "$source_repo"
+git -C "$source_repo" config user.name "Test User"
+git -C "$source_repo" config user.email "test@example.invalid"
+printf 'notes\n\n' > "$source_repo/notes.md"
+git -C "$source_repo" add notes.md
+git -C "$source_repo" commit -qm "blank line at eof"
+git -C "$source_repo" remote add origin "$root_remote"
+
+reset_mock_ssh
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:$source_repo"
+assert_status 17 "fetch root export whitespace error exits 17"
+assert_contains "$CAPTURE_OUTPUT" "notes.md:2: new blank line at EOF" "fetch root export whitespace error names the offending line"
+
 # --- SSH connection failure ---
 reset_mock_ssh
 export MOCK_SSH_FAIL="connect"
@@ -1250,10 +1287,11 @@ final_content=$(cat "$dest_repo_multi/tracked.txt")
 assert_equal "$final_content" "three" "apply multiple patches produces correct final content"
 rm -rf "$artifact"
 
-# --- Post-apply whitespace failure ---
+# --- Post-apply whitespace report ---
+# fetch refuses a range that fails git diff --check, so an artifact carrying
+# one is built by hand here. apply reports it, keeps the commits, and pushes.
 source_repo="$TMP/repos/apply-whitespace-source"
 init_repo "$source_repo" master
-# Create a commit with trailing whitespace
 printf 'trailing whitespace   \n' > "$source_repo/tracked.txt"
 git -C "$source_repo" add tracked.txt
 git -C "$source_repo" commit -qm "whitespace commit"
@@ -1262,17 +1300,30 @@ dest_repo_ws="$TMP/repos/apply-whitespace-dest"
 clone_repo "$source_repo" "$dest_repo_ws"
 
 artifact="$TMP/artifacts/apply-whitespace"
-make_artifact "$source_repo" "$artifact"
+mkdir -p "$artifact"
+git -C "$source_repo" format-patch -q HEAD~1..HEAD -o "$artifact"
+ws_patch=$(basename "$artifact"/*.patch)
+ws_sha=$(sha256sum -b -- "$artifact/$ws_patch" | awk '{print $1}')
+jq -n \
+  --arg remote "$(git -C "$source_repo" remote get-url origin)" \
+  --arg base "$(git -C "$source_repo" rev-parse HEAD~1)" \
+  --arg head "$(git -C "$source_repo" rev-parse HEAD)" \
+  --arg fn "$ws_patch" --arg sha "$ws_sha" \
+  '{repo_remote: $remote, base_commit: $base, head_commit: $head, root_export: false, patch_count: 1, patches: [{filename: $fn, sha256: $sha}]}' \
+  > "$artifact/manifest.json"
 
 pre_head=$(git -C "$dest_repo_ws" rev-parse HEAD)
-capture "$ALLOD" patch apply "$artifact" --repo "$dest_repo_ws"
-assert_status 1 "apply whitespace failure exits 1"
-assert_contains "$CAPTURE_OUTPUT" "whitespace" "apply whitespace message"
-assert_contains "$CAPTURE_OUTPUT" "pre-apply HEAD" "apply whitespace shows pre-apply HEAD"
-# Commits should still be applied
+capture "$ALLOD" patch apply "$artifact" --repo "$dest_repo_ws" --push
+assert_status 0 "apply whitespace report exits 0"
+assert_contains "$CAPTURE_OUTPUT" "applied 1 patch" "apply whitespace report still reports the apply"
+assert_contains "$CAPTURE_OUTPUT" "git diff --check" "apply whitespace report names the check"
+assert_contains "$CAPTURE_OUTPUT" "tracked.txt:1: trailing whitespace" "apply whitespace report names the offending line"
+assert_not_contains "$CAPTURE_OUTPUT" "reset --hard" "apply whitespace report offers no undo"
 post_head=$(git -C "$dest_repo_ws" rev-parse HEAD)
-[[ "$post_head" != "$pre_head" ]] && pass "apply whitespace failure keeps applied commits" || \
-  fail "apply whitespace failure keeps applied commits"
+[[ "$post_head" != "$pre_head" ]] && pass "apply whitespace report keeps applied commits" || \
+  fail "apply whitespace report keeps applied commits"
+pushed_head=$(git -C "$dest_repo_ws" rev-parse origin/master)
+assert_equal "$pushed_head" "$post_head" "apply whitespace report still pushes"
 rm -rf "$artifact"
 
 # --- --push failure ---
@@ -1435,6 +1486,26 @@ assert_status 11 "receive propagates fetch failure exit code (11 for no commits)
 # Verify receive-owned parent is cleaned up when no artifact was promoted
 recv_parents=$(find /tmp -maxdepth 1 -type d -name "allod-patch-receive.*" 2>/dev/null | wc -l)
 assert_equal "$recv_parents" "0" "receive cleans up parent dir on fetch failure"
+
+# --- Whitespace error is refused before apply ---
+source_repo="$TMP/repos/receive-whitespace-source"
+init_repo "$source_repo" master
+printf 'trailing whitespace   \n' > "$source_repo/tracked.txt"
+git -C "$source_repo" add tracked.txt
+git -C "$source_repo" commit -qm "whitespace commit"
+
+dest_repo_ws="$TMP/repos/receive-whitespace-dest"
+clone_repo "$source_repo" "$dest_repo_ws"
+initial_head=$(git -C "$dest_repo_ws" rev-parse HEAD)
+
+reset_mock_ssh
+capture_with_path "$MOCK_PATH" "$ALLOD" patch receive "testhost:$source_repo" "$dest_repo_ws"
+assert_status 17 "receive propagates the whitespace refusal (17)"
+assert_contains "$CAPTURE_OUTPUT" "tracked.txt:1: trailing whitespace" "receive whitespace refusal names the offending line"
+dest_head=$(git -C "$dest_repo_ws" rev-parse HEAD)
+assert_equal "$dest_head" "$initial_head" "receive whitespace refusal leaves the destination untouched"
+recv_parents=$(find /tmp -maxdepth 1 -type d -name "allod-patch-receive.*" 2>/dev/null | wc -l)
+assert_equal "$recv_parents" "0" "receive whitespace refusal cleans up parent dir"
 
 # --- Fetch cleanup failure after promotion ---
 source_repo="$TMP/repos/receive-cleanup-fail"

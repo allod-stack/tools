@@ -120,6 +120,20 @@ if [ -n "$merges" ]; then
   printf 'allod: non-linear history is unsupported; merge commits found in export range\n' >&2; exit 11
 fi
 head_commit=$(git -C "$repo" rev-parse HEAD)
+# git diff --check flags trailing spaces, a space before a tab in indentation,
+# and blank lines at end of file, as the source repo's whitespace rules define
+# them. Refusing here keeps the defect on the sending side, where the agent can
+# amend, instead of applying it and then failing the receive.
+if [ "$root_export" = true ]; then
+  check_from=$(git -C "$repo" hash-object -t tree /dev/null)
+else
+  check_from="$base_commit"
+fi
+if ! whitespace=$(git -C "$repo" diff --check "$check_from" HEAD); then
+  printf 'allod: whitespace check failed on the export range (git diff --check); fix and amend before export\n' >&2
+  printf '%s\n' "$whitespace" >&2
+  exit 17
+fi
 repo_remote=$(git -C "$repo" remote get-url origin 2>/dev/null || printf '')
 tmpdir=$(mktemp -d /tmp/allod-patch.XXXXXXXXXX)
 _trap_cleanup() { rm -rf -- "$tmpdir"; }
@@ -306,7 +320,7 @@ func patchFetch(args []string) {
 	generateInput := encoded(sourceRepo) + "\n" + encoded(base) + "\n" + encoded(baseMode) + "\n"
 	remoteDir, status := sshCapture(host, remoteGenerateScript, generateInput)
 	if status != 0 {
-		if status == 10 || status == 11 {
+		if status == 10 || status == 11 || status == 17 {
 			exit(status)
 		}
 		exit(1)
@@ -695,27 +709,18 @@ func patchApply(args []string) {
 		}
 		exit(15)
 	}
+	// fetch refuses to export a range that fails git diff --check, so this
+	// fires only for an artifact that did not come through that gate. It is a
+	// report, not a failure: the commits stay applied and the human decides.
 	appliedRange := ""
+	var whitespace bytes.Buffer
 	var diffStatus int
 	if preHead == "<unborn>" {
 		emptyTree, _ := gitOutput(repo, "hash-object", "-t", "tree", "/dev/null")
-		diffStatus = runCommand(repo, nil, io.Discard, io.Discard, "git", "diff", "--check", emptyTree, "HEAD")
+		diffStatus = runCommand(repo, nil, &whitespace, stderr, "git", "diff", "--check", emptyTree, "HEAD")
 	} else {
 		appliedRange = preHead + "..HEAD"
-		diffStatus = runCommand(repo, nil, io.Discard, io.Discard, "git", "diff", "--check", appliedRange)
-	}
-	if diffStatus != 0 {
-		fmt.Fprintln(stderr, "allod: post-apply whitespace check failed")
-		fmt.Fprintf(stderr, "allod: repo: %s\n", repo)
-		fmt.Fprintf(stderr, "allod: pre-apply HEAD: %s\n", preHead)
-		current, _ := gitOutput(repo, "rev-parse", "HEAD")
-		fmt.Fprintf(stderr, "allod: current HEAD: %s\n", current)
-		if preHead == "<unborn>" {
-			fmt.Fprintln(stderr, "allod: to fix: edit and amend; to undo: reclone or manually remove the newly created history")
-		} else {
-			fmt.Fprintf(stderr, "allod: to fix: edit and amend, or to undo: git reset --hard %s\n", preHead)
-		}
-		exit(1)
+		diffStatus = runCommand(repo, nil, &whitespace, stderr, "git", "diff", "--check", appliedRange)
 	}
 	fmt.Fprintf(stdout, "allod: applied %d patch(es)\n", manifest.PatchCount)
 	if preHead == "<unborn>" {
@@ -727,6 +732,10 @@ func patchApply(args []string) {
 	}
 	if status := gitInherit(repo, "show", "--stat", "--oneline", "HEAD"); status != 0 {
 		exit(status)
+	}
+	if diffStatus != 0 {
+		fmt.Fprintln(stderr, "allod: WARNING: whitespace check (git diff --check) flagged the applied commits; they stay applied:")
+		fmt.Fprint(stderr, whitespace.String())
 	}
 	if push {
 		if status := gitInherit(repo, "push"); status != 0 {
