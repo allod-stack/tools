@@ -121,7 +121,7 @@ func TestUntaggedSiteBareInvocationHasNoDetailProse(t *testing.T) {
 	if strings.Contains(errText, detailOnly) {
 		t.Errorf("bare invocation printed preview's detail prose %q\ngot: %q", detailOnly, errText)
 	}
-	if want := "\nRun 'allod site --help' for details on each command.\n"; !strings.HasSuffix(errText, want) {
+	if want := "\nRun 'allod site --help' for details.\n"; !strings.HasSuffix(errText, want) {
 		t.Errorf("bare invocation stderr does not end with %q\ngot: %q", want, errText)
 	}
 
@@ -131,6 +131,31 @@ func TestUntaggedSiteBareInvocationHasNoDetailProse(t *testing.T) {
 	}
 	if !strings.Contains(out, detailOnly) {
 		t.Errorf("'site --help' is missing preview's detail prose %q\ngot: %q", detailOnly, out)
+	}
+}
+
+// TestUntaggedSitePreviewArgumentErrorPrintsOwnUsageOnly pins the
+// per-command argument-error contract in the build that carries only
+// 'preview': an unknown option prints the one-line message, preview's own
+// Usage: line, and the pointer to preview's own '--help', but none of
+// preview's detail prose — that stays behind '--help', the same way it does
+// for the namespace itself.
+func TestUntaggedSitePreviewArgumentErrorPrintsOwnUsageOnly(t *testing.T) {
+	_, errText, code := runAllod(t, "site", "preview", "--bogus")
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	for _, want := range []string{
+		"allod: unknown option for site preview: --bogus\n",
+		"Usage:\n  allod site preview ",
+		"\nRun 'allod site preview --help' for details.\n",
+	} {
+		if !strings.Contains(errText, want) {
+			t.Errorf("argument error does not contain %q\ngot: %q", want, errText)
+		}
+	}
+	if detailOnly := "mirror zola's own flags of the same names"; strings.Contains(errText, detailOnly) {
+		t.Errorf("argument error printed preview's detail prose %q\ngot: %q", detailOnly, errText)
 	}
 }
 

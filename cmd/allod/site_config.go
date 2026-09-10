@@ -184,7 +184,7 @@ func siteConfigure(args []string) {
 			return
 		default:
 			if strings.HasPrefix(args[0], "-") {
-				die(1, "unknown option for site config: %s", args[0])
+				siteCommandUsageError("config", "unknown option for site config: %s", args[0])
 			}
 			positionals = append(positionals, args[0])
 			args = args[1:]
@@ -197,12 +197,12 @@ func siteConfigure(args []string) {
 		case "show":
 			operation = remoteConfigShow
 			if len(positionals) != 1 {
-				die(1, "unexpected argument for site config show: %s", positionals[1])
+				siteCommandUsageError("config", "unexpected argument for site config show: %s", positionals[1])
 			}
 		case "replace":
 			operation = remoteConfigReplace
 			if len(positionals) != 1 {
-				die(1, "unexpected argument for site config replace: %s", positionals[1])
+				siteCommandUsageError("config", "unexpected argument for site config replace: %s", positionals[1])
 			}
 		case "update":
 			operation = remoteConfigUpdate
@@ -217,7 +217,7 @@ func siteConfigure(args []string) {
 				die(1, "unknown field for site config update: %s; expected host, user, or password", field)
 			}
 		default:
-			die(1, "unexpected argument for site config: %s", positionals[0])
+			siteCommandUsageError("config", "unexpected argument for site config: %s", positionals[0])
 		}
 	}
 	if force {

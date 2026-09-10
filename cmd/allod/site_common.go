@@ -240,8 +240,9 @@ var siteCommands []siteCommand
 // operator who mistypes a command gets the options on one screen instead of
 // the whole manual. Only '-h'/'--help' on the namespace itself prints the
 // long form; a parse error inside one command (an unknown option, an
-// unexpected argument, a missing value) stays the one-line message it always
-// was, from that command's own argument loop.
+// unexpected argument, a missing value) goes through siteCommandUsageError,
+// which is the same idea scoped to one command's own usage line rather than
+// every command's.
 func siteMain(args []string) {
 	if len(args) == 0 {
 		fmt.Fprint(stderr, siteShortUsage())
@@ -287,14 +288,15 @@ func siteUsageHeader() string {
 // and a pointer to where that prose lives. It fits on one screen regardless
 // of how many commands a build carries.
 func siteShortUsage() string {
-	return siteUsageHeader() + "\nRun 'allod site --help' for details on each command.\n"
+	return siteUsageHeader() + "\nRun 'allod site --help' for details.\n"
 }
 
 // siteUsageText renders the long form of 'allod site' usage: the same
 // Usage: and Commands: blocks as siteShortUsage, followed by every
-// registered command's own detail prose. Only 'allod site --help' and
-// 'allod site -h' print this; a single command's own '-h'/'--help' prints
-// siteCommandHelp for that command alone, not this.
+// registered command's own detail prose, followed by every shared detail
+// block once each. Only 'allod site --help' and 'allod site -h' print this;
+// a single command's own '-h'/'--help' prints siteCommandHelp for that
+// command alone, not this.
 func siteUsageText() string {
 	var text strings.Builder
 	text.WriteString(siteUsageHeader())
@@ -302,31 +304,120 @@ func siteUsageText() string {
 		text.WriteString("\n")
 		text.WriteString(entry.detail)
 	}
+	for _, shared := range siteSharedDetails {
+		text.WriteString("\n")
+		text.WriteString(shared.intro)
+		text.WriteString("\n\n")
+		text.WriteString(shared.text)
+	}
 	return text.String()
 }
 
+// siteCommandEntry looks up one command by name and reports whether it is
+// registered. siteCommandHelp and siteCommandUsageError both call it rather
+// than looping over siteCommands themselves, so a lookup mistake needs
+// fixing in one place, not two.
+func siteCommandEntry(name string) (siteCommand, bool) {
+	for _, entry := range siteCommands {
+		if entry.name == name {
+			return entry, true
+		}
+	}
+	return siteCommand{}, false
+}
+
+// siteSharedDetail is one block of detail prose that belongs to more than
+// one site command — '--config <path>' today, shared by deploy, check, and
+// config — kept out of any single command's own detail constant so a
+// command that does not take the flag never carries a paragraph explaining
+// it, and a command that does never has to guess whether another command's
+// words apply to it too.
+//
+// This type and siteSharedDetails carry no tagged-only knowledge: they are
+// declared here so the long-form and per-command generators can read them
+// unconditionally, but the slice starts empty and only a build's own init()
+// (site.go's, behind the 'site' build tag) appends to it. An untagged build,
+// carrying only 'preview', which takes no '--config', appends nothing, so
+// preview's help never gains a paragraph about a flag it does not accept.
+type siteSharedDetail struct {
+	// intro introduces the block and names the commands it applies to, e.g.
+	// "'--config <path>', accepted by deploy, check, and config:".
+	intro string
+	// text is the shared paragraph itself.
+	text string
+	// commands lists the siteCommand names whose own '--help' output this
+	// block is appended to.
+	commands []string
+}
+
+func (shared siteSharedDetail) appliesTo(name string) bool {
+	for _, command := range shared.commands {
+		if command == name {
+			return true
+		}
+	}
+	return false
+}
+
+// siteSharedDetails holds every shared detail block a build carries. See
+// siteSharedDetail for why this lives here undeclared rather than as a var
+// literal naming tagged-only commands.
+var siteSharedDetails []siteSharedDetail
+
 // siteCommandHelp renders one registered command's own usage lines followed
-// by its own detail prose, and nothing about any other command. Every
-// command's '-h'/'--help' case calls this with its own name rather than
-// printing siteUsageText, so this is implemented once instead of once per
-// command.
+// by its own detail prose and any shared detail block that names it, and
+// nothing about any other command. Every command's '-h'/'--help' case calls
+// this with its own name rather than printing siteUsageText, so this is
+// implemented once instead of once per command.
 //
 // name must be a name already registered in siteCommands — every caller
 // passes its own siteCommand.name — so an unmatched name is a mistake in
 // this program, not in its input.
 func siteCommandHelp(name string) string {
-	for _, entry := range siteCommands {
-		if entry.name != name {
+	entry, ok := siteCommandEntry(name)
+	if !ok {
+		panic("siteCommandHelp: unregistered site command: " + name)
+	}
+	var text strings.Builder
+	text.WriteString("Usage:\n")
+	for _, line := range entry.usage {
+		fmt.Fprintf(&text, "  %s\n", line)
+	}
+	text.WriteString("\n")
+	text.WriteString(entry.detail)
+	for _, shared := range siteSharedDetails {
+		if !shared.appliesTo(name) {
 			continue
 		}
-		var text strings.Builder
-		text.WriteString("Usage:\n")
-		for _, line := range entry.usage {
-			fmt.Fprintf(&text, "  %s\n", line)
-		}
 		text.WriteString("\n")
-		text.WriteString(entry.detail)
-		return text.String()
+		text.WriteString(shared.intro)
+		text.WriteString("\n\n")
+		text.WriteString(shared.text)
 	}
-	panic("siteCommandHelp: unregistered site command: " + name)
+	return text.String()
+}
+
+// siteCommandUsageError reports one argument-parsing error inside a site
+// command the way 'gh' does: the one-line message, then that command's own
+// Usage: lines, then a pointer to its own '--help', then exit 1. Every
+// argument error inside a site command's own loop — an unknown option, an
+// unexpected argument, a missing flag value — goes through this instead of
+// a bare die(), so an operator who mistypes a flag sees the options on the
+// same screen as the mistake, the way the namespace's own short usage does
+// for a mistyped command word.
+//
+// name must be a name already registered in siteCommands, for the same
+// reason siteCommandHelp requires it.
+func siteCommandUsageError(name string, format string, args ...any) {
+	entry, ok := siteCommandEntry(name)
+	if !ok {
+		panic("siteCommandUsageError: unregistered site command: " + name)
+	}
+	fmt.Fprintf(stderr, "allod: "+format+"\n", args...)
+	fmt.Fprint(stderr, "Usage:\n")
+	for _, line := range entry.usage {
+		fmt.Fprintf(stderr, "  %s\n", line)
+	}
+	fmt.Fprintf(stderr, "\nRun 'allod site %s --help' for details.\n", name)
+	exit(1)
 }

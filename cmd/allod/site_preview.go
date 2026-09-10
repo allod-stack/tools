@@ -56,7 +56,9 @@ func sitePreview(args []string) {
 	for len(args) > 0 {
 		switch args[0] {
 		case "--port", "--interface", "--base-url":
-			requireValue(args, args[0])
+			if len(args) < 2 {
+				siteCommandUsageError("preview", "%s requires a value", args[0])
+			}
 			zolaArgs = append(zolaArgs, args[0], args[1])
 			args = args[2:]
 		case "--drafts", "--open":
@@ -70,9 +72,9 @@ func sitePreview(args []string) {
 			return
 		default:
 			if strings.HasPrefix(args[0], "-") {
-				die(1, "unknown option for site preview: %s", args[0])
+				siteCommandUsageError("preview", "unknown option for site preview: %s", args[0])
 			}
-			die(1, "unexpected argument for site preview: %s", args[0])
+			siteCommandUsageError("preview", "unexpected argument for site preview: %s", args[0])
 		}
 	}
 

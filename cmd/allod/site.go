@@ -237,6 +237,12 @@ var (
 // appends to siteCommands rather than replacing it, and never calls
 // registerNamespace: that would panic on the duplicate word, and
 // site_preview.go's init() is the only one allowed to call it.
+//
+// It also appends to siteSharedDetails, the one shared detail block this
+// build carries: '--config <path>', named against the three commands
+// registered here that accept it. An untagged build's init() never runs
+// this file at all, so siteSharedDetails there stays empty and preview's
+// help stays free of a flag it does not take.
 func init() {
 	siteCommands = append(siteCommands,
 		siteCommand{
@@ -266,6 +272,11 @@ func init() {
 			run:    siteConfigure,
 		},
 	)
+	siteSharedDetails = append(siteSharedDetails, siteSharedDetail{
+		intro:    "'--config <path>', accepted by deploy, check, and config:",
+		text:     siteConfigFlagDetail,
+		commands: []string{"deploy", "check", "config"},
+	})
 }
 
 func deployFilterText(rules []string) string {
@@ -505,9 +516,9 @@ func siteCheck(args []string) {
 			return
 		default:
 			if strings.HasPrefix(args[0], "-") {
-				die(1, "unknown option for site check: %s", args[0])
+				siteCommandUsageError("check", "unknown option for site check: %s", args[0])
 			}
-			die(1, "unexpected argument for site check: %s", args[0])
+			siteCommandUsageError("check", "unexpected argument for site check: %s", args[0])
 		}
 	}
 
@@ -573,9 +584,9 @@ func siteDeploy(args []string) {
 			// owns every docroot on the server: anything that could redirect
 			// this sync could also delete a sibling site.
 			if strings.HasPrefix(args[0], "-") {
-				die(1, "unknown option for site deploy: %s", args[0])
+				siteCommandUsageError("deploy", "unknown option for site deploy: %s", args[0])
 			}
-			die(1, "unexpected argument for site deploy: %s", args[0])
+			siteCommandUsageError("deploy", "unexpected argument for site deploy: %s", args[0])
 		}
 	}
 
@@ -659,28 +670,16 @@ func siteDeploy(args []string) {
 // split them out. siteUsageText() in site_common.go joins them with the
 // other commands' blocks in siteCommands order for 'allod site --help';
 // siteCommandHelp() joins a single one with its own usage lines for that
-// command's own '-h'/'--help'.
+// command's own '-h'/'--help'. siteConfigFlagDetail below is a fourth block:
+// unlike these three, it is not any one command's own detail, and reaches
+// the reader through siteSharedDetails instead of a siteCommand.detail
+// field — see that type in site_common.go.
 const siteDeployDetail = `'deploy' walks up from the current directory to the site.toml that marks the
 site repository root, builds that repo with 'nix build --no-link
 --print-out-paths', and syncs the resulting store path through the 'shared'
 rclone remote. Deploy never handles a credential, and checks that the remote
 can authenticate before it starts the build rather than discovering a rejected
 login afterwards.
-
-'--config <path>' selects one rclone configuration path for any command. An
-explicit path takes precedence over RCLONE_CONFIG, rclone's reported path,
-XDG_CONFIG_HOME, and HOME. A path beginning with '-' uses --config=<path> so it
-cannot be mistaken for another option. Deploy, check, and config show accept a
-readable regular file or a symlink to one. Create and replace may create a
-missing path. Update requires an existing 'shared' stanza. All three mutable
-actions atomically replace a regular file at mode 0600, but refuse to replace a
-symlink or any other file type. Deploy passes the same path
-to the preflight and sync; rclone opens it separately for those calls, so
-activation or rotation during the build can make sync read newer contents than
-the preflight checked. Without the flag, deploy and check leave resolution to
-rclone, while config asks rclone for its configuration file before falling
-back to the XDG/HOME default. The hosting config is machine-wide; it does not
-belong in site.toml or a site repository.
 
 Each site-enabled binary has one deployment-owned hosting layout compiled in.
 Without a linker override it uses 'directadmin', whose docroot is
@@ -726,4 +725,28 @@ Passwords are not echoed as they are typed, never appear in a command line,
 and are stored the only way rclone accepts a stored password: obscured, by
 rclone itself. Every successful create, update, or replacement names 'allod
 site check' as the way to verify the stored values with the server.
+`
+
+// siteConfigFlagDetail explains '--config <path>', which deploy, check, and
+// config all accept and none of them owns: it used to live inside
+// siteDeployDetail, which put the whole paragraph under 'allod site deploy
+// --help' and left it out of 'allod site check --help' and 'allod site
+// config --help' entirely, though both take the same flag with the same
+// meaning. init() below registers it once in siteSharedDetails so the long
+// form prints it once and each of the three commands' own '--help' prints
+// it too; preview, which takes no '--config', never sees it.
+const siteConfigFlagDetail = `'--config <path>' selects one rclone configuration path for any command. An
+explicit path takes precedence over RCLONE_CONFIG, rclone's reported path,
+XDG_CONFIG_HOME, and HOME. A path beginning with '-' uses --config=<path> so it
+cannot be mistaken for another option. Deploy, check, and config show accept a
+readable regular file or a symlink to one. Create and replace may create a
+missing path. Update requires an existing 'shared' stanza. All three mutable
+actions atomically replace a regular file at mode 0600, but refuse to replace a
+symlink or any other file type. Deploy passes the same path
+to the preflight and sync; rclone opens it separately for those calls, so
+activation or rotation during the build can make sync read newer contents than
+the preflight checked. Without the flag, deploy and check leave resolution to
+rclone, while config asks rclone for its configuration file before falling
+back to the XDG/HOME default. The hosting config is machine-wide; it does not
+belong in site.toml or a site repository.
 `

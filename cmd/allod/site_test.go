@@ -229,7 +229,7 @@ func TestSiteBareInvocationHasNoDetailProse(t *testing.T) {
 			t.Errorf("bare invocation printed %s's detail prose %q\ngot: %q", command, sentence, errText)
 		}
 	}
-	if want := "\nRun 'allod site --help' for details on each command.\n"; !strings.HasSuffix(errText, want) {
+	if want := "\nRun 'allod site --help' for details.\n"; !strings.HasSuffix(errText, want) {
 		t.Errorf("bare invocation stderr does not end with %q\ngot: %q", want, errText)
 	}
 }
@@ -284,6 +284,119 @@ func TestSiteCommandHelpMentionsOnlyItsOwnCommand(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSiteArgumentErrorPrintsOwnUsageOnly pins the per-command
+// argument-error contract: an unknown option, an unexpected argument, or a
+// missing flag value prints the one-line message, that command's own
+// Usage: lines, and a pointer to that command's own '--help', but never any
+// command's detail prose — not even that command's own. gh shows the reader
+// the options next to the mistake, not the whole manual.
+func TestSiteArgumentErrorPrintsOwnUsageOnly(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     []string
+		message  string
+		ownUsage string
+		pointer  string
+	}{
+		{
+			"deploy unknown option",
+			[]string{"site", "deploy", "--bogus"},
+			"allod: unknown option for site deploy: --bogus\n",
+			"Usage:\n  allod site deploy ",
+			"\nRun 'allod site deploy --help' for details.\n",
+		},
+		{
+			"check unexpected argument",
+			[]string{"site", "check", "extra"},
+			"allod: unexpected argument for site check: extra\n",
+			"Usage:\n  allod site check ",
+			"\nRun 'allod site check --help' for details.\n",
+		},
+		{
+			"config unknown option",
+			[]string{"site", "config", "--bogus"},
+			"allod: unknown option for site config: --bogus\n",
+			"Usage:\n  allod site config ",
+			"\nRun 'allod site config --help' for details.\n",
+		},
+		{
+			"preview missing flag value",
+			[]string{"site", "preview", "--port"},
+			"allod: --port requires a value\n",
+			"Usage:\n  allod site preview ",
+			"\nRun 'allod site preview --help' for details.\n",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stub := &deployStub{}
+			useDeployStub(t, stub)
+			useSiteRepo(t, "domain = \"example.com\"\n")
+
+			out, errText, code := runAllod(t, test.args...)
+			if code != 1 {
+				t.Errorf("exit code = %d, want 1", code)
+			}
+			if out != "" {
+				t.Errorf("stdout = %q, want empty", out)
+			}
+			for _, want := range []string{test.message, test.ownUsage, test.pointer} {
+				if !strings.Contains(errText, want) {
+					t.Errorf("argument error does not contain %q\ngot: %q", want, errText)
+				}
+			}
+			// No command's detail prose belongs in an argument error, not
+			// even the offending command's own: the point of the short
+			// error form is that it fits without any of it.
+			for command, sentence := range siteDetailOnlySentences {
+				if strings.Contains(errText, sentence) {
+					t.Errorf("argument error printed %s's detail prose %q\ngot: %q", command, sentence, errText)
+				}
+			}
+		})
+	}
+}
+
+// TestSiteSharedDetailAppearsWhereItApplies pins the '--config <path>'
+// shared-detail contract: deploy, check, and config each carry it in their
+// own '--help', it appears exactly once in the long-form 'site --help', and
+// preview — which takes no '--config' — carries it nowhere.
+func TestSiteSharedDetailAppearsWhereItApplies(t *testing.T) {
+	const marker = "accepted by deploy, check, and config"
+
+	for _, command := range []string{"deploy", "check", "config"} {
+		t.Run(command, func(t *testing.T) {
+			out, errText, code := runAllod(t, "site", command, "--help")
+			if code != 0 || errText != "" {
+				t.Fatalf("exit=%d stderr=%q, want success with empty stderr", code, errText)
+			}
+			if !strings.Contains(out, marker) {
+				t.Errorf("'site %s --help' is missing the shared '--config' detail\ngot: %q", command, out)
+			}
+		})
+	}
+
+	t.Run("preview", func(t *testing.T) {
+		out, errText, code := runAllod(t, "site", "preview", "--help")
+		if code != 0 || errText != "" {
+			t.Fatalf("exit=%d stderr=%q, want success with empty stderr", code, errText)
+		}
+		if strings.Contains(out, marker) {
+			t.Errorf("'site preview --help' carries the '--config' detail it does not accept\ngot: %q", out)
+		}
+	})
+
+	t.Run("long form once", func(t *testing.T) {
+		out, errText, code := runAllod(t, "site", "--help")
+		if code != 0 || errText != "" {
+			t.Fatalf("exit=%d stderr=%q, want success with empty stderr", code, errText)
+		}
+		if got := strings.Count(out, marker); got != 1 {
+			t.Errorf("'site --help' contains the shared '--config' detail %d times, want 1\ngot: %q", got, out)
+		}
+	})
 }
 
 func TestSiteUsageKeepsHostingSelectionAtBuildTime(t *testing.T) {
