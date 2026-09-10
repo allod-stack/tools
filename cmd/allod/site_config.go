@@ -26,13 +26,11 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"unicode"
 	"unicode/utf8"
-	"unsafe"
 )
 
 // The rclone configuration file holds reversible credentials, so it is created
@@ -855,86 +853,4 @@ func askRemoteCredentialField(field remoteConfigField) (string, error) {
 	default:
 		return "", fmt.Errorf("unknown credential field %q", field)
 	}
-}
-
-func askLine(tty *os.File, reader *bufio.Reader, prompt string) (string, error) {
-	fmt.Fprint(tty, prompt)
-	line, err := reader.ReadString('\n')
-	// A terminal closed mid-answer still returns what was typed before it
-	// went; only an EOF with nothing before it is a failure to answer.
-	if err != nil && (!errors.Is(err, io.EOF) || line == "") {
-		return "", err
-	}
-	return strings.TrimRight(line, "\r\n"), nil
-}
-
-func askSecret(tty *os.File, reader *bufio.Reader, prompt string) (string, error) {
-	restore, err := disableEcho(tty)
-	if err != nil {
-		return "", err
-	}
-	defer restore()
-	secret, err := askLine(tty, reader, prompt)
-	// The Return that ended the answer was not echoed either, so the next
-	// thing printed would land on the prompt line.
-	fmt.Fprintln(tty)
-	return secret, err
-}
-
-// disableEcho turns the terminal's echo off for the duration of one prompt,
-// the way 'stty -echo' does, and returns the function that puts it back. The
-// standard library has no terminal package, so this is the TCGETS/TCSETS
-// ioctl pair directly — the same call cmd/forge makes to answer isatty.
-//
-// The restore also runs on SIGINT. Ctrl-C at a password prompt is an ordinary
-// thing to do, and the default action would kill the process with echo still
-// off, leaving the operator typing blind into their own shell afterwards.
-func disableEcho(tty *os.File) (func(), error) {
-	var original syscall.Termios
-	if err := getTermios(tty, &original); err != nil {
-		return nil, fmt.Errorf("could not read the terminal settings: %w", err)
-	}
-	quiet := original
-	quiet.Lflag &^= syscall.ECHO
-	if err := setTermios(tty, &quiet); err != nil {
-		return nil, fmt.Errorf("could not turn off terminal echo: %w", err)
-	}
-
-	interrupted := make(chan os.Signal, 1)
-	signal.Notify(interrupted, os.Interrupt)
-	done := make(chan struct{})
-	go func() {
-		select {
-		case <-interrupted:
-			_ = setTermios(tty, &original)
-			// 128 + SIGINT: what a shell reports for a command its user
-			// interrupted, which is what happened.
-			os.Exit(130)
-		case <-done:
-		}
-	}()
-
-	return func() {
-		signal.Stop(interrupted)
-		close(done)
-		_ = setTermios(tty, &original)
-	}, nil
-}
-
-func getTermios(tty *os.File, out *syscall.Termios) error {
-	_, _, errno := syscall.Syscall6(syscall.SYS_IOCTL, tty.Fd(),
-		uintptr(syscall.TCGETS), uintptr(unsafe.Pointer(out)), 0, 0, 0)
-	if errno != 0 {
-		return errno
-	}
-	return nil
-}
-
-func setTermios(tty *os.File, in *syscall.Termios) error {
-	_, _, errno := syscall.Syscall6(syscall.SYS_IOCTL, tty.Fd(),
-		uintptr(syscall.TCSETS), uintptr(unsafe.Pointer(in)), 0, 0, 0)
-	if errno != 0 {
-		return errno
-	}
-	return nil
 }

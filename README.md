@@ -10,7 +10,7 @@ host install them through their Nix composition, with no manual installation aft
 ## Layout
 
 ```
-cmd/allod/                Go main CLI (change, patch, pr, site preview; deploy/check/config opt-in)
+cmd/allod/                Go main CLI (change, patch, pr, site preview; deploy/check/config and secret opt-in)
 cmd/flake-update-cascade/ flake input update cascade Go command
 cmd/forge/                Forgejo CLI Go command
 internal/flakelock/       flake.lock graph walking for the cascade
@@ -81,8 +81,17 @@ default is `directadmin`; an unknown or malformed build-time value stops before
 the deploy preflight or build. To roll back `public-html`, remove that `ldflags`
 entry (or set its value to `directadmin`) and rebuild the deployment package.
 
-Both `go test ./...` and `go test -tags site ./...` are required, and the flake
-check runs both: each compiles code and tests the other does not.
+`allod secret create` and `rekey` are behind the `secret` build tag for the
+same reason: they land an encrypted credential in the secrets repository,
+which only the machine holding the age identity can do. Everywhere else
+`allod secret` is an unknown namespace — the capability is absent, not
+refused — which is what makes it a boundary rather than a rule an agent has
+to remember. The host opts in with `tags = [ "site" "secret" ];`. See
+[allod secret](docs/allod-secret.md).
+
+`go test ./...`, `-tags site`, `-tags secret`, and `-tags site,secret` are all
+required, and the flake check runs all four: each tag's tests assert the
+namespace present, and each untagged run asserts it absent.
 
 ## Documentation
 
