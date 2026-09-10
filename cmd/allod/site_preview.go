@@ -101,7 +101,7 @@ zola's own exit code.
 given is passed through, so an unset one keeps zola's own default rather than
 one this command invents. Anything after '--' is passed to zola verbatim.
 
-Without '--interface', zola binds its own default, 127.0.0.1:1111 — loopback,
+Without '--interface' and '--port', zola binds its own default, 127.0.0.1:1111 — loopback,
 so nothing outside this machine can reach it, and this machine's firewall
 does not open it either. View it from the host's browser through an SSH
 tunnel: 'ssh -L 1111:127.0.0.1:1111 <vm>', then open http://127.0.0.1:1111
