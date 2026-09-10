@@ -94,7 +94,8 @@ var sitePreviewUsage = []string{
 const sitePreviewDetail = `'preview' walks up from the current directory to the site.toml that marks
 the site repository root, the way every site command does, then starts that
 repository's own locked zola: 'nix shell --inputs-from <root> nixpkgs#zola
---command zola --root <root> serve' plus the flags below. Standard input,
+--command zola --root <root> serve' plus whichever of the flags in the next
+paragraph were given. Standard input,
 output, and error connect straight through to zola, and preview exits with
 zola's own exit code.
 
