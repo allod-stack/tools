@@ -574,7 +574,9 @@ func probeSite(url string) (int, error) {
 // 1." The sync passes --check-first, so concurrency only has to be
 // max(transfers, checkers) + 1 = 3 rather than transfers + checkers + 1 = 5;
 // --check-first also means the listing phase - the phase that tripped the
-// connection limit - runs to completion before any file starts moving.
+// connection limit - runs to completion before any file starts moving, at
+// the cost of holding the whole transfer list in memory first, which is
+// nothing for a static site.
 //
 // The cap is per rclone filesystem instance, not per deploy: '--backup-dir
 // shared:deploy-trash/<domain>' on the same remote is a second filesystem
