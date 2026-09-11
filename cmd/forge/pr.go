@@ -23,19 +23,57 @@ import (
 // this package spawns one.
 var currentBranch = gitremote.CurrentBranch
 
-// prList mirrors pr_list (forge line 399).
+// prList mirrors pr_list (forge line 399), extended with the state filter
+// and merged marker from allod/tools#193: `-s/--state` selects open, closed,
+// or all pull requests (default open, unchanged), and a closed or all listing
+// gains a status column so a closed-but-unmerged pull request is never
+// mistaken for one that landed.
 func prList(args []string) {
 	if containsHelpFlag(args) {
 		commandUsage("pr list")
 		return
 	}
-	parseRepoOnlyArgs("pr list", args)
+	state := "open"
+	limit := "50"
+
+	for len(args) > 0 {
+		switch args[0] {
+		case "-R", "--repo":
+			setRepoOption(args)
+			args = args[2:]
+		case "-s", "--state":
+			requireOptionValue(args[0], len(args))
+			switch args[1] {
+			case "open", "closed", "all":
+				state = args[1]
+			default:
+				die("--state must be one of: open, closed, all")
+			}
+			args = args[2:]
+		case "-L", "--limit":
+			requireOptionValue(args[0], len(args))
+			limit = parsePositiveInt(args[0], args[1])
+			args = args[2:]
+		default:
+			if strings.HasPrefix(args[0], "-") {
+				die("unknown option for pr list: %s", args[0])
+			}
+			die("unexpected argument for pr list: %s", args[0])
+		}
+	}
 	requireRepo()
 
-	result := mustJSON(api("GET", "/repos/"+repoOpt+"/pulls?state=open&limit=50", nil))
+	result := mustJSON(api("GET", "/repos/"+repoOpt+"/pulls?state="+state+"&limit="+limit, nil))
 
 	if jqLengthOf(result) == 0 {
-		fmt.Fprintf(stdout, "No open pull requests in %s\n", repoOpt)
+		switch state {
+		case "open":
+			fmt.Fprintf(stdout, "No open pull requests in %s\n", repoOpt)
+		case "closed":
+			fmt.Fprintf(stdout, "No closed pull requests in %s\n", repoOpt)
+		default:
+			fmt.Fprintf(stdout, "No pull requests in %s\n", repoOpt)
+		}
 		return
 	}
 
@@ -46,14 +84,40 @@ func prList(args []string) {
 	pulls := jsonArray(result)
 	rows := make([][]string, 0, len(pulls))
 	for _, pr := range pulls {
-		rows = append(rows, []string{
+		row := []string{
 			jqString(jsonField(pr, "number")),
 			jqString(jsonField(pr, "title")),
 			jqString(jsonPath(pr, "user", "login")),
 			jqString(jsonPath(pr, "head", "label")) + " → " + jqString(jsonPath(pr, "base", "label")),
-		})
+		}
+		if state != "open" {
+			row = append(row, prStatusCell(pr))
+		}
+		rows = append(rows, row)
 	}
 	fmt.Fprint(stdout, columnTable(tabLines(rows)))
+}
+
+// prStatusCell is the status column `pr list` appends for a closed or all
+// listing (allod/tools#193 design): the pull request's own state when it is
+// open, "closed" when it is closed and was never merged, and
+// "merged YYYY-MM-DD" -- the first 10 characters of merged_at, jq-style
+// (jqPrefixSlice) -- when the API's merged is true. A merged pull request
+// with a null merged_at renders "merged" alone, with no trailing space.
+func prStatusCell(pr any) string {
+	state := jqString(jsonField(pr, "state"))
+	if state != "closed" {
+		return state
+	}
+	merged, _ := jsonField(pr, "merged").(bool)
+	if !merged {
+		return "closed"
+	}
+	mergedAt := jsonField(pr, "merged_at")
+	if mergedAt == nil {
+		return "merged"
+	}
+	return "merged " + jqString(jqPrefixSlice(mergedAt, 10))
 }
 
 // prView mirrors pr_view (forge line 415), plus --json/--jq
@@ -81,6 +145,7 @@ func prView(args []string) {
 	fmt.Fprintf(stdout, "  State:  %s\n", jqBodyString(pr, "state"))
 	fmt.Fprintf(stdout, "  Author: %s\n", jqBodyString(pr, "user", "login"))
 	fmt.Fprintf(stdout, "  Branch: %s → %s\n", jqBodyString(pr, "head", "label"), jqBodyString(pr, "base", "label"))
+	printPRMergedLine(pr)
 	fmt.Fprintln(stdout)
 
 	// body=$(echo "$pr" | jq -r '.body // ""'): command substitution strips
@@ -133,6 +198,28 @@ func prView(args []string) {
 		// printf '%s\n' "$inline_output"
 		fmt.Fprintf(stdout, "%s\n", inlineOutput.String())
 	}
+}
+
+// printPRMergedLine prints `  Merged: YYYY-MM-DD` after the Branch header
+// line (allod/tools#193 design) only when the API's merged is true; an open
+// or unmerged-closed pull request gets no line at all, so the existing header
+// tests keep passing unchanged. Date rule matches prStatusCell: the first 10
+// characters of merged_at, or "yes" when merged_at is missing.
+func printPRMergedLine(pr []byte) {
+	if jsonIsEmpty(pr) {
+		return
+	}
+	root := mustJSON(pr)
+	merged, _ := jsonField(root, "merged").(bool)
+	if !merged {
+		return
+	}
+	mergedAt := jsonField(root, "merged_at")
+	if mergedAt == nil {
+		fmt.Fprintln(stdout, "  Merged: yes")
+		return
+	}
+	fmt.Fprintf(stdout, "  Merged: %s\n", jqString(jqPrefixSlice(mergedAt, 10)))
 }
 
 // prReviewComments mirrors pr_review_comments (forge line 475).

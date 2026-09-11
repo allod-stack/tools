@@ -218,7 +218,7 @@ func TestViewJSONValidationErrors(t *testing.T) {
 		{
 			"pr view: unknown field",
 			[]string{"-R", "acme/widget", "pr", "view", "12", "--json", "bogus"},
-			"forge: unknown --json field \"bogus\"; valid fields: number, title, body, state, author, labels, milestone, url, createdAt, updatedAt, closedAt, headRefName, baseRefName\n",
+			"forge: unknown --json field \"bogus\"; valid fields: number, title, body, state, author, labels, milestone, url, createdAt, updatedAt, closedAt, headRefName, baseRefName, merged, mergedAt\n",
 		},
 	}
 

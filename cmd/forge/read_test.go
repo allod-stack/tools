@@ -39,6 +39,103 @@ func TestReadPRList(t *testing.T) {
 	}
 }
 
+// TestReadPRListState covers the -s/--state filter and the merged-marker
+// status column (allod/tools#193): -s closed tells a merged pull request
+// from an abandoned one, -s all still shows "open" for an open one, and the
+// request path carries the chosen state and limit.
+func TestReadPRListState(t *testing.T) {
+	t.Run("closed distinguishes merged from abandoned", func(t *testing.T) {
+		srv := newRecordingServer(t, map[string]cannedResponse{
+			"/api/v1/repos/acme/widget/pulls?state=closed&limit=50": {Body: `[{"number":40,"title":"Merged one","user":{"login":"alice"},"head":{"label":"acme:m","ref":"m"},"base":{"label":"master","ref":"master"},"state":"closed","merged":true,"merged_at":"2026-09-10T12:00:00Z"},{"number":41,"title":"Abandoned one","user":{"login":"alice"},"head":{"label":"acme:a","ref":"a"},"base":{"label":"master","ref":"master"},"state":"closed","merged":false,"merged_at":null}]`},
+		})
+		useServer(t, srv)
+		useToken(t, fakeToken)
+		useNoInferRepo(t)
+
+		out, errText, code := runForge(t, "-R", "acme/widget", "pr", "list", "-s", "closed")
+		if code != 0 || errText != "" {
+			t.Fatalf("got (%q, %q, %d), want success", out, errText, code)
+		}
+		if !containsAll(out, "Merged one", "merged 2026-09-10", "Abandoned one", "closed") {
+			t.Errorf("stdout = %q, want a merged row with its date and a closed row without one", out)
+		}
+		srv.assertRequest(t, 0, "GET", "/api/v1/repos/acme/widget/pulls?state=closed&limit=50")
+	})
+
+	t.Run("all still shows open for an open pull request", func(t *testing.T) {
+		srv := newRecordingServer(t, map[string]cannedResponse{
+			"/api/v1/repos/acme/widget/pulls?state=all&limit=50": {Body: `[{"number":42,"title":"Still open","user":{"login":"alice"},"head":{"label":"acme:o","ref":"o"},"base":{"label":"master","ref":"master"},"state":"open"}]`},
+		})
+		useServer(t, srv)
+		useToken(t, fakeToken)
+		useNoInferRepo(t)
+
+		out, errText, code := runForge(t, "-R", "acme/widget", "pr", "list", "-s", "all")
+		if code != 0 || errText != "" {
+			t.Fatalf("got (%q, %q, %d), want success", out, errText, code)
+		}
+		if !containsAll(out, "Still open", "open") {
+			t.Errorf("stdout = %q, want the open status cell", out)
+		}
+	})
+
+	t.Run("limit changes the request", func(t *testing.T) {
+		srv := newRecordingServer(t, map[string]cannedResponse{
+			"/api/v1/repos/acme/widget/pulls?state=open&limit=5": {Body: `[]`},
+		})
+		useServer(t, srv)
+		useToken(t, fakeToken)
+		useNoInferRepo(t)
+
+		out, errText, code := runForge(t, "-R", "acme/widget", "pr", "list", "-L", "5")
+		if code != 0 || errText != "" || out != "No open pull requests in acme/widget\n" {
+			t.Fatalf("got (%q, %q, %d), want success and the empty-open message", out, errText, code)
+		}
+		srv.assertRequest(t, 0, "GET", "/api/v1/repos/acme/widget/pulls?state=open&limit=5")
+	})
+
+	t.Run("closed with none prints the closed empty message", func(t *testing.T) {
+		srv := newRecordingServer(t, map[string]cannedResponse{
+			"/api/v1/repos/acme/widget/pulls?state=closed&limit=50": {Body: `[]`},
+		})
+		useServer(t, srv)
+		useToken(t, fakeToken)
+		useNoInferRepo(t)
+
+		out, _, code := runForge(t, "-R", "acme/widget", "pr", "list", "-s", "closed")
+		if code != 0 || out != "No closed pull requests in acme/widget\n" {
+			t.Errorf("got (%q, %d), want the closed empty message", out, code)
+		}
+	})
+
+	t.Run("bogus state dies", func(t *testing.T) {
+		srv := newRecordingServer(t, map[string]cannedResponse{})
+		useServer(t, srv)
+		useToken(t, fakeToken)
+		useNoInferRepo(t)
+
+		out, errText, code := runForge(t, "-R", "acme/widget", "pr", "list", "-s", "bogus")
+		if code != 1 || errText != "forge: --state must be one of: open, closed, all\n" {
+			t.Errorf("got (%q, %q, %d), want the state error", out, errText, code)
+		}
+		if n := srv.count(); n != 0 {
+			t.Errorf("request count = %d, want 0", n)
+		}
+	})
+
+	t.Run("-L 0 dies", func(t *testing.T) {
+		srv := newRecordingServer(t, map[string]cannedResponse{})
+		useServer(t, srv)
+		useToken(t, fakeToken)
+		useNoInferRepo(t)
+
+		out, errText, code := runForge(t, "-R", "acme/widget", "pr", "list", "-L", "0")
+		if code != 1 || errText != "forge: -L must be a positive integer\n" {
+			t.Errorf("got (%q, %q, %d), want the positive-integer error", out, errText, code)
+		}
+	})
+}
+
 // --- pr view ---
 
 func TestReadPRView(t *testing.T) {
@@ -59,9 +156,45 @@ func TestReadPRView(t *testing.T) {
 	if !containsAll(out, "PR #12: Improve tool", "General note", "Inline note") {
 		t.Errorf("stdout = %q, want the PR header, the general comment, and the inline comment", out)
 	}
+	if strings.Contains(out, "Merged:") {
+		t.Errorf("stdout = %q, want no Merged line for an open pull request", out)
+	}
 	if n := srv.count(); n != 4 {
 		t.Errorf("request count = %d, want 4 (PR, comments, reviews, one review's comments)", n)
 	}
+}
+
+// TestReadPRViewMerged covers the Merged: line and the merged/mergedAt
+// --json fields (allod/tools#193).
+func TestReadPRViewMerged(t *testing.T) {
+	srv := newRecordingServer(t, map[string]cannedResponse{
+		"/api/v1/repos/acme/widget/pulls/13":           {Body: `{"title":"Landed","state":"closed","body":"","user":{"login":"alice"},"head":{"label":"acme:topic","ref":"topic"},"base":{"label":"master","ref":"master"},"merged":true,"merged_at":"2026-09-10T08:00:00Z"}`},
+		"/api/v1/repos/acme/widget/issues/13/comments": {Body: `[]`},
+		"/api/v1/repos/acme/widget/pulls/13/reviews":   {Body: `[]`},
+	})
+	useServer(t, srv)
+	useToken(t, fakeToken)
+	useNoInferRepo(t)
+
+	t.Run("rendered view shows the merge date", func(t *testing.T) {
+		out, errText, code := runForge(t, "-R", "acme/widget", "pr", "view", "13")
+		if code != 0 || errText != "" {
+			t.Fatalf("got (%q, %q, %d), want success", out, errText, code)
+		}
+		if !strings.Contains(out, "Merged: 2026-09-10") {
+			t.Errorf("stdout = %q, want a Merged: 2026-09-10 line", out)
+		}
+	})
+
+	t.Run("--json exposes merged and mergedAt", func(t *testing.T) {
+		out, errText, code := runForge(t, "-R", "acme/widget", "pr", "view", "13", "--json", "merged,mergedAt")
+		if code != 0 || errText != "" {
+			t.Fatalf("got (%q, %q, %d), want success", out, errText, code)
+		}
+		if !containsAll(out, `"merged":true`, `"mergedAt":"2026-09-10T08:00:00Z"`) {
+			t.Errorf("stdout = %q, want merged and mergedAt in the JSON object", out)
+		}
+	})
 }
 
 // --- pr review-comments ---

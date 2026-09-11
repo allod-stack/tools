@@ -16,8 +16,8 @@ Resources:
   token       Candidate token verification
 
 PR commands:
-  forge pr list
-      List open pull requests
+  forge pr list [-s open|closed|all] [-L <number>]
+      List pull requests
   forge pr view <number> [--json <fields>] [--jq <expression>]
       Show PR details and comments, or print selected fields as JSON
   forge pr snapshot <number>
@@ -110,11 +110,15 @@ Config:
 `
 
 var commandUsageTexts = map[string]string{
-	"pr list": `Usage: forge pr list [-R <owner/repo>]
+	"pr list": `Usage: forge pr list [-s open|closed|all] [-L <number>] [-R <owner/repo>]
 
-List open pull requests.
+List pull requests. With -s closed or -s all, each row gains a status
+column: "open", "closed", or "merged YYYY-MM-DD" (the merge date), so a
+closed pull request that never merged is never mistaken for one that did.
 
 Flags:
+  -s, --state <state>       Filter by state: open, closed, or all (default: open)
+  -L, --limit <number>      Maximum number of pull requests to fetch (default: 50)
   -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
 `,
 	"pr view": `Usage: forge pr view <number> [-R <owner/repo>] [--json <fields>] [--jq <expression>]
@@ -127,9 +131,13 @@ Flags:
       --json <fields>       Print only these fields as JSON (comma-separated,
                              repeatable): number, title, body, state, author,
                              labels, milestone, url, createdAt, updatedAt,
-                             closedAt, headRefName, baseRefName
+                             closedAt, headRefName, baseRefName, merged,
+                             mergedAt
       --jq <expression>     Filter --json output by a simple field path, e.g.
                              .body (requires --json)
+
+A merged pull request prints a "Merged: YYYY-MM-DD" line after Branch; an
+open or unmerged-closed pull request prints no such line.
 `,
 	"pr snapshot": `Usage: forge pr snapshot <number> [-R <owner/repo>]
 

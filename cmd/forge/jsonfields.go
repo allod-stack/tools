@@ -43,11 +43,15 @@ var viewJSONFields = map[string]jsonFieldBuilder{
 	"closedAt":  func(root any) any { return jsonField(root, "closed_at") },
 }
 
-// prOnlyJSONFields are the two fields `pr view --json` adds beyond
-// viewJSONFields.
+// prOnlyJSONFields are the fields `pr view --json` adds beyond
+// viewJSONFields. merged and mergedAt (allod/tools#193) reach stdout
+// unmodified from the API: merged is the raw bool, mergedAt the raw string or
+// null.
 var prOnlyJSONFields = map[string]jsonFieldBuilder{
 	"headRefName": func(root any) any { return jsonPath(root, "head", "ref") },
 	"baseRefName": func(root any) any { return jsonPath(root, "base", "ref") },
+	"merged":      func(root any) any { return jsonField(root, "merged") },
+	"mergedAt":    func(root any) any { return jsonField(root, "merged_at") },
 }
 
 // issueViewJSONFields lists the fields `issue view --json` accepts, in the
@@ -57,8 +61,8 @@ var issueViewJSONFields = []string{
 	"url", "createdAt", "updatedAt", "closedAt",
 }
 
-// prViewJSONFields is issueViewJSONFields plus the two PR-only fields.
-var prViewJSONFields = append(append([]string{}, issueViewJSONFields...), "headRefName", "baseRefName")
+// prViewJSONFields is issueViewJSONFields plus the PR-only fields.
+var prViewJSONFields = append(append([]string{}, issueViewJSONFields...), "headRefName", "baseRefName", "merged", "mergedAt")
 
 // viewJSONBody is the whole reason for this file: the body reaches stdout as
 // the API returned it. A field the API omits renders as the empty string,

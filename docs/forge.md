@@ -51,7 +51,7 @@ success.
 ## PR commands
 
 ```bash
-forge pr list
+forge pr list [--state open|closed|all] [--limit <number>]
 forge pr view <number> [--json <fields>] [--jq <expression>]
 forge pr snapshot <number>                 # stable immutable commit metadata as JSON
 forge pr create --title <title> [--head <branch>] [--base <branch>] \
@@ -72,13 +72,29 @@ repository's default branch. The `gh` short aliases are also supported:
 Use `-c`/`--comment` to leave a closing comment and `-d`/`--delete-branch` to
 delete the remote head branch after closing.
 
+`pr list` defaults to open pull requests, the same as before. `-s`/`--state`
+also takes `closed` or `all`, and with either of those a status column is
+appended to each row: `open`, `closed`, or `merged YYYY-MM-DD` (the merge
+date). `pr view` still prints `State: closed` for a merged and an abandoned
+pull request alike; the status column, the `Merged:` line, and the `merged`/
+`mergedAt` JSON fields below are what tell them apart. `pr list -s closed` is
+the form for finding the pull request that actually settled an issue:
+
+```bash
+forge pr list -s closed
+```
+
 `pr view --json <fields>` prints only the requested fields as one JSON object,
 instead of the rendered summary and comments: no header, no comments, no
 reviews, and only one API request. Fields are comma-separated and the flag may
 be repeated (`gh`'s multi-value shape): `--json number,title` and
 `--json number --json title` name the same set. Valid fields: `number`,
 `title`, `body`, `state`, `author`, `labels`, `milestone`, `url`, `createdAt`,
-`updatedAt`, `closedAt`, `headRefName`, `baseRefName`. The JSON object form
+`updatedAt`, `closedAt`, `headRefName`, `baseRefName`, `merged`, `mergedAt`.
+`merged` is the raw boolean and `mergedAt` the raw merge timestamp or `null`,
+both straight from the API. Outside `--json`, a merged pull request's `pr
+view` prints a `Merged: YYYY-MM-DD` line after `Branch:`; an open or
+unmerged-closed pull request prints no such line. The JSON object form
 (`--json body`) carries the body exactly as the API returned it, with a null
 body rendered as the empty string. This lets an edit start from the body as it
 currently is on the forge instead of a retyped rendering of it:
