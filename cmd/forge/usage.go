@@ -18,8 +18,8 @@ Resources:
 PR commands:
   forge pr list
       List open pull requests
-  forge pr view <number>
-      Show PR details and comments
+  forge pr view <number> [--json <fields>] [--jq <expression>]
+      Show PR details and comments, or print selected fields as JSON
   forge pr snapshot <number>
       Print a stable immutable PR snapshot as JSON
   forge pr review-comments <number>
@@ -48,8 +48,8 @@ Token commands:
 Issue commands:
   forge issue list [-s open|closed|all] [-l <label>] [-m <milestone>] [-L <limit>] [-S <query>]
       List issues
-  forge issue view <number>
-      Show issue details and comments
+  forge issue view <number> [--json <fields>] [--jq <expression>]
+      Show issue details and comments, or print selected fields as JSON
   forge issue create -t <title> [-b <text> | -F <file>] [-l <label>] [-m <milestone>]
       Create an issue
   forge issue edit <number> [-t <title>] [-b <text> | -F <file>] [-m <milestone> | --remove-milestone] [--add-label <label>] [--remove-label <label>]
@@ -117,12 +117,19 @@ List open pull requests.
 Flags:
   -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
 `,
-	"pr view": `Usage: forge pr view <number> [-R <owner/repo>]
+	"pr view": `Usage: forge pr view <number> [-R <owner/repo>] [--json <fields>] [--jq <expression>]
 
-Show PR details and comments.
+Show PR details and comments. With --json, print only the requested fields as
+one JSON object instead: no header, no comments, no reviews.
 
 Flags:
   -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
+      --json <fields>       Print only these fields as JSON (comma-separated,
+                             repeatable): number, title, body, state, author,
+                             labels, milestone, url, createdAt, updatedAt,
+                             closedAt, headRefName, baseRefName
+      --jq <expression>     Filter --json output by a simple field path, e.g.
+                             .body (requires --json)
 `,
 	"pr snapshot": `Usage: forge pr snapshot <number> [-R <owner/repo>]
 
@@ -208,12 +215,19 @@ Flags:
   -S, --search <query>      Search issue titles and bodies locally
   -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
 `,
-	"issue view": `Usage: forge issue view <number> [-R <owner/repo>]
+	"issue view": `Usage: forge issue view <number> [-R <owner/repo>] [--json <fields>] [--jq <expression>]
 
-Show issue details and comments.
+Show issue details and comments. With --json, print only the requested fields
+as one JSON object instead: no header, no comments.
 
 Flags:
   -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
+      --json <fields>       Print only these fields as JSON (comma-separated,
+                             repeatable): number, title, body, state, author,
+                             labels, milestone, url, createdAt, updatedAt,
+                             closedAt
+      --jq <expression>     Filter --json output by a simple field path, e.g.
+                             .body (requires --json)
 `,
 	"issue create": `Usage: forge issue create -t <title> [-b <text> | -F <file>] [-l <label>] [-m <milestone>] [-R <owner/repo>]
 
