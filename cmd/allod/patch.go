@@ -50,6 +50,7 @@ base=$(printf '%s' "$b64_base" | base64 -d)
 base_set=$(printf '%s' "$b64_base_set" | base64 -d)
 case "$repo" in *"
 "*) printf 'allod: source repo path contains newline\n' >&2; exit 1 ;; esac
+case "$repo" in /*) ;; *) repo="$HOME/$repo" ;; esac
 case "$base" in *"
 "*) printf 'allod: base ref contains newline\n' >&2; exit 1 ;; esac
 case "$base_set" in true|false) ;; *) printf 'allod: invalid base mode\n' >&2; exit 1 ;; esac
@@ -279,12 +280,10 @@ func patchFetch(args []string) {
 	if sourceRepo == "" {
 		die(1, "empty source repo path in target")
 	}
-	if !filepath.IsAbs(sourceRepo) {
-		die(1, "source repo must be an absolute path: %s", sourceRepo)
-	}
 	if strings.Contains(sourceRepo, "\n") {
 		die(1, "source repo path must not contain newlines")
 	}
+	remoteSourceRepo := resolvePatchSourceArg(sourceRepo)
 	if strings.Contains(base, "\n") {
 		die(1, "--base value must not contain newlines")
 	}
@@ -317,7 +316,7 @@ func patchFetch(args []string) {
 	if baseSet {
 		baseMode = "true"
 	}
-	generateInput := encoded(sourceRepo) + "\n" + encoded(base) + "\n" + encoded(baseMode) + "\n"
+	generateInput := encoded(remoteSourceRepo) + "\n" + encoded(base) + "\n" + encoded(baseMode) + "\n"
 	remoteDir, status := sshCapture(host, remoteGenerateScript, generateInput)
 	if status != 0 {
 		if status == 10 || status == 11 || status == 17 {
@@ -559,14 +558,11 @@ func remotesMatch(left, right string) bool {
 
 func patchApply(args []string) {
 	artifact, repoPath := "", ""
-	push := false
 	for len(args) > 0 {
 		switch args[0] {
 		case "--repo":
 			requireValue(args, args[0])
 			repoPath, args = args[1], args[2:]
-		case "--push":
-			push, args = true, args[1:]
 		case "-h", "--help":
 			fmt.Fprint(stdout, patchUsageText)
 			return
@@ -652,7 +648,7 @@ func patchApply(args []string) {
 	if actualCount != manifest.PatchCount {
 		die(12, "unlisted .patch files in artifact directory")
 	}
-	repo := resolvePatchDestination(repoPath)
+	repo := resolvePatchDestinationArg(repoPath)
 	if dirty, _ := gitOutput(repo, "status", "--porcelain"); dirty != "" {
 		fmt.Fprintln(stderr, "allod: destination worktree is dirty; commit or stash changes before apply")
 		exit(16)
@@ -737,24 +733,7 @@ func patchApply(args []string) {
 		fmt.Fprintln(stderr, "allod: WARNING: whitespace check (git diff --check) flagged the applied commits; they stay applied:")
 		fmt.Fprint(stderr, whitespace.String())
 	}
-	if push {
-		if status := gitInherit(repo, "push"); status != 0 {
-			fmt.Fprintln(stderr, "allod: git push failed")
-			fmt.Fprintf(stderr, "allod: repo: %s\n", repo)
-			fmt.Fprintf(stderr, "allod: pre-apply HEAD: %s\n", preHead)
-			current, _ := gitOutput(repo, "rev-parse", "HEAD")
-			fmt.Fprintf(stderr, "allod: current HEAD: %s\n", current)
-			fmt.Fprintf(stderr, "allod: to push manually: git -C \"%s\" push\n", repo)
-			if preHead == "<unborn>" {
-				fmt.Fprintln(stderr, "allod: to undo: reclone or manually remove the newly created history")
-			} else {
-				fmt.Fprintf(stderr, "allod: to undo: git -C \"%s\" reset --hard %s\n", repo, preHead)
-			}
-			exit(1)
-		}
-	} else {
-		fmt.Fprintln(stdout, "allod: run git push to publish applied patches")
-	}
+	fmt.Fprintln(stdout, "allod: run git push to publish applied patches")
 }
 
 func isDirectory(path string) bool {
@@ -778,7 +757,7 @@ func captureExit(fn func()) (code int) {
 
 func patchReceive(args []string) {
 	target, destination, base := "", "", ""
-	baseSet, push := false, false
+	baseSet := false
 	for len(args) > 0 {
 		switch args[0] {
 		case "--base":
@@ -787,8 +766,6 @@ func patchReceive(args []string) {
 				die(1, "--base cannot be empty")
 			}
 			base, baseSet, args = args[1], true, args[2:]
-		case "--push":
-			push, args = true, args[1:]
 		case "-h", "--help":
 			fmt.Fprint(stdout, patchUsageText)
 			return
@@ -812,7 +789,7 @@ func patchReceive(args []string) {
 	if destination == "" {
 		die(1, "patch receive requires <destination-repo>")
 	}
-	destination = resolvePatchDestination(destination)
+	destination = resolvePatchDestinationArg(destination)
 	parent, err := makeTempDir("/tmp", "allod-patch-receive.", 10)
 	if err != nil {
 		die(1, "could not create receive directory")
@@ -832,9 +809,6 @@ func patchReceive(args []string) {
 		exit(fetchStatus)
 	}
 	applyArgs := []string{artifact, "--repo", destination}
-	if push {
-		applyArgs = append(applyArgs, "--push")
-	}
 	applyStatus := captureExit(func() { patchApply(applyArgs) })
 	fmt.Fprintf(stdout, "allod: artifact dir: %s\n", artifact)
 	if applyStatus != 0 {

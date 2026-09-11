@@ -201,21 +201,9 @@ func resolveSecretsCheckout(arg string) string {
 
 func secretsCheckoutRelative() string {
 	const fallback = "allod/secrets"
-	data, err := os.ReadFile(filepath.Join(workDir(), "allod", "inventory", "scripts", "repositories.json"))
-	if err != nil {
-		return fallback
-	}
-	var registry struct {
-		Repositories map[string]struct {
-			Checkout string `json:"checkout"`
-		} `json:"repositories"`
-	}
-	if json.Unmarshal(data, &registry) != nil {
-		return fallback
-	}
 	for _, alias := range []string{"secrets", "allod/secrets"} {
-		if entry, ok := registry.Repositories[alias]; ok && entry.Checkout != "" {
-			return entry.Checkout
+		if checkout, ok := registryCheckout(alias); ok {
+			return checkout
 		}
 	}
 	return fallback

@@ -144,4 +144,28 @@ Commands:
   fetch    Fetch patches from a remote source repo via SSH
   apply    Apply fetched patches to a local destination repo
   receive  Fetch and apply patches in one step
+
+  allod patch fetch <ssh-host>:<source-repo> [--base <ref>] [--output <dir>]
+  allod patch apply <artifact-dir> [--repo <destination-repo>]
+  allod patch receive <ssh-host>:<source-repo> <destination-repo> [--base <ref>]
+
+'--base <ref>' sets the base ref for the patch range (default: source branch
+upstream, same-named origin branch, or origin default branch; if none
+exists, export from root).
+'--output <dir>' sets the local directory for a fetched artifact (default:
+auto-generated in /tmp).
+'--repo <destination-repo>' sets the apply destination (default: current
+directory).
+
+Repo arguments: a <destination-repo> (and apply's --repo) that is absolute
+or begins with '~', '.', or '..' is a path; anything else is looked up in
+the repository registry first and, when no entry matches, treated as a
+relative path. A <source-repo> is stricter, since it names a path on the
+SOURCE machine: only an absolute path there, a '~/'-prefixed path there, or
+a registry id is accepted, because a path relative to a remote working
+directory has no meaning over SSH; anything else fails with "source repo
+must be an absolute path or a registry id". A registry-id source is sent to
+the remote as work/<checkout> and resolved against that machine's own
+$HOME, so it relies on the source checkout living at ~/work/<checkout>
+there; a source machine with a different WORK_DIR must be named by path.
 `

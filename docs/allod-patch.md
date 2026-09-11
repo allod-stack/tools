@@ -24,25 +24,36 @@ The whitespace check is `git diff --check` over the export range, run on the sou
 Apply fetched patches to a local destination repo.
 
 ```
-allod patch apply <artifact-dir> [--repo <destination-repo>] [--push]
+allod patch apply <artifact-dir> [--repo <destination-repo>]
 ```
 
 - `--repo <path>` - Destination repo (default: current directory)
-- `--push` - Push after successful apply
 
 Validates the manifest and checksums, verifies the destination repo matches the source's origin URL, and applies patches with `git am --3way`. Common equivalent remote URL forms such as `https://github.com/org/repo.git`, `git@github.com:org/repo.git`, and `ssh://git@github.com/org/repo.git` are normalized before comparison. Root exports can only be applied to an empty destination history; if a root-export source has no `origin`, the remote identity check is skipped only for that empty-destination bootstrap case.
 
-After `git am`, the same `git diff --check` runs over the applied range. Because `fetch` already refuses a range that fails it, this only fires for an artifact that did not come through `fetch`. It reports the offending lines on stderr and does not fail: the applied commits stay applied and `--push` still runs.
+After `git am`, the same `git diff --check` runs over the applied range. Because `fetch` already refuses a range that fails it, this only fires for an artifact that did not come through `fetch`. It reports the offending lines on stderr and does not fail: the applied commits stay applied, and the human pushes.
 
 ### receive
 
 Fetch and apply patches in one step.
 
 ```
-allod patch receive <ssh-host>:<source-repo> <destination-repo> [--base <ref>] [--push]
+allod patch receive <ssh-host>:<source-repo> <destination-repo> [--base <ref>]
 ```
 
 Runs `fetch` then `apply`. The artifact directory is preserved after both success and failure for inspection.
+
+## Repo arguments
+
+`<destination-repo>` and `apply --repo`'s value each accept either a filesystem path or a repository-registry id such as `allod/memory`: a repo argument that is absolute or begins with `~`, `.`, or `..` is a path, and anything else is looked up in the repository registry (`inventory/scripts/repositories.json`) first and, when no entry matches, treated as a relative path.
+
+`<source-repo>` is stricter, because it names a path on the *source* machine, not the one running `fetch` or `receive`: it accepts an absolute path there, a `~/`-prefixed path there, or a registry id, and nothing else — a path relative to a remote working directory has no meaning over SSH. A source value that is none of those (a bare relative path that is not a registry id, for example) fails with `source repo must be an absolute path or a registry id: <value>`.
+
+A registry-id source is sent to the remote host as `work/<checkout>` and resolved there against that machine's own `$HOME`, so it depends on the source machine keeping its checkout at `~/work/<checkout>`, the layout `vm-provisioning.md` ("Checkout Paths Are Load-Bearing") requires; a source machine that sets a different `WORK_DIR` must be named by path instead of by id.
+
+This lets a relay command such as `allod patch receive <host>:allod/memory allod/memory` resolve both ends through the registry, so neither the agent composing the command nor the human running it needs to know where the other side's checkout lives.
+
+An id that resolves to the wrong clone is not a silent misapply: `apply`'s origin-URL identity check (exit 13, below) still runs against whatever directory the id names, so a stale or wrong registry entry fails there rather than applying into an unrelated repository.
 
 ## Manifest format
 
@@ -84,20 +95,26 @@ Every SSH invocation uses static remote command text. Dynamic values (source rep
 
 ## Examples
 
-Fetch patches from a dev VM:
+Fetch patches from a dev VM, naming the source repo by its registry id:
 
 ```sh
-allod patch fetch devvm:/home/user/work/myrepo
+allod patch fetch devvm:allod/memory
 ```
 
-Apply fetched patches:
+Apply fetched patches, naming the destination by its registry id:
 
 ```sh
-allod patch apply /tmp/allod-patch.abcdefghij --repo ~/work/myrepo --push
+allod patch apply /tmp/allod-patch.abcdefghij --repo allod/memory
 ```
 
-One-step fetch and apply:
+One-step fetch and apply, both ends by registry id:
 
 ```sh
-allod patch receive devvm:/home/user/work/myrepo ~/work/myrepo --push
+allod patch receive devvm:allod/memory allod/memory
+```
+
+A path still works on either side:
+
+```sh
+allod patch receive devvm:~/work/allod/memory ~/work/allod/memory
 ```

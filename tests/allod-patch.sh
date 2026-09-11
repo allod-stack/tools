@@ -291,6 +291,26 @@ EOF
   printf '%s:%s:%s\n' "$bin" "$MOCK_BIN" "$PATH"
 }
 
+# --- Repository registry ---
+
+# write_registry <id> <checkout> [<id> <checkout> ...] writes
+# $HOME/work/allod/inventory/scripts/repositories.json with one entry per
+# pair. HOME is $TMP/home and WORK_DIR is unset here, so workDir() is
+# $HOME/work and each checkout is a plain directory name under it.
+write_registry() {
+  mkdir -p "$HOME/work/allod/inventory/scripts"
+  local json='{}'
+  while [[ $# -gt 0 ]]; do
+    json=$(printf '%s' "$json" | jq --arg id "$1" --arg checkout "$2" '. + {($id): {checkout: $checkout}}')
+    shift 2
+  done
+  printf '%s' "$json" | jq '{repositories: .}' > "$HOME/work/allod/inventory/scripts/repositories.json"
+}
+
+clear_registry() {
+  rm -f "$HOME/work/allod/inventory/scripts/repositories.json"
+}
+
 # ================================================================
 # CLI routing tests
 # ================================================================
@@ -393,7 +413,9 @@ assert_status 1 "fetch empty source repo exits 1"
 reset_mock_ssh
 capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:relative/path"
 assert_status 1 "fetch relative source repo exits 1"
-assert_contains "$CAPTURE_OUTPUT" "absolute path" "fetch relative repo message"
+assert_contains "$CAPTURE_OUTPUT" "source repo must be an absolute path or a registry id: relative/path" \
+  "fetch relative repo message"
+assert_equal "$(get_ssh_call_count)" "0" "fetch relative source repo makes no SSH calls"
 
 reset_mock_ssh
 capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:/repo/with
@@ -783,7 +805,7 @@ assert_status 0 "apply happy path exits 0"
 assert_contains "$CAPTURE_OUTPUT" "applied 1 patch" "apply reports patch count"
 post_head=$(git -C "$dest_repo" rev-parse HEAD)
 [[ "$post_head" != "$pre_head" ]] && pass "apply advances HEAD" || fail "apply advances HEAD"
-assert_contains "$CAPTURE_OUTPUT" "git push" "apply without --push shows push reminder"
+assert_contains "$CAPTURE_OUTPUT" "git push" "apply shows push reminder"
 
 # Verify content was applied
 applied_content=$(cat "$dest_repo/tracked.txt")
@@ -1219,29 +1241,7 @@ capture "$ALLOD" patch apply "$artifact" --repo "$dest_repo_ahead"
 assert_status 0 "apply with destination ahead of base exits 0"
 rm -rf "$artifact"
 
-# --- --push via mock git ---
-source_repo="$TMP/repos/apply-push-source"
-init_repo "$source_repo" master
-add_commit "$source_repo" "push test"
-
-dest_repo_push="$TMP/repos/apply-push-dest"
-clone_repo "$source_repo" "$dest_repo_push"
-
-artifact="$TMP/artifacts/apply-push"
-make_artifact "$source_repo" "$artifact"
-
-push_log="$TMP/push-apply.log"
-: > "$push_log"
-export REAL_GIT GIT_PUSH_LOG="$push_log"
-mock_git_path=$(make_mock_git_path apply-push)
-
-capture_with_path "$mock_git_path" "$ALLOD" patch apply "$artifact" --repo "$dest_repo_push" --push
-assert_status 0 "apply --push exits 0"
-push_calls=$(cat "$push_log")
-assert_contains "$push_calls" "push" "apply --push calls git push"
-rm -rf "$artifact"
-
-# --- Without --push: no git push ---
+# --- apply never calls git push ---
 source_repo="$TMP/repos/apply-nopush-source"
 init_repo "$source_repo" master
 add_commit "$source_repo" "no push test"
@@ -1254,15 +1254,20 @@ make_artifact "$source_repo" "$artifact"
 
 push_log="$TMP/push-nopush.log"
 : > "$push_log"
-export GIT_PUSH_LOG="$push_log"
+export REAL_GIT GIT_PUSH_LOG="$push_log"
 mock_git_path=$(make_mock_git_path apply-nopush)
 
 capture_with_path "$mock_git_path" "$ALLOD" patch apply "$artifact" --repo "$dest_repo_nopush"
-assert_status 0 "apply without --push exits 0"
+assert_status 0 "apply exits 0"
 push_calls=$(cat "$push_log")
-[[ -z "$push_calls" ]] && pass "apply without --push does not call git push" || \
-  fail "apply without --push does not call git push" "$push_calls"
+[[ -z "$push_calls" ]] && pass "apply does not call git push" || \
+  fail "apply does not call git push" "$push_calls"
 rm -rf "$artifact"
+
+# --- --push is rejected as an unknown option ---
+capture "$ALLOD" patch apply "$artifact" --repo "$dest_repo_nopush" --push
+assert_status 1 "apply --push exits 1"
+assert_contains "$CAPTURE_OUTPUT" "unknown option for patch apply: --push" "apply --push is rejected"
 
 # --- Multiple patches ---
 source_repo="$TMP/repos/apply-multi-source"
@@ -1289,7 +1294,8 @@ rm -rf "$artifact"
 
 # --- Post-apply whitespace report ---
 # fetch refuses a range that fails git diff --check, so an artifact carrying
-# one is built by hand here. apply reports it, keeps the commits, and pushes.
+# one is built by hand here. apply reports it, and the commits stay applied
+# for the human to push.
 source_repo="$TMP/repos/apply-whitespace-source"
 init_repo "$source_repo" master
 printf 'trailing whitespace   \n' > "$source_repo/tracked.txt"
@@ -1313,7 +1319,7 @@ jq -n \
   > "$artifact/manifest.json"
 
 pre_head=$(git -C "$dest_repo_ws" rev-parse HEAD)
-capture "$ALLOD" patch apply "$artifact" --repo "$dest_repo_ws" --push
+capture "$ALLOD" patch apply "$artifact" --repo "$dest_repo_ws"
 assert_status 0 "apply whitespace report exits 0"
 assert_contains "$CAPTURE_OUTPUT" "applied 1 patch" "apply whitespace report still reports the apply"
 assert_contains "$CAPTURE_OUTPUT" "git diff --check" "apply whitespace report names the check"
@@ -1322,33 +1328,6 @@ assert_not_contains "$CAPTURE_OUTPUT" "reset --hard" "apply whitespace report of
 post_head=$(git -C "$dest_repo_ws" rev-parse HEAD)
 [[ "$post_head" != "$pre_head" ]] && pass "apply whitespace report keeps applied commits" || \
   fail "apply whitespace report keeps applied commits"
-pushed_head=$(git -C "$dest_repo_ws" rev-parse origin/master)
-assert_equal "$pushed_head" "$post_head" "apply whitespace report still pushes"
-rm -rf "$artifact"
-
-# --- --push failure ---
-source_repo="$TMP/repos/apply-push-fail-source"
-init_repo "$source_repo" master
-add_commit "$source_repo" "push fail test"
-
-dest_repo_pf="$TMP/repos/apply-push-fail-dest"
-clone_repo "$source_repo" "$dest_repo_pf"
-# Break the actual bare remote so push fails without changing the URL
-remote_url=$(git -C "$dest_repo_pf" remote get-url origin)
-rm -rf "$remote_url"
-
-artifact="$TMP/artifacts/apply-push-fail"
-make_artifact "$source_repo" "$artifact"
-
-capture "$ALLOD" patch apply "$artifact" --repo "$dest_repo_pf" --push
-assert_status 1 "apply --push failure exits 1"
-assert_contains "$CAPTURE_OUTPUT" "push failed" "apply push failure message"
-assert_contains "$CAPTURE_OUTPUT" "pre-apply HEAD" "apply push failure shows pre-apply HEAD"
-# Commits should still be in place
-post_head=$(git -C "$dest_repo_pf" rev-parse HEAD)
-pre_head=$(git -C "$dest_repo_pf" rev-parse HEAD~1)
-[[ "$post_head" != "$pre_head" ]] && pass "apply push failure keeps applied commits" || \
-  fail "apply push failure keeps applied commits"
 rm -rf "$artifact"
 
 # ================================================================
@@ -1540,25 +1519,116 @@ capture_with_path "$MOCK_PATH" "$ALLOD" patch receive "testhost:$source_repo" "$
 assert_status 13 "receive propagates apply failure exit code (13 for mismatch)"
 assert_contains "$CAPTURE_OUTPUT" "artifact dir:" "receive prints artifact dir on apply failure"
 
-# --- --push passthrough ---
-source_repo="$TMP/repos/receive-push-source"
-init_repo "$source_repo" master
-add_commit "$source_repo" "push passthrough"
+# --- --push is rejected as an unknown option ---
+capture "$ALLOD" patch receive "testhost:$source_repo" "$dest_repo_af" --push
+assert_status 1 "receive --push exits 1"
+assert_contains "$CAPTURE_OUTPUT" "unknown option for patch receive: --push" "receive --push is rejected"
 
-dest_repo_rp="$TMP/repos/receive-push-dest"
-clone_repo "$source_repo" "$dest_repo_rp"
+# ================================================================
+# registry id resolution tests
+# ================================================================
 
-push_log="$TMP/push-receive.log"
-: > "$push_log"
-export REAL_GIT GIT_PUSH_LOG="$push_log"
-mock_git_path=$(make_mock_git_path receive-push)
-combined_path="${mock_git_path%%:*}:$MOCK_PATH"
+# --- receive: registry-id source and registry-id destination ---
+reg_source="$HOME/work/registry-source-checkout"
+init_repo "$reg_source" master
+add_commit "$reg_source" "registry receive change" "registry receive content"
+
+reg_dest="$HOME/work/registry-dest-checkout"
+clone_repo "$reg_source" "$reg_dest"
+
+write_registry "registry/source" "registry-source-checkout" "registry/dest" "registry-dest-checkout"
 
 reset_mock_ssh
-capture_with_path "$combined_path" "$ALLOD" patch receive "testhost:$source_repo" "$dest_repo_rp" --push
-assert_status 0 "receive --push exits 0"
-push_calls=$(cat "$push_log")
-assert_contains "$push_calls" "push" "receive --push triggers git push"
+capture_with_path "$MOCK_PATH" "$ALLOD" patch receive "testhost:registry/source" "registry/dest"
+assert_status 0 "receive with registry-id source and destination exits 0"
+recv_content=$(cat "$reg_dest/tracked.txt")
+assert_equal "$recv_content" "registry receive content" \
+  "receive registry ids apply to the registry checkout"
+clear_registry
+
+# --- apply --repo <id> resolves to the registry checkout ---
+reg_apply_source="$HOME/work/registry-apply-source"
+init_repo "$reg_apply_source" master
+add_commit "$reg_apply_source" "registry apply change" "registry apply content"
+
+reg_apply_dest="$HOME/work/registry-apply-dest"
+clone_repo "$reg_apply_source" "$reg_apply_dest"
+
+artifact="$TMP/artifacts/registry-apply"
+make_artifact "$reg_apply_source" "$artifact"
+
+write_registry "registry/apply-dest" "registry-apply-dest"
+capture "$ALLOD" patch apply "$artifact" --repo "registry/apply-dest"
+assert_status 0 "apply --repo <id> exits 0"
+applied_content=$(cat "$reg_apply_dest/tracked.txt")
+assert_equal "$applied_content" "registry apply content" \
+  "apply --repo <id> resolves to the registry checkout"
+clear_registry
+rm -rf "$artifact"
+
+# --- fetch with a registry-id source ---
+reg_fetch_source="$HOME/work/registry-fetch-source"
+init_repo "$reg_fetch_source" master
+add_commit "$reg_fetch_source" "registry fetch change"
+
+write_registry "registry/fetch-source" "registry-fetch-source"
+
+reset_mock_ssh
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:registry/fetch-source"
+assert_status 0 "fetch with a registry-id source exits 0"
+assert_contains "$CAPTURE_OUTPUT" "fetched 1 patch" "fetch registry-id source reports patch count"
+fetch_artifact=$(printf '%s' "$CAPTURE_OUTPUT" | grep 'artifact dir:' | sed 's/.*artifact dir: //')
+rm -rf "$fetch_artifact"
+clear_registry
+
+# --- destination: neither a registry id nor a directory ---
+artifact="$TMP/artifacts/registry-neither"
+make_artifact "$reg_apply_source" "$artifact"
+capture "$ALLOD" patch apply "$artifact" --repo "no/such-registry-id"
+assert_status 1 "apply --repo with an unknown id and no directory exits 1"
+assert_contains "$CAPTURE_OUTPUT" "neither a registry id nor a directory: no/such-registry-id" \
+  "apply --repo unknown id names both readings"
+rm -rf "$artifact"
+
+# --- safety: a registry id whose checkout is a clone of a different repo ---
+reg_mismatch_source="$HOME/work/registry-mismatch-source"
+init_repo "$reg_mismatch_source" master
+add_commit "$reg_mismatch_source" "registry mismatch change"
+
+other_repo="$HOME/work/registry-mismatch-other"
+init_repo "$other_repo" master
+
+reg_mismatch_dest="$HOME/work/registry-mismatch-dest"
+clone_repo "$other_repo" "$reg_mismatch_dest"
+mismatch_head=$(git -C "$reg_mismatch_dest" rev-parse HEAD)
+
+write_registry "registry/mismatch-source" "registry-mismatch-source" \
+  "registry/mismatch-dest" "registry-mismatch-dest"
+
+reset_mock_ssh
+capture_with_path "$MOCK_PATH" "$ALLOD" patch receive "testhost:registry/mismatch-source" "registry/mismatch-dest"
+assert_status 13 "receive with a mismatched registry-id destination exits 13"
+assert_contains "$CAPTURE_OUTPUT" "repo identity mismatch" \
+  "receive registry mismatch names identity mismatch"
+assert_equal "$(git -C "$reg_mismatch_dest" rev-parse HEAD)" "$mismatch_head" \
+  "receive registry mismatch applies nothing"
+clear_registry
+
+# --- destination: "./relative" path form still works, bypassing the registry ---
+reldir_parent="$TMP/repos/relative-dest-parent"
+mkdir -p "$reldir_parent"
+rel_dest="$reldir_parent/relative-dest-repo"
+clone_repo "$reg_apply_source" "$rel_dest"
+
+artifact="$TMP/artifacts/relative-dest"
+make_artifact "$reg_apply_source" "$artifact"
+
+capture bash -c "cd '$reldir_parent' && '$ALLOD' patch apply '$artifact' --repo './relative-dest-repo'"
+assert_status 0 "apply --repo ./relative destination path still works"
+applied_content=$(cat "$rel_dest/tracked.txt")
+assert_equal "$applied_content" "registry apply content" \
+  "apply --repo ./relative destination path applies patches"
+rm -rf "$artifact"
 
 # ================================================================
 # Additional validation tests (review findings)

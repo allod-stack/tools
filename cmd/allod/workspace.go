@@ -64,6 +64,74 @@ func resolvePatchDestination(input string) string {
 	return top
 }
 
+// isPatchRepoPath reports whether a patch repo argument must be read as a
+// filesystem path rather than a repository-registry id: absolute, or
+// beginning with ~, ., or .. — the rule stated in patchUsageText.
+func isPatchRepoPath(value string) bool {
+	return filepath.IsAbs(value) || strings.HasPrefix(value, "~") || strings.HasPrefix(value, ".")
+}
+
+// expandUserHome expands a leading ~ to $HOME for a literal tilde that
+// reached the program unexpanded (an interactive shell would already have
+// expanded it). Any other leading-~ form (~otheruser/...) is left alone and
+// fails the directory check as it would today.
+func expandUserHome(value string) string {
+	if value == "~" {
+		return homeDir()
+	}
+	if strings.HasPrefix(value, "~/") {
+		return filepath.Join(homeDir(), strings.TrimPrefix(value, "~/"))
+	}
+	return value
+}
+
+// resolvePatchDestinationArg resolves a receive/apply destination argument,
+// disambiguating a registry id from a path per patchUsageText's rule. A path
+// form behaves exactly as resolvePatchDestination always has; a value that
+// is neither a path form nor a registry id falls back to the existing
+// relative-path handling, so an ordinary relative clone path still works.
+func resolvePatchDestinationArg(input string) string {
+	if input == "" || isPatchRepoPath(input) {
+		return resolvePatchDestination(expandUserHome(input))
+	}
+	if checkout, ok := registryCheckout(input); ok {
+		return resolvePatchDestination(filepath.Join(workDir(), checkout))
+	}
+	if info, err := os.Stat(input); err != nil || !info.IsDir() {
+		fmt.Fprintf(stderr, "allod: destination is neither a registry id nor a directory: %s\n", input)
+		fmt.Fprintln(stderr, "allod: while resolving: <destination-repo>")
+		fmt.Fprintln(stderr, "allod: to fix: pass a registry id from inventory/scripts/repositories.json or an existing clone path for the repository that should receive the patches")
+		exit(1)
+	}
+	return resolvePatchDestination(input)
+}
+
+// resolvePatchSourceArg resolves a fetch/receive source repo argument on the
+// LOCAL machine — the registry is the same tracked file on every machine,
+// and vm-provisioning.md requires every machine to check out at
+// $HOME/work/<checkout> — into the value sent to the remote host: an
+// absolute path as-is, or a path relative to the remote's own $HOME, which
+// remoteGenerateScript resolves against its own $HOME since this process
+// cannot see the remote's.
+func resolvePatchSourceArg(sourceRepo string) string {
+	if filepath.IsAbs(sourceRepo) {
+		return sourceRepo
+	}
+	if sourceRepo == "~" {
+		return ""
+	}
+	if strings.HasPrefix(sourceRepo, "~/") {
+		return strings.TrimPrefix(sourceRepo, "~/")
+	}
+	if !isPatchRepoPath(sourceRepo) {
+		if checkout, ok := registryCheckout(sourceRepo); ok {
+			return workRelative + "/" + checkout
+		}
+	}
+	die(1, "source repo must be an absolute path or a registry id: %s", sourceRepo)
+	return ""
+}
+
 func mainRepoDir(dir string) string {
 	common, ok := gitOutput(dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
 	if !ok {

@@ -92,8 +92,15 @@ func workDir() string {
 	if value := os.Getenv("WORK_DIR"); value != "" {
 		return strings.TrimRight(value, "/")
 	}
-	return filepath.Join(homeDir(), "work")
+	return filepath.Join(homeDir(), workRelative)
 }
+
+// workRelative is the path, relative to $HOME, that vm-provisioning.md
+// requires every machine's checkouts to live under. The repository
+// registry's "checkout" values are relative to this directory on every
+// machine, including a remote host whose own WORK_DIR this process cannot
+// see.
+const workRelative = "work"
 
 func readValue(source string) string {
 	var data []byte
