@@ -43,6 +43,12 @@ allod patch receive <ssh-host>:<source-repo> <destination-repo> [--base <ref>]
 
 Runs `fetch` then `apply`. The artifact directory is preserved after both success and failure for inspection.
 
+## Repo arguments
+
+`<source-repo>` and `<destination-repo>` (and `apply --repo`'s value) each accept either a filesystem path or a repository-registry id such as `allod/memory`. A repo argument that is absolute or begins with `~`, `.`, or `..` is a path. Anything else is looked up in the repository registry (`inventory/scripts/repositories.json`) first and, when no entry matches, treated as a relative path. This lets a relay command such as `allod patch receive <host>:allod/memory allod/memory` resolve both ends through the registry, so neither the agent composing the command nor the human running it needs to know where the other side's checkout lives.
+
+An id that resolves to the wrong clone is not a silent misapply: `apply`'s origin-URL identity check (exit 13, below) still runs against whatever directory the id names, so a stale or wrong registry entry fails there rather than applying into an unrelated repository.
+
 ## Manifest format
 
 ```json
@@ -83,20 +89,26 @@ Every SSH invocation uses static remote command text. Dynamic values (source rep
 
 ## Examples
 
-Fetch patches from a dev VM:
+Fetch patches from a dev VM, naming the source repo by its registry id:
 
 ```sh
-allod patch fetch devvm:/home/user/work/myrepo
+allod patch fetch devvm:allod/memory
 ```
 
-Apply fetched patches:
+Apply fetched patches, naming the destination by its registry id:
 
 ```sh
-allod patch apply /tmp/allod-patch.abcdefghij --repo ~/work/myrepo
+allod patch apply /tmp/allod-patch.abcdefghij --repo allod/memory
 ```
 
-One-step fetch and apply:
+One-step fetch and apply, both ends by registry id:
 
 ```sh
-allod patch receive devvm:/home/user/work/myrepo ~/work/myrepo
+allod patch receive devvm:allod/memory allod/memory
+```
+
+A path still works on either side:
+
+```sh
+allod patch receive devvm:~/work/allod/memory ~/work/allod/memory
 ```

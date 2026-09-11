@@ -144,4 +144,21 @@ Commands:
   fetch    Fetch patches from a remote source repo via SSH
   apply    Apply fetched patches to a local destination repo
   receive  Fetch and apply patches in one step
+
+  allod patch fetch <ssh-host>:<source-repo> [--base <ref>] [--output <dir>]
+  allod patch apply <artifact-dir> [--repo <destination-repo>]
+  allod patch receive <ssh-host>:<source-repo> <destination-repo> [--base <ref>]
+
+'--base <ref>' sets the base ref for the patch range (default: source branch
+upstream, same-named origin branch, or origin default branch; if none
+exists, export from root).
+'--output <dir>' sets the local directory for a fetched artifact (default:
+auto-generated in /tmp).
+'--repo <destination-repo>' sets the apply destination (default: current
+directory).
+
+Repo arguments (<source-repo> and <destination-repo>): a repo argument that
+is absolute or begins with '~', '.', or '..' is a path. Anything else is
+looked up in the repository registry first and, when no entry matches,
+treated as a relative path.
 `

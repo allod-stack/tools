@@ -50,6 +50,7 @@ base=$(printf '%s' "$b64_base" | base64 -d)
 base_set=$(printf '%s' "$b64_base_set" | base64 -d)
 case "$repo" in *"
 "*) printf 'allod: source repo path contains newline\n' >&2; exit 1 ;; esac
+case "$repo" in /*) ;; *) repo="$HOME/$repo" ;; esac
 case "$base" in *"
 "*) printf 'allod: base ref contains newline\n' >&2; exit 1 ;; esac
 case "$base_set" in true|false) ;; *) printf 'allod: invalid base mode\n' >&2; exit 1 ;; esac
@@ -279,12 +280,10 @@ func patchFetch(args []string) {
 	if sourceRepo == "" {
 		die(1, "empty source repo path in target")
 	}
-	if !filepath.IsAbs(sourceRepo) {
-		die(1, "source repo must be an absolute path: %s", sourceRepo)
-	}
 	if strings.Contains(sourceRepo, "\n") {
 		die(1, "source repo path must not contain newlines")
 	}
+	remoteSourceRepo := resolvePatchSourceArg(sourceRepo)
 	if strings.Contains(base, "\n") {
 		die(1, "--base value must not contain newlines")
 	}
@@ -317,7 +316,7 @@ func patchFetch(args []string) {
 	if baseSet {
 		baseMode = "true"
 	}
-	generateInput := encoded(sourceRepo) + "\n" + encoded(base) + "\n" + encoded(baseMode) + "\n"
+	generateInput := encoded(remoteSourceRepo) + "\n" + encoded(base) + "\n" + encoded(baseMode) + "\n"
 	remoteDir, status := sshCapture(host, remoteGenerateScript, generateInput)
 	if status != 0 {
 		if status == 10 || status == 11 || status == 17 {
@@ -649,7 +648,7 @@ func patchApply(args []string) {
 	if actualCount != manifest.PatchCount {
 		die(12, "unlisted .patch files in artifact directory")
 	}
-	repo := resolvePatchDestination(repoPath)
+	repo := resolvePatchDestinationArg(repoPath)
 	if dirty, _ := gitOutput(repo, "status", "--porcelain"); dirty != "" {
 		fmt.Fprintln(stderr, "allod: destination worktree is dirty; commit or stash changes before apply")
 		exit(16)
@@ -790,7 +789,7 @@ func patchReceive(args []string) {
 	if destination == "" {
 		die(1, "patch receive requires <destination-repo>")
 	}
-	destination = resolvePatchDestination(destination)
+	destination = resolvePatchDestinationArg(destination)
 	parent, err := makeTempDir("/tmp", "allod-patch-receive.", 10)
 	if err != nil {
 		die(1, "could not create receive directory")
