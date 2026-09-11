@@ -67,7 +67,7 @@ func issueList(args []string) {
 	}
 	requireRepo()
 
-	path := "/repos/" + repoOpt + "/issues?type=issues&state=" + state + "&limit=" + limit
+	path := "/repos/" + repoOpt + "/issues?type=issues&state=" + state
 	if len(labels) > 0 {
 		path += "&labels=" + jqURI(joinCSVValues(labels))
 	}
@@ -78,7 +78,11 @@ func issueList(args []string) {
 		path += "&q=" + jqURI(search)
 	}
 
-	items := jsonArray(mustJSON(api("GET", path, nil)))
+	// -L/--limit is honored exactly as before (default 30, unbounded pages
+	// otherwise would ignore it), but now enough pages are fetched to reach
+	// it rather than trusting one request to carry the whole limit
+	// (allod/tools#89).
+	items := fetchPages(path, limitCount(limit))
 	if len(items) == 0 {
 		if state == "open" {
 			fmt.Fprintf(stdout, "No open issues in %s\n", repoOpt)

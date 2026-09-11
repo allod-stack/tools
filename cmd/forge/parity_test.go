@@ -346,7 +346,7 @@ func TestCapturedFieldsAreChomped(t *testing.T) {
 	// a trailing newline disappears instead of becoming a trailing space.
 	t.Run("api error message", func(t *testing.T) {
 		srv := newRecordingServer(t, map[string]cannedResponse{
-			"/api/v1/repos/acme/widget/issues?type=issues&state=open&limit=30": {
+			"/api/v1/repos/acme/widget/issues?type=issues&state=open&limit=30&page=1": {
 				Status: 400, Body: "{\"message\":\"bad\\n\"}",
 			},
 		})
@@ -355,7 +355,7 @@ func TestCapturedFieldsAreChomped(t *testing.T) {
 		useNoInferRepo(t)
 
 		_, errText, code := runForge(t, "-R", "acme/widget", "issue", "list")
-		want := "forge: GET /repos/acme/widget/issues?type=issues&state=open&limit=30 failed: HTTP 400: bad\n"
+		want := "forge: GET /repos/acme/widget/issues?type=issues&state=open&limit=30&page=1 failed: HTTP 400: bad\n"
 		if errText != want || code != 22 {
 			t.Errorf("stderr = %q (exit %d), want %q", errText, code, want)
 		}
@@ -367,7 +367,7 @@ func TestCapturedFieldsAreChomped(t *testing.T) {
 	// this body.
 	t.Run("a newline-only message falls back to the raw body", func(t *testing.T) {
 		srv := newRecordingServer(t, map[string]cannedResponse{
-			"/api/v1/repos/acme/widget/issues?type=issues&state=open&limit=30": {
+			"/api/v1/repos/acme/widget/issues?type=issues&state=open&limit=30&page=1": {
 				Status: 400, Body: "{\"message\":\"\\n\"}",
 			},
 		})
@@ -376,7 +376,7 @@ func TestCapturedFieldsAreChomped(t *testing.T) {
 		useNoInferRepo(t)
 
 		_, errText, _ := runForge(t, "-R", "acme/widget", "issue", "list")
-		want := "forge: GET /repos/acme/widget/issues?type=issues&state=open&limit=30 failed: HTTP 400: " +
+		want := "forge: GET /repos/acme/widget/issues?type=issues&state=open&limit=30&page=1 failed: HTTP 400: " +
 			`{"message":"\n"}` + "\n"
 		if errText != want {
 			t.Errorf("stderr = %q, want %q", errText, want)

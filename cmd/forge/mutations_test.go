@@ -165,10 +165,10 @@ func TestMutations(t *testing.T) {
 		"POST /api/v1/repos/acme/gadget/issues": {Body: `{"html_url":"https://forge.example/acme/gadget/issues/21"}`},
 
 		// issue create / edit / comment / labels / milestone
-		"POST /api/v1/repos/acme/widget/issues":                                          {Body: `{"html_url":"https://forge.example/acme/widget/issues/20"}`},
-		"GET /api/v1/repos/acme/widget/labels?limit=100":                                 mustBody(t, []any{bugLabel, triageLabel}),
-		"GET /api/v1/repos/acme/widget/milestones?state=all&name=July%20batch&limit=100": mustBody(t, []any{julyBatch}),
-		"PATCH /api/v1/repos/acme/widget/issues/20":                                      {Body: `{"html_url":"https://forge.example/acme/widget/issues/20"}`},
+		"POST /api/v1/repos/acme/widget/issues":                                                {Body: `{"html_url":"https://forge.example/acme/widget/issues/20"}`},
+		"GET /api/v1/repos/acme/widget/labels?limit=50&page=1":                                 mustBody(t, []any{bugLabel, triageLabel}),
+		"GET /api/v1/repos/acme/widget/milestones?state=all&name=July%20batch&limit=50&page=1": mustBody(t, []any{julyBatch}),
+		"PATCH /api/v1/repos/acme/widget/issues/20":                                            {Body: `{"html_url":"https://forge.example/acme/widget/issues/20"}`},
 		"GET /api/v1/repos/acme/widget/issues/20": {
 			Body: `{"html_url":"https://forge.example/acme/widget/issues/20","title":"Fix backup","state":"open","body":"Issue body","user":{"login":"bob"},"labels":[{"id":1,"name":"bug","color":"ff0000"}],"milestone":{"id":3,"title":"July batch"}}`,
 		},
@@ -268,8 +268,8 @@ func TestMutations(t *testing.T) {
 
 	t.Run("issue create resolves labels and milestone first", func(t *testing.T) {
 		assertScenario(t, srv, []expReq{
-			{"GET", "/api/v1/repos/acme/widget/labels?limit=100", nil},
-			{"GET", "/api/v1/repos/acme/widget/milestones?state=all&name=July%20batch&limit=100", nil},
+			{"GET", "/api/v1/repos/acme/widget/labels?limit=50&page=1", nil},
+			{"GET", "/api/v1/repos/acme/widget/milestones?state=all&name=July%20batch&limit=50&page=1", nil},
 			{"POST", "/api/v1/repos/acme/widget/issues", map[string]any{
 				"title": "Organized issue", "body": "", "labels": []int{1}, "milestone": 3,
 			}},
@@ -300,7 +300,7 @@ func TestMutations(t *testing.T) {
 
 	t.Run("issue edit resolves milestone before updating", func(t *testing.T) {
 		assertScenario(t, srv, []expReq{
-			{"GET", "/api/v1/repos/acme/widget/milestones?state=all&name=July%20batch&limit=100", nil},
+			{"GET", "/api/v1/repos/acme/widget/milestones?state=all&name=July%20batch&limit=50&page=1", nil},
 			{"PATCH", "/api/v1/repos/acme/widget/issues/20", map[string]any{"milestone": 3}},
 		}, func() {
 			runOK(t, "issue", "edit", "20", "--milestone", "July batch")
@@ -384,7 +384,7 @@ func TestMutations(t *testing.T) {
 
 	t.Run("issue milestone resolves the title then sets it", func(t *testing.T) {
 		assertScenario(t, srv, []expReq{
-			{"GET", "/api/v1/repos/acme/widget/milestones?state=all&name=July%20batch&limit=100", nil},
+			{"GET", "/api/v1/repos/acme/widget/milestones?state=all&name=July%20batch&limit=50&page=1", nil},
 			{"PATCH", "/api/v1/repos/acme/widget/issues/20", map[string]any{"milestone": 3}},
 		}, func() {
 			runOK(t, "issue", "milestone", "20", "July batch")
@@ -411,7 +411,7 @@ func TestMutations(t *testing.T) {
 
 	t.Run("label create --force updates an existing label", func(t *testing.T) {
 		assertScenario(t, srv, []expReq{
-			{"GET", "/api/v1/repos/acme/widget/labels?limit=100", nil},
+			{"GET", "/api/v1/repos/acme/widget/labels?limit=50&page=1", nil},
 			{"PATCH", "/api/v1/repos/acme/widget/labels/1", map[string]any{
 				"name": "bug", "color": "#0000ff", "description": "Updated",
 			}},
@@ -422,7 +422,7 @@ func TestMutations(t *testing.T) {
 
 	t.Run("label edit resolves name then updates", func(t *testing.T) {
 		assertScenario(t, srv, []expReq{
-			{"GET", "/api/v1/repos/acme/widget/labels?limit=100", nil},
+			{"GET", "/api/v1/repos/acme/widget/labels?limit=50&page=1", nil},
 			{"PATCH", "/api/v1/repos/acme/widget/labels/1", map[string]any{
 				"name": "defect", "color": "#0000ff", "exclusive": true,
 			}},
@@ -433,7 +433,7 @@ func TestMutations(t *testing.T) {
 
 	t.Run("label delete resolves name then deletes", func(t *testing.T) {
 		assertScenario(t, srv, []expReq{
-			{"GET", "/api/v1/repos/acme/widget/labels?limit=100", nil},
+			{"GET", "/api/v1/repos/acme/widget/labels?limit=50&page=1", nil},
 			{"DELETE", "/api/v1/repos/acme/widget/labels/1", nil},
 		}, func() {
 			runOK(t, "label", "delete", "bug", "--yes")
@@ -452,7 +452,7 @@ func TestMutations(t *testing.T) {
 
 	t.Run("milestone edit resolves title then updates state", func(t *testing.T) {
 		assertScenario(t, srv, []expReq{
-			{"GET", "/api/v1/repos/acme/widget/milestones?state=all&name=July%20batch&limit=100", nil},
+			{"GET", "/api/v1/repos/acme/widget/milestones?state=all&name=July%20batch&limit=50&page=1", nil},
 			{"PATCH", "/api/v1/repos/acme/widget/milestones/3", map[string]any{"state": "closed"}},
 		}, func() {
 			runOK(t, "milestone", "edit", "July batch", "-s", "closed")
@@ -461,7 +461,7 @@ func TestMutations(t *testing.T) {
 
 	t.Run("milestone delete resolves title then deletes", func(t *testing.T) {
 		assertScenario(t, srv, []expReq{
-			{"GET", "/api/v1/repos/acme/widget/milestones?state=all&name=July%20batch&limit=100", nil},
+			{"GET", "/api/v1/repos/acme/widget/milestones?state=all&name=July%20batch&limit=50&page=1", nil},
 			{"DELETE", "/api/v1/repos/acme/widget/milestones/3", nil},
 		}, func() {
 			runOK(t, "milestone", "delete", "July batch")

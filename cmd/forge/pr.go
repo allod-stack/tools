@@ -34,7 +34,7 @@ func prList(args []string) {
 		return
 	}
 	state := "open"
-	limit := "50"
+	limit := ""
 
 	for len(args) > 0 {
 		switch args[0] {
@@ -63,9 +63,12 @@ func prList(args []string) {
 	}
 	requireRepo()
 
-	result := mustJSON(api("GET", "/repos/"+repoOpt+"/pulls?state="+state+"&limit="+limit, nil))
+	// -L/--limit bounds the result; without it every page is fetched
+	// (allod/tools#89): a fixed limit=50 silently dropped everything past
+	// the first page as the PR backlog grew.
+	pulls := fetchPages("/repos/"+repoOpt+"/pulls?state="+state, limitCount(limit))
 
-	if jqLengthOf(result) == 0 {
+	if len(pulls) == 0 {
 		switch state {
 		case "open":
 			fmt.Fprintf(stdout, "No open pull requests in %s\n", repoOpt)
@@ -81,7 +84,6 @@ func prList(args []string) {
 	// A tab or a newline inside a title is not escaped by jq, so it reaches
 	// column as a real separator: tabLines builds the text first and
 	// columnTable splits it into cells afterwards, exactly like the pipeline.
-	pulls := jsonArray(result)
 	rows := make([][]string, 0, len(pulls))
 	for _, pr := range pulls {
 		row := []string{
@@ -447,7 +449,9 @@ func prFindByHead(args []string) {
 	requireRepo()
 	headBranch := positionalArgs[0]
 
-	number := prNumberForHead(api("GET", "/repos/"+repoOpt+"/pulls?state=open&limit=50", nil), headBranch)
+	// Every open PR must be seen to rule a head branch out, so this fetches
+	// every page (allod/tools#89).
+	number := prNumberForHead(fetchPages("/repos/"+repoOpt+"/pulls?state=open", 0), headBranch)
 	if number != "" {
 		fmt.Fprintln(stdout, number)
 	}
@@ -490,7 +494,9 @@ func resolvePRTarget(target string) string {
 	}
 
 	requireRepo()
-	number := prNumberForHead(api("GET", "/repos/"+repoOpt+"/pulls?state=open&limit=50", nil), target)
+	// Every page is fetched (allod/tools#89): a branch match past the first
+	// page must still resolve, not be reported as no match.
+	number := prNumberForHead(fetchPages("/repos/"+repoOpt+"/pulls?state=open", 0), target)
 	if number == "" {
 		die("no open PR found for branch: %s", target)
 	}
@@ -619,9 +625,11 @@ func prInlineComment(comment any) string {
 //
 // over a pulls list: the number of the first open PR with that head branch, or
 // "" when there is none — which is also what a null number yields, since the
-// alternative operator swallows it.
-func prNumberForHead(pulls []byte, head string) string {
-	for _, pr := range jsonArray(mustJSON(pulls)) {
+// alternative operator swallows it. pulls is every page fetchPages collected
+// (allod/tools#89), not a single response body, so a match past page one is
+// found the same as a match on page one.
+func prNumberForHead(pulls []any, head string) string {
+	for _, pr := range pulls {
 		if ref, ok := jsonPath(pr, "head", "ref").(string); !ok || ref != head {
 			continue
 		}

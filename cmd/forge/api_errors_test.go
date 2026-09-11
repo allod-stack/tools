@@ -132,7 +132,7 @@ func TestLabelEditByNameTransportFailureIsNotNotFound(t *testing.T) {
 	if out != "" {
 		t.Errorf("stdout = %q, want empty", out)
 	}
-	want := "forge: GET /repos/acme/widget/labels?limit=100 failed: curl exit 7\n"
+	want := "forge: GET /repos/acme/widget/labels?limit=50&page=1 failed: curl exit 7\n"
 	if errText != want {
 		t.Errorf("stderr = %q, want %q", errText, want)
 	}
@@ -161,7 +161,7 @@ func TestMilestoneViewByTitleTransportFailureIsNotNotFound(t *testing.T) {
 	if out != "" {
 		t.Errorf("stdout = %q, want empty", out)
 	}
-	want := "forge: GET /repos/acme/widget/milestones?state=all&name=July%20batch&limit=100 failed: curl exit 7\n"
+	want := "forge: GET /repos/acme/widget/milestones?state=all&name=July%20batch&limit=50&page=1 failed: curl exit 7\n"
 	if errText != want {
 		t.Errorf("stderr = %q, want %q", errText, want)
 	}

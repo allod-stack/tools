@@ -118,7 +118,7 @@ closed pull request that never merged is never mistaken for one that did.
 
 Flags:
   -s, --state <state>       Filter by state: open, closed, or all (default: open)
-  -L, --limit <number>      Maximum number of pull requests to fetch (default: 50)
+  -L, --limit <number>      Maximum number of pull requests to fetch (default: all)
   -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
 `,
 	"pr view": `Usage: forge pr view <number> [-R <owner/repo>] [--json <fields>] [--jq <expression>]

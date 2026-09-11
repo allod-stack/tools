@@ -1073,14 +1073,14 @@ func TestCurlRejectedURLMakesNoRequest(t *testing.T) {
 		{
 			"space in the repo slug",
 			[]string{"-R", "acme/wid get", "pr", "list"},
-			"forge: GET /repos/acme/wid get/pulls?state=open&limit=50 failed: curl exit 3\n",
+			"forge: GET /repos/acme/wid get/pulls?state=open&limit=50&page=1 failed: curl exit 3\n",
 		},
 		// The reject class is every byte up to and including the space, plus
 		// DEL -- not the space alone.
 		{
 			"tab in the repo slug",
 			[]string{"-R", "acme/wid\tget", "pr", "list"},
-			"forge: GET /repos/acme/wid\tget/pulls?state=open&limit=50 failed: curl exit 3\n",
+			"forge: GET /repos/acme/wid\tget/pulls?state=open&limit=50&page=1 failed: curl exit 3\n",
 		},
 	}
 

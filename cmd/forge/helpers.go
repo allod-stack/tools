@@ -408,28 +408,46 @@ func parsePositiveInt(option, value string) string {
 	return value
 }
 
+// digitsValue converts a digit string to the value bash arithmetic gives it:
+// a leading zero makes it octal, so "08" has no value at all (ok is false),
+// and the arithmetic is 64-bit signed with wraparound.
+func digitsValue(digits string) (v int64, ok bool) {
+	base := uint64(10)
+	if len(digits) > 1 && digits[0] == '0' {
+		base = 8
+	}
+	var acc uint64
+	for i := 0; i < len(digits); i++ {
+		d := uint64(digits[i] - '0')
+		if d >= base {
+			return 0, false
+		}
+		acc = acc*base + d
+	}
+	return int64(acc), true
+}
+
 // bashArithPositive evaluates a digit string the way `[[ "$value" -gt 0 ]]`
-// does: a leading zero makes it octal, so "08" is not a number at all, and the
-// arithmetic is 64-bit signed with wraparound.
+// does.
 //
 // bash also writes its own diagnostic ("value too great for base") to stderr
 // before the comparison fails. That line names the script and the line number
 // inside it, so it cannot be reproduced here; only the final "must be a
 // positive integer" line and the exit status are.
 func bashArithPositive(digits string) bool {
-	base := uint64(10)
-	if len(digits) > 1 && digits[0] == '0' {
-		base = 8
-	}
-	var v uint64
-	for i := 0; i < len(digits); i++ {
-		d := uint64(digits[i] - '0')
-		if d >= base {
-			return false
-		}
-		v = v*base + d
-	}
-	return int64(v) > 0
+	v, ok := digitsValue(digits)
+	return ok && v > 0
+}
+
+// limitCount is the integer count a -L/--limit string names, using the same
+// arithmetic parsePositiveInt already validated it with (issue.go's
+// issueList, label.go's labelList). Only the pagination helper needs the
+// count; every caller still shows and forwards parsePositiveInt's own
+// verbatim string everywhere else, so a leading-zero spelling never reaches
+// the network beyond sizing and truncating pages.
+func limitCount(digits string) int {
+	v, _ := digitsValue(digits)
+	return int(v)
 }
 
 var hexColorRE = regexp.MustCompile(`^[0-9A-Fa-f]{6}$`)

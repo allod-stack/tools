@@ -114,6 +114,10 @@ round trip above leaves the body with one more trailing newline than before
 unless the edit trims it back off. Anything other than a string prints as
 JSON.
 
+`pr list`, `pr find-by-head`, and `pr close`'s branch-name lookup page
+through every open pull request rather than stopping at the first page, so a
+match past the first 50 is still found.
+
 `pr snapshot` is the machine-readable interface for tools that need a pull
 request's exact commits. It emits a deliberately small, versioned schema rather
 than the Forgejo API response, so unrelated server fields can change without
@@ -278,6 +282,10 @@ forge issue view 12 --json body --jq .body > body.md
 forge issue edit 12 --body-file body.md
 ```
 
+`issue list` pages through as many results as `--limit` needs (the server
+caps a single page at 50) rather than trusting one request to hold the whole
+limit.
+
 ## Label commands
 
 ```bash
@@ -297,6 +305,11 @@ Colors are six-digit hex values with or without a leading `#`; `label create`
 uses a random color when none is supplied, matching `gh`. The
 `--exclusive`/`--archived` label fields are Forgejo-specific extensions.
 
+`label list` pages through as many results as `--limit` needs, and every
+lookup of a label by name (`label create --force`, `label edit`, `label
+delete`) pages through the whole repository label set so a match past the
+first page still resolves.
+
 ## Milestone commands
 
 ```bash
@@ -311,6 +324,11 @@ forge milestone delete <id-or-title>
 
 Milestone lookups accept IDs or exact titles. `--due YYYY-MM-DD` is sent to the
 API as midnight UTC for that date.
+
+`milestone list` and every lookup of a milestone by title (`milestone view`,
+`milestone edit`, `milestone delete`, `issue create --milestone`, `issue edit
+--milestone`, `issue milestone`) page through every milestone in the
+repository, so a match past the first page still resolves.
 
 ## Project commands
 

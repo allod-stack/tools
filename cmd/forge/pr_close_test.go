@@ -17,7 +17,7 @@ func TestPRClose(t *testing.T) {
 		// Two open PRs with distinct head branches, matching the retired fixture:
 		// the real pulls list endpoint ignores head/base filters, so the client
 		// matches head.ref itself.
-		"GET /api/v1/repos/acme/widget/pulls?state=open&limit=50": {
+		"GET /api/v1/repos/acme/widget/pulls?state=open&limit=50&page=1": {
 			Body: `[{"number":12,"title":"Improve tool","user":{"login":"alice"},"head":{"label":"acme:topic","ref":"topic"},"base":{"label":"master","ref":"master"}},` +
 				`{"number":31,"title":"Branch PR","user":{"login":"alice"},"head":{"label":"acme:feature","ref":"feature"},"base":{"label":"master","ref":"master"}}]`,
 		},
@@ -67,7 +67,7 @@ func TestPRClose(t *testing.T) {
 
 	t.Run("branch target looks up the PR first", func(t *testing.T) {
 		assertScenario(t, srv, []expReq{
-			{"GET", "/api/v1/repos/acme/widget/pulls?state=open&limit=50", nil},
+			{"GET", "/api/v1/repos/acme/widget/pulls?state=open&limit=50&page=1", nil},
 			{"PATCH", "/api/v1/repos/acme/widget/pulls/12", closedState},
 		}, func() {
 			runOK(t, "pr", "close", "topic")
@@ -109,7 +109,7 @@ func TestPRClose(t *testing.T) {
 
 	t.Run("branch target with delete-branch resolves branch before fetching details", func(t *testing.T) {
 		assertScenario(t, srv, []expReq{
-			{"GET", "/api/v1/repos/acme/widget/pulls?state=open&limit=50", nil},
+			{"GET", "/api/v1/repos/acme/widget/pulls?state=open&limit=50&page=1", nil},
 			{"GET", "/api/v1/repos/acme/widget/pulls/12", nil},
 			{"PATCH", "/api/v1/repos/acme/widget/pulls/12", nil},
 			{"DELETE", "/api/v1/repos/acme/widget/branches/topic", nil},
@@ -124,7 +124,7 @@ func TestPRClose(t *testing.T) {
 
 	t.Run("reports no match for a slashed branch name", func(t *testing.T) {
 		assertScenario(t, srv, []expReq{
-			{"GET", "/api/v1/repos/acme/widget/pulls?state=open&limit=50", nil},
+			{"GET", "/api/v1/repos/acme/widget/pulls?state=open&limit=50&page=1", nil},
 		}, func() {
 			runFail(t, "no open PR found", "pr", "close", "feat/sub")
 		})

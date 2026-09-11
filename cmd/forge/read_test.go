@@ -19,7 +19,7 @@ import (
 
 func TestReadPRList(t *testing.T) {
 	srv := newRecordingServer(t, map[string]cannedResponse{
-		"/api/v1/repos/acme/widget/pulls?state=open&limit=50": {Body: `[{"number":12,"title":"Improve tool","user":{"login":"alice"},"head":{"label":"acme:topic","ref":"topic"},"base":{"label":"master","ref":"master"}},{"number":31,"title":"Branch PR","user":{"login":"alice"},"head":{"label":"acme:feature","ref":"feature"},"base":{"label":"master","ref":"master"}}]`},
+		"/api/v1/repos/acme/widget/pulls?state=open&limit=50&page=1": {Body: `[{"number":12,"title":"Improve tool","user":{"login":"alice"},"head":{"label":"acme:topic","ref":"topic"},"base":{"label":"master","ref":"master"}},{"number":31,"title":"Branch PR","user":{"login":"alice"},"head":{"label":"acme:feature","ref":"feature"},"base":{"label":"master","ref":"master"}}]`},
 	})
 	useServer(t, srv)
 	useToken(t, fakeToken)
@@ -33,7 +33,13 @@ func TestReadPRList(t *testing.T) {
 		t.Errorf("stdout = %q, want it to contain the pull request title and its branches", out)
 	}
 
-	srv.assertRequest(t, 0, "GET", "/api/v1/repos/acme/widget/pulls?state=open&limit=50")
+	// A short first page (2 items, well under the 50-item page cap) means the
+	// whole result set fit on it, so pagination stops there: exactly one
+	// request (allod/tools#89).
+	if n := srv.count(); n != 1 {
+		t.Errorf("request count = %d, want 1 (a short first page needs no second request)", n)
+	}
+	srv.assertRequest(t, 0, "GET", "/api/v1/repos/acme/widget/pulls?state=open&limit=50&page=1")
 	if got := srv.requests()[0].Authorization; got != "token "+fakeToken {
 		t.Errorf("authorization = %s, want the configured token on a normal API call", srv.requests()[0].authKind())
 	}
@@ -46,7 +52,7 @@ func TestReadPRList(t *testing.T) {
 func TestReadPRListState(t *testing.T) {
 	t.Run("closed distinguishes merged from abandoned", func(t *testing.T) {
 		srv := newRecordingServer(t, map[string]cannedResponse{
-			"/api/v1/repos/acme/widget/pulls?state=closed&limit=50": {Body: `[{"number":40,"title":"Merged one","user":{"login":"alice"},"head":{"label":"acme:m","ref":"m"},"base":{"label":"master","ref":"master"},"state":"closed","merged":true,"merged_at":"2026-09-10T12:00:00Z"},{"number":41,"title":"Abandoned one","user":{"login":"alice"},"head":{"label":"acme:a","ref":"a"},"base":{"label":"master","ref":"master"},"state":"closed","merged":false,"merged_at":null}]`},
+			"/api/v1/repos/acme/widget/pulls?state=closed&limit=50&page=1": {Body: `[{"number":40,"title":"Merged one","user":{"login":"alice"},"head":{"label":"acme:m","ref":"m"},"base":{"label":"master","ref":"master"},"state":"closed","merged":true,"merged_at":"2026-09-10T12:00:00Z"},{"number":41,"title":"Abandoned one","user":{"login":"alice"},"head":{"label":"acme:a","ref":"a"},"base":{"label":"master","ref":"master"},"state":"closed","merged":false,"merged_at":null}]`},
 		})
 		useServer(t, srv)
 		useToken(t, fakeToken)
@@ -59,12 +65,12 @@ func TestReadPRListState(t *testing.T) {
 		if !containsAll(out, "Merged one", "merged 2026-09-10", "Abandoned one", "closed") {
 			t.Errorf("stdout = %q, want a merged row with its date and a closed row without one", out)
 		}
-		srv.assertRequest(t, 0, "GET", "/api/v1/repos/acme/widget/pulls?state=closed&limit=50")
+		srv.assertRequest(t, 0, "GET", "/api/v1/repos/acme/widget/pulls?state=closed&limit=50&page=1")
 	})
 
 	t.Run("all still shows open for an open pull request", func(t *testing.T) {
 		srv := newRecordingServer(t, map[string]cannedResponse{
-			"/api/v1/repos/acme/widget/pulls?state=all&limit=50": {Body: `[{"number":42,"title":"Still open","user":{"login":"alice"},"head":{"label":"acme:o","ref":"o"},"base":{"label":"master","ref":"master"},"state":"open"}]`},
+			"/api/v1/repos/acme/widget/pulls?state=all&limit=50&page=1": {Body: `[{"number":42,"title":"Still open","user":{"login":"alice"},"head":{"label":"acme:o","ref":"o"},"base":{"label":"master","ref":"master"},"state":"open"}]`},
 		})
 		useServer(t, srv)
 		useToken(t, fakeToken)
@@ -81,7 +87,7 @@ func TestReadPRListState(t *testing.T) {
 
 	t.Run("limit changes the request", func(t *testing.T) {
 		srv := newRecordingServer(t, map[string]cannedResponse{
-			"/api/v1/repos/acme/widget/pulls?state=open&limit=5": {Body: `[]`},
+			"/api/v1/repos/acme/widget/pulls?state=open&limit=5&page=1": {Body: `[]`},
 		})
 		useServer(t, srv)
 		useToken(t, fakeToken)
@@ -91,12 +97,12 @@ func TestReadPRListState(t *testing.T) {
 		if code != 0 || errText != "" || out != "No open pull requests in acme/widget\n" {
 			t.Fatalf("got (%q, %q, %d), want success and the empty-open message", out, errText, code)
 		}
-		srv.assertRequest(t, 0, "GET", "/api/v1/repos/acme/widget/pulls?state=open&limit=5")
+		srv.assertRequest(t, 0, "GET", "/api/v1/repos/acme/widget/pulls?state=open&limit=5&page=1")
 	})
 
 	t.Run("closed with none prints the closed empty message", func(t *testing.T) {
 		srv := newRecordingServer(t, map[string]cannedResponse{
-			"/api/v1/repos/acme/widget/pulls?state=closed&limit=50": {Body: `[]`},
+			"/api/v1/repos/acme/widget/pulls?state=closed&limit=50&page=1": {Body: `[]`},
 		})
 		useServer(t, srv)
 		useToken(t, fakeToken)
@@ -221,7 +227,7 @@ func TestReadPRReviewComments(t *testing.T) {
 
 func TestReadPRFindByHead(t *testing.T) {
 	srv := newRecordingServer(t, map[string]cannedResponse{
-		"/api/v1/repos/acme/widget/pulls?state=open&limit=50": {Body: `[{"number":12,"title":"Improve tool","user":{"login":"alice"},"head":{"label":"acme:topic","ref":"topic"},"base":{"label":"master","ref":"master"}},{"number":31,"title":"Branch PR","user":{"login":"alice"},"head":{"label":"acme:feature","ref":"feature"},"base":{"label":"master","ref":"master"}}]`},
+		"/api/v1/repos/acme/widget/pulls?state=open&limit=50&page=1": {Body: `[{"number":12,"title":"Improve tool","user":{"login":"alice"},"head":{"label":"acme:topic","ref":"topic"},"base":{"label":"master","ref":"master"}},{"number":31,"title":"Branch PR","user":{"login":"alice"},"head":{"label":"acme:feature","ref":"feature"},"base":{"label":"master","ref":"master"}}]`},
 	})
 	useServer(t, srv)
 	useToken(t, fakeToken)
@@ -252,7 +258,7 @@ func TestReadPRFindByHead(t *testing.T) {
 func TestReadIssueList(t *testing.T) {
 	t.Run("lists an open issue via inferred repo", func(t *testing.T) {
 		srv := newRecordingServer(t, map[string]cannedResponse{
-			"/api/v1/repos/acme/widget/issues?type=issues&state=open&limit=30": {Body: `[{"number":20,"title":"Fix backup","user":{"login":"bob"},"labels":[{"id":1,"name":"bug","color":"ff0000"}],"milestone":{"id":3,"title":"July batch"}}]`},
+			"/api/v1/repos/acme/widget/issues?type=issues&state=open&limit=30&page=1": {Body: `[{"number":20,"title":"Fix backup","user":{"login":"bob"},"labels":[{"id":1,"name":"bug","color":"ff0000"}],"milestone":{"id":3,"title":"July batch"}}]`},
 		})
 		useServer(t, srv)
 		useToken(t, fakeToken)
@@ -265,12 +271,12 @@ func TestReadIssueList(t *testing.T) {
 		if !containsAll(out, "Fix backup", "bob", "bug", "July batch") {
 			t.Errorf("stdout = %q, want the issue title, author, label, and milestone", out)
 		}
-		srv.assertRequest(t, 0, "GET", "/api/v1/repos/acme/widget/issues?type=issues&state=open&limit=30")
+		srv.assertRequest(t, 0, "GET", "/api/v1/repos/acme/widget/issues?type=issues&state=open&limit=30&page=1")
 	})
 
 	t.Run("filters issues with gh-style list flags", func(t *testing.T) {
 		srv := newRecordingServer(t, map[string]cannedResponse{
-			"/api/v1/repos/acme/widget/issues?type=issues&state=closed&limit=5&labels=bug&milestones=July%20batch&q=backup": {Body: `[{"number":19,"title":"Closed backup","user":{"login":"bob"},"labels":[{"id":1,"name":"bug","color":"ff0000"}],"milestone":{"id":3,"title":"July batch"}}]`},
+			"/api/v1/repos/acme/widget/issues?type=issues&state=closed&labels=bug&milestones=July%20batch&q=backup&limit=5&page=1": {Body: `[{"number":19,"title":"Closed backup","user":{"login":"bob"},"labels":[{"id":1,"name":"bug","color":"ff0000"}],"milestone":{"id":3,"title":"July batch"}}]`},
 		})
 		useServer(t, srv)
 		useToken(t, fakeToken)
@@ -283,12 +289,12 @@ func TestReadIssueList(t *testing.T) {
 		if !containsAll(out, "Closed backup") {
 			t.Errorf("stdout = %q, want the filtered issue", out)
 		}
-		srv.assertRequest(t, 0, "GET", "/api/v1/repos/acme/widget/issues?type=issues&state=closed&limit=5&labels=bug&milestones=July%20batch&q=backup")
+		srv.assertRequest(t, 0, "GET", "/api/v1/repos/acme/widget/issues?type=issues&state=closed&labels=bug&milestones=July%20batch&q=backup&limit=5&page=1")
 	})
 
 	t.Run("uses command-level repo for issue listing", func(t *testing.T) {
 		srv := newRecordingServer(t, map[string]cannedResponse{
-			"/api/v1/repos/acme/gadget/issues?type=issues&state=open&limit=30": {Body: `[{"number":21,"title":"Gadget issue","user":{"login":"zoe"}}]`},
+			"/api/v1/repos/acme/gadget/issues?type=issues&state=open&limit=30&page=1": {Body: `[{"number":21,"title":"Gadget issue","user":{"login":"zoe"}}]`},
 		})
 		useServer(t, srv)
 		useToken(t, fakeToken)
@@ -301,7 +307,7 @@ func TestReadIssueList(t *testing.T) {
 		if !containsAll(out, "Gadget issue") {
 			t.Errorf("stdout = %q, want the gadget repo's issue", out)
 		}
-		srv.assertRequest(t, 0, "GET", "/api/v1/repos/acme/gadget/issues?type=issues&state=open&limit=30")
+		srv.assertRequest(t, 0, "GET", "/api/v1/repos/acme/gadget/issues?type=issues&state=open&limit=30&page=1")
 	})
 }
 
@@ -443,7 +449,7 @@ func TestReadPRViewTimestamps(t *testing.T) {
 
 func TestReadLabelList(t *testing.T) {
 	fixture := map[string]cannedResponse{
-		"/api/v1/repos/acme/widget/labels?limit=30": {Body: `[{"id":1,"name":"bug","color":"ff0000","description":"Problem","exclusive":false,"is_archived":false},{"id":2,"name":"triage","color":"00ff00","description":"","exclusive":false,"is_archived":false}]`},
+		"/api/v1/repos/acme/widget/labels?limit=30&page=1": {Body: `[{"id":1,"name":"bug","color":"ff0000","description":"Problem","exclusive":false,"is_archived":false},{"id":2,"name":"triage","color":"00ff00","description":"","exclusive":false,"is_archived":false}]`},
 	}
 
 	t.Run("lists repository labels", func(t *testing.T) {
@@ -459,7 +465,7 @@ func TestReadLabelList(t *testing.T) {
 		if !containsAll(out, "bug", "Problem") {
 			t.Errorf("stdout = %q, want the label name and description", out)
 		}
-		srv.assertRequest(t, 0, "GET", "/api/v1/repos/acme/widget/labels?limit=30")
+		srv.assertRequest(t, 0, "GET", "/api/v1/repos/acme/widget/labels?limit=30&page=1")
 	})
 
 	t.Run("filters labels with gh-style list flags", func(t *testing.T) {
@@ -477,7 +483,7 @@ func TestReadLabelList(t *testing.T) {
 		}
 		// Search/sort/order are applied client-side; the request itself is
 		// unchanged from the plain list (limit was 30 either way).
-		srv.assertRequest(t, 0, "GET", "/api/v1/repos/acme/widget/labels?limit=30")
+		srv.assertRequest(t, 0, "GET", "/api/v1/repos/acme/widget/labels?limit=30&page=1")
 	})
 }
 
@@ -485,7 +491,7 @@ func TestReadLabelList(t *testing.T) {
 
 func TestReadMilestoneList(t *testing.T) {
 	srv := newRecordingServer(t, map[string]cannedResponse{
-		"/api/v1/repos/acme/widget/milestones?state=open&limit=100": {Body: `[{"id":3,"title":"July batch","state":"open","open_issues":2,"closed_issues":1,"due_on":"2026-07-31T00:00:00Z"}]`},
+		"/api/v1/repos/acme/widget/milestones?state=open&limit=50&page=1": {Body: `[{"id":3,"title":"July batch","state":"open","open_issues":2,"closed_issues":1,"due_on":"2026-07-31T00:00:00Z"}]`},
 	})
 	useServer(t, srv)
 	useToken(t, fakeToken)
@@ -498,15 +504,15 @@ func TestReadMilestoneList(t *testing.T) {
 	if !containsAll(out, "July batch", "2026-07-31") {
 		t.Errorf("stdout = %q, want the milestone title and due date", out)
 	}
-	srv.assertRequest(t, 0, "GET", "/api/v1/repos/acme/widget/milestones?state=open&limit=100")
+	srv.assertRequest(t, 0, "GET", "/api/v1/repos/acme/widget/milestones?state=open&limit=50&page=1")
 }
 
 // --- milestone view ---
 
 func TestReadMilestoneView(t *testing.T) {
 	srv := newRecordingServer(t, map[string]cannedResponse{
-		"/api/v1/repos/acme/widget/milestones?state=all&name=July%20batch&limit=100": {Body: `[{"id":3,"title":"July batch","state":"open","open_issues":2,"closed_issues":1,"due_on":"2026-07-31T00:00:00Z"}]`},
-		"/api/v1/repos/acme/widget/milestones/3":                                     {Body: `{"id":3,"title":"July batch","state":"open","description":"July work","open_issues":2,"closed_issues":1,"due_on":"2026-07-31T00:00:00Z"}`},
+		"/api/v1/repos/acme/widget/milestones?state=all&name=July%20batch&limit=50&page=1": {Body: `[{"id":3,"title":"July batch","state":"open","open_issues":2,"closed_issues":1,"due_on":"2026-07-31T00:00:00Z"}]`},
+		"/api/v1/repos/acme/widget/milestones/3":                                           {Body: `{"id":3,"title":"July batch","state":"open","description":"July work","open_issues":2,"closed_issues":1,"due_on":"2026-07-31T00:00:00Z"}`},
 	})
 	useServer(t, srv)
 	useToken(t, fakeToken)
@@ -519,7 +525,7 @@ func TestReadMilestoneView(t *testing.T) {
 	if !containsAll(out, "Milestone #3: July batch", "July work") {
 		t.Errorf("stdout = %q, want the milestone header and description", out)
 	}
-	srv.assertRequest(t, 0, "GET", "/api/v1/repos/acme/widget/milestones?state=all&name=July%20batch&limit=100")
+	srv.assertRequest(t, 0, "GET", "/api/v1/repos/acme/widget/milestones?state=all&name=July%20batch&limit=50&page=1")
 	srv.assertRequest(t, 1, "GET", "/api/v1/repos/acme/widget/milestones/3")
 }
 

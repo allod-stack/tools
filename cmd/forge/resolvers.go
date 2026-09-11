@@ -6,12 +6,10 @@ package main
 import "strings"
 
 // findLabelIDByName mirrors find_label_id_by_name (forge line 337): look the
-// name up in the first 100 repository labels and refuse to guess between
-// duplicates.
+// name up across every repository label (allod/tools#89 -- a match past the
+// first page must resolve too) and refuse to guess between duplicates.
 func findLabelIDByName(identifier string) string {
-	labels := api("GET", "/repos/"+repoOpt+"/labels?limit=100", nil)
-
-	items := jsonArray(mustJSON(labels))
+	items := fetchPages("/repos/"+repoOpt+"/labels", 0)
 	count := 0
 	var first any
 	for _, item := range items {
@@ -67,15 +65,14 @@ func resolveLabelIDsJSON(labels []string) string {
 
 // resolveMilestoneID mirrors resolve_milestone_id (forge line 369). The title
 // is sent as a server-side filter and matched exactly again here, because the
-// filter is a substring match.
+// filter is a substring match. Every page is fetched (allod/tools#89) so a
+// match past the first page still resolves.
 func resolveMilestoneID(identifier string) string {
 	if isInteger(identifier) {
 		return identifier
 	}
 
-	milestones := api("GET", "/repos/"+repoOpt+"/milestones?state=all&name="+jqURI(identifier)+"&limit=100", nil)
-
-	items := jsonArray(mustJSON(milestones))
+	items := fetchPages("/repos/"+repoOpt+"/milestones?state=all&name="+jqURI(identifier), 0)
 	count := 0
 	var first any
 	for _, item := range items {

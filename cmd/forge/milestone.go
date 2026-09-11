@@ -42,8 +42,8 @@ func milestoneList(args []string) {
 	}
 	requireRepo()
 
-	result := api("GET", "/repos/"+repoOpt+"/milestones?state="+state+"&limit=100", nil)
-	items := jsonArray(mustJSON(result))
+	// No --limit here, so every page is fetched (allod/tools#89).
+	items := fetchPages("/repos/"+repoOpt+"/milestones?state="+state, 0)
 	if len(items) == 0 {
 		if state == "all" {
 			fmt.Fprintf(stdout, "No milestones in %s\n", repoOpt)

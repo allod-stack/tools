@@ -9,10 +9,11 @@ import (
 	"strings"
 )
 
-// labelList mirrors label_list (forge line 1441). The fetch is a single page
-// (-L/--limit, default 30); search, sort and asc/desc order are all applied
-// client-side over that page, then the rendered rows are aligned the way
-// `column -t -s $'\t'` (forge line 1499) aligns them.
+// labelList mirrors label_list (forge line 1441). The fetch pages through as
+// many results as -L/--limit needs (default 30, allod/tools#89); search, sort
+// and asc/desc order are all applied client-side over the fetched items, then
+// the rendered rows are aligned the way `column -t -s $'\t'` (forge line
+// 1499) aligns them.
 func labelList(args []string) {
 	if containsHelpFlag(args) {
 		commandUsage("label list")
@@ -61,8 +62,9 @@ func labelList(args []string) {
 	}
 	requireRepo()
 
-	result := api("GET", "/repos/"+repoOpt+"/labels?limit="+limit, nil)
-	items := jsonArray(mustJSON(result))
+	// -L/--limit is honored exactly as before (default 30), but now enough
+	// pages are fetched to reach it (allod/tools#89).
+	items := fetchPages("/repos/"+repoOpt+"/labels", limitCount(limit))
 
 	// select(($search == "") or (name contains) or (description contains)),
 	// case-insensitive over ASCII only, like jq's ascii_downcase.
