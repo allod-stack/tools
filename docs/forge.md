@@ -52,7 +52,7 @@ success.
 
 ```bash
 forge pr list
-forge pr view <number>
+forge pr view <number> [--json <fields>] [--jq <expression>]
 forge pr snapshot <number>                 # stable immutable commit metadata as JSON
 forge pr create --title <title> [--head <branch>] [--base <branch>] \
   [--body <text> | --body-file <file>]
@@ -71,6 +71,28 @@ repository's default branch. The `gh` short aliases are also supported:
 `pr close` accepts a PR number, full URL, or head branch name as its target.
 Use `-c`/`--comment` to leave a closing comment and `-d`/`--delete-branch` to
 delete the remote head branch after closing.
+
+`pr view --json <fields>` prints only the requested fields as one JSON object,
+instead of the rendered summary and comments: no header, no comments, no
+reviews, and only one API request. Fields are comma-separated and the flag may
+be repeated (`gh`'s multi-value shape): `--json number,title` and
+`--json number --json title` name the same set. Valid fields: `number`,
+`title`, `body`, `state`, `author`, `labels`, `milestone`, `url`, `createdAt`,
+`updatedAt`, `closedAt`, `headRefName`, `baseRefName`. `body` reaches stdout
+byte-for-byte as the API returned it -- no re-wrapping, no stripped trailing
+newlines -- so an edit can be built from what is actually there instead of
+retyped from the rendered view:
+
+```bash
+forge pr view 12 --json body --jq .body > body.md
+# edit body.md
+forge pr edit 12 --body-file body.md
+```
+
+`--jq <expression>` filters the printed object down to one value and requires
+`--json`. Only a simple dotted field path is supported, such as `.body` or
+`.author.login`; anything else is rejected. A string prints raw with a
+trailing newline (`jq -r`'s convention); anything else prints as JSON.
 
 `pr snapshot` is the machine-readable interface for tools that need a pull
 request's exact commits. It emits a deliberately small, versioned schema rather
@@ -172,7 +194,7 @@ printed to stdout or accepted as a command-line argument.
 ```bash
 forge issue list [--state open|closed|all] [--label <label>] \
   [--milestone <milestone>] [--limit <number>] [--search <query>]
-forge issue view <number>
+forge issue view <number> [--json <fields>] [--jq <expression>]
 forge issue create --title <title> [--body <text> | --body-file <file>] \
   [--label <label>] [--milestone <milestone>]
 forge issue edit <number> [--title <title>] [--body <text> | --body-file <file>] \
@@ -203,6 +225,20 @@ mutation names (`--add-label`, `--remove-label`, `--milestone`, and
 `--remove-milestone`). `issue labels` and `issue milestone` are Forge-specific
 helpers for focused label/milestone operations; they list current values when
 called without changes.
+
+`issue view --json <fields>` prints only the requested fields as one JSON
+object, instead of the rendered summary and comments -- the same shape as
+`pr view --json` (see PR commands above), minus `headRefName`/`baseRefName`.
+Valid fields: `number`, `title`, `body`, `state`, `author`, `labels`,
+`milestone`, `url`, `createdAt`, `updatedAt`, `closedAt`. This is the way to
+append to an issue body without clobbering what another writer added meanwhile
+(`--body-file` replaces the whole body):
+
+```bash
+forge issue view 12 --json body --jq .body > body.md
+# edit body.md
+forge issue edit 12 --body-file body.md
+```
 
 ## Label commands
 
