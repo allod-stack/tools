@@ -336,7 +336,7 @@ func TestCapturedFieldsAreChomped(t *testing.T) {
 		useNoInferRepo(t)
 
 		out, _, code := runForge(t, "-R", "acme/widget", "pr", "view", "1")
-		want := "PR #1: hello\n  State:  open\n  Author: alice\n  Branch: h \u2192 b\n\n"
+		want := "PR #1: hello\n  State:    open\n  Author:   alice\n  Created:  null\n  Updated:  null\n  Branch:   h \u2192 b\n\n"
 		if out != want || code != 0 {
 			t.Errorf("stdout = %q, want %q", out, want)
 		}
@@ -412,7 +412,7 @@ func TestViewBodiesGoThroughTheEchoBuiltin(t *testing.T) {
 			"GET /api/v1/repos/acme/widget/issues/3/comments": {Body: `[]`},
 		}
 	}
-	const header = "Issue #3: T\n  State:     open\n  Author:    u\n  Labels:    -\n  Milestone: -\n\n"
+	const header = "Issue #3: T\n  State:     open\n  Author:    u\n  Created:   null\n  Updated:   null\n  Labels:    -\n  Milestone: -\n\n"
 
 	tests := []struct {
 		body string

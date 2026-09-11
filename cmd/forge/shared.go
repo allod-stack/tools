@@ -164,3 +164,16 @@ func jqBodyAlt(body []byte, fallback string, keys ...string) string {
 	}
 	return chompNewlines(jqAlt(jsonPath(mustJSON(body), keys...), fallback))
 }
+
+// jqBodyDate is jqBodyString with jq's slice operator applied to the result:
+// `jq -r '.a.b[:10]'`, the first 10 codepoints of a timestamp field, the way
+// a comment line's `created_at[:10]` already renders. A missing or null field
+// slices to null, which jqString renders as the literal text "null" -- the
+// same stand-in jqBodyString already prints for any other missing header
+// field.
+func jqBodyDate(body []byte, keys ...string) string {
+	if jsonIsEmpty(body) {
+		return ""
+	}
+	return chompNewlines(jqString(jqPrefixSlice(jsonPath(mustJSON(body), keys...), 10)))
+}

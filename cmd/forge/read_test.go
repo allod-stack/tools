@@ -181,8 +181,8 @@ func TestReadPRViewMerged(t *testing.T) {
 		if code != 0 || errText != "" {
 			t.Fatalf("got (%q, %q, %d), want success", out, errText, code)
 		}
-		if !strings.Contains(out, "Merged: 2026-09-10") {
-			t.Errorf("stdout = %q, want a Merged: 2026-09-10 line", out)
+		if !strings.Contains(out, "Merged:   yes 2026-09-10") {
+			t.Errorf("stdout = %q, want a Merged:   yes 2026-09-10 line", out)
 		}
 	})
 
@@ -322,6 +322,120 @@ func TestReadIssueView(t *testing.T) {
 	}
 	if !containsAll(out, "Issue #20: Fix backup", "Issue body", "Issue note", "Labels:    bug", "Milestone: July batch") {
 		t.Errorf("stdout = %q, want the issue header, body, comment, labels, and milestone", out)
+	}
+}
+
+// --- issue view / pr view timestamps (allod/tools#194) ---
+
+func TestReadIssueViewTimestamps(t *testing.T) {
+	tests := []struct {
+		name  string
+		state string
+		want  string
+	}{
+		{"open issue prints Created and Updated only", "open",
+			"Issue #21: Fix backup\n" +
+				"  State:     open\n" +
+				"  Author:    bob\n" +
+				"  Created:   2026-01-01\n" +
+				"  Updated:   2026-01-02\n" +
+				"  Labels:    -\n" +
+				"  Milestone: -\n\n"},
+		{"closed issue also prints Closed", "closed",
+			"Issue #21: Fix backup\n" +
+				"  State:     closed\n" +
+				"  Author:    bob\n" +
+				"  Created:   2026-01-01\n" +
+				"  Updated:   2026-01-02\n" +
+				"  Closed:    2026-01-03\n" +
+				"  Labels:    -\n" +
+				"  Milestone: -\n\n"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newRecordingServer(t, map[string]cannedResponse{
+				"/api/v1/repos/acme/widget/issues/21": {Body: `{"title":"Fix backup","state":"` + tt.state +
+					`","body":"","user":{"login":"bob"},"labels":[],"milestone":null,` +
+					`"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":"2026-01-03T00:00:00Z"}`},
+				"/api/v1/repos/acme/widget/issues/21/comments": {Body: `[]`},
+			})
+			useServer(t, srv)
+			useToken(t, fakeToken)
+			useNoInferRepo(t)
+
+			out, errText, code := runForge(t, "-R", "acme/widget", "issue", "view", "21")
+			if code != 0 || errText != "" {
+				t.Fatalf("got (%q, %q, %d), want success", out, errText, code)
+			}
+			if out != tt.want {
+				t.Errorf("stdout = %q, want %q", out, tt.want)
+			}
+		})
+	}
+}
+
+func TestReadPRViewTimestamps(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"open PR prints Created and Updated only",
+			`{"title":"Improve tool","state":"open","body":"",` +
+				`"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":null,"merged":false,"merged_at":null,` +
+				`"user":{"login":"alice"},"head":{"label":"acme:topic"},"base":{"label":"master"}}`,
+			"PR #22: Improve tool\n" +
+				"  State:    open\n" +
+				"  Author:   alice\n" +
+				"  Created:  2026-01-01\n" +
+				"  Updated:  2026-01-02\n" +
+				"  Branch:   acme:topic → master\n\n"},
+		{"closed unmerged PR prints Merged: no",
+			`{"title":"Improve tool","state":"closed","body":"",` +
+				`"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":"2026-01-03T00:00:00Z","merged":false,"merged_at":null,` +
+				`"user":{"login":"alice"},"head":{"label":"acme:topic"},"base":{"label":"master"}}`,
+			"PR #22: Improve tool\n" +
+				"  State:    closed\n" +
+				"  Author:   alice\n" +
+				"  Created:  2026-01-01\n" +
+				"  Updated:  2026-01-02\n" +
+				"  Closed:   2026-01-03\n" +
+				"  Merged:   no\n" +
+				"  Branch:   acme:topic → master\n\n"},
+		{"merged PR prints Merged: yes and its date",
+			`{"title":"Improve tool","state":"closed","body":"",` +
+				`"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":"2026-01-03T00:00:00Z","merged":true,"merged_at":"2026-01-03T00:00:00Z",` +
+				`"user":{"login":"alice"},"head":{"label":"acme:topic"},"base":{"label":"master"}}`,
+			"PR #22: Improve tool\n" +
+				"  State:    closed\n" +
+				"  Author:   alice\n" +
+				"  Created:  2026-01-01\n" +
+				"  Updated:  2026-01-02\n" +
+				"  Closed:   2026-01-03\n" +
+				"  Merged:   yes 2026-01-03\n" +
+				"  Branch:   acme:topic → master\n\n"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newRecordingServer(t, map[string]cannedResponse{
+				"/api/v1/repos/acme/widget/pulls/22":           {Body: tt.body},
+				"/api/v1/repos/acme/widget/issues/22/comments": {Body: `[]`},
+				"/api/v1/repos/acme/widget/pulls/22/reviews":   {Body: `[]`},
+			})
+			useServer(t, srv)
+			useToken(t, fakeToken)
+			useNoInferRepo(t)
+
+			out, errText, code := runForge(t, "-R", "acme/widget", "pr", "view", "22")
+			if code != 0 || errText != "" {
+				t.Fatalf("got (%q, %q, %d), want success", out, errText, code)
+			}
+			if out != tt.want {
+				t.Errorf("stdout = %q, want %q", out, tt.want)
+			}
+		})
 	}
 }
 

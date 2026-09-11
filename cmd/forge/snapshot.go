@@ -13,6 +13,7 @@ import (
 	"math/big"
 	"regexp"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -24,10 +25,16 @@ type prSnapshot struct {
 }
 
 type snapshotPullRequest struct {
-	Number json.Number `json:"number"`
-	URL    string      `json:"url"`
-	Title  string      `json:"title"`
-	Body   string      `json:"body"`
+	Number    json.Number `json:"number"`
+	URL       string      `json:"url"`
+	Title     string      `json:"title"`
+	Body      string      `json:"body"`
+	State     string      `json:"state"`
+	CreatedAt string      `json:"created_at"`
+	UpdatedAt string      `json:"updated_at"`
+	ClosedAt  *string     `json:"closed_at"`
+	Merged    bool        `json:"merged"`
+	MergedAt  *string     `json:"merged_at"`
 }
 
 type snapshotSide struct {
@@ -119,6 +126,39 @@ func projectPRSnapshot(body []byte, requestedNumber string) (prSnapshot, bool) {
 		}
 	}
 
+	state, ok := snapshotState(root["state"])
+	if !ok {
+		return prSnapshot{}, false
+	}
+	createdAt, ok := snapshotRFC3339(root["created_at"])
+	if !ok {
+		return prSnapshot{}, false
+	}
+	updatedAt, ok := snapshotRFC3339(root["updated_at"])
+	if !ok {
+		return prSnapshot{}, false
+	}
+	closedAt, ok := snapshotRFC3339OrNull(root["closed_at"])
+	if !ok {
+		return prSnapshot{}, false
+	}
+	merged, ok := root["merged"].(bool)
+	if !ok {
+		return prSnapshot{}, false
+	}
+	mergedAt, ok := snapshotRFC3339OrNull(root["merged_at"])
+	if !ok {
+		return prSnapshot{}, false
+	}
+	// Contradictory metadata: a merge flag without a merge date or vice
+	// versa, or a close date on a PR the API still calls open.
+	if merged != (mergedAt != nil) {
+		return prSnapshot{}, false
+	}
+	if state == "open" && closedAt != nil {
+		return prSnapshot{}, false
+	}
+
 	base, baseURL, ok := projectSnapshotSide(root["base"], requestedNumber, false)
 	if !ok {
 		return prSnapshot{}, false
@@ -140,14 +180,60 @@ func projectPRSnapshot(body []byte, requestedNumber string) (prSnapshot, bool) {
 	return prSnapshot{
 		SchemaVersion: 1,
 		PullRequest: snapshotPullRequest{
-			Number: number,
-			URL:    url,
-			Title:  title,
-			Body:   bodyText,
+			Number:    number,
+			URL:       url,
+			Title:     title,
+			Body:      bodyText,
+			State:     state,
+			CreatedAt: createdAt,
+			UpdatedAt: updatedAt,
+			ClosedAt:  closedAt,
+			Merged:    merged,
+			MergedAt:  mergedAt,
 		},
 		Base: base,
 		Head: head,
 	}, true
+}
+
+// snapshotState accepts only the two values Forgejo's pull request state
+// carries; pr_view's Closed:/Merged: header lines gate on the same values.
+func snapshotState(value any) (string, bool) {
+	text, ok := value.(string)
+	if !ok {
+		return "", false
+	}
+	if text != "open" && text != "closed" {
+		return "", false
+	}
+	return text, true
+}
+
+// snapshotRFC3339 requires a non-empty string parseable as RFC 3339, the
+// format Forgejo's timestamp fields use.
+func snapshotRFC3339(value any) (string, bool) {
+	text, ok := value.(string)
+	if !ok || text == "" {
+		return "", false
+	}
+	if _, err := time.Parse(time.RFC3339, text); err != nil {
+		return "", false
+	}
+	return text, true
+}
+
+// snapshotRFC3339OrNull is snapshotRFC3339 with jq's `// null` shape: a JSON
+// null (or an absent key, decoded the same way) is valid and yields a nil
+// pointer, distinguishing "not closed/merged yet" from a malformed date.
+func snapshotRFC3339OrNull(value any) (*string, bool) {
+	if value == nil {
+		return nil, true
+	}
+	text, ok := snapshotRFC3339(value)
+	if !ok {
+		return nil, false
+	}
+	return &text, true
 }
 
 func writeSnapshotJSON(encoded []byte) {

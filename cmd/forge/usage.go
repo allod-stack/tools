@@ -136,8 +136,9 @@ Flags:
       --jq <expression>     Filter --json output by a simple field path, e.g.
                              .body (requires --json)
 
-A merged pull request prints a "Merged: YYYY-MM-DD" line after Branch; an
-open or unmerged-closed pull request prints no such line.
+Every pull request prints Created: and Updated: lines. A closed pull request
+also prints Closed: and then "Merged:   yes YYYY-MM-DD" or "Merged:   no";
+an open pull request prints neither.
 `,
 	"pr snapshot": `Usage: forge pr snapshot <number> [-R <owner/repo>]
 

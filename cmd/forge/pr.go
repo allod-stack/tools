@@ -141,11 +141,25 @@ func prView(args []string) {
 	comments := api("GET", "/repos/"+repoOpt+"/issues/"+number+"/comments", nil)
 	reviews := api("GET", "/repos/"+repoOpt+"/pulls/"+number+"/reviews", nil)
 
+	state := jqBodyString(pr, "state")
+
+	// Column width 10 = the widest label (Created:/Updated:, 8 characters)
+	// plus two spaces; every other label pads out to it.
+	const prHeaderWidth = 10
 	fmt.Fprintf(stdout, "PR #%s: %s\n", number, jqBodyString(pr, "title"))
-	fmt.Fprintf(stdout, "  State:  %s\n", jqBodyString(pr, "state"))
-	fmt.Fprintf(stdout, "  Author: %s\n", jqBodyString(pr, "user", "login"))
-	fmt.Fprintf(stdout, "  Branch: %s → %s\n", jqBodyString(pr, "head", "label"), jqBodyString(pr, "base", "label"))
-	printPRMergedLine(pr)
+	fmt.Fprintf(stdout, "  %-*s%s\n", prHeaderWidth, "State:", state)
+	fmt.Fprintf(stdout, "  %-*s%s\n", prHeaderWidth, "Author:", jqBodyString(pr, "user", "login"))
+	fmt.Fprintf(stdout, "  %-*s%s\n", prHeaderWidth, "Created:", jqBodyDate(pr, "created_at"))
+	fmt.Fprintf(stdout, "  %-*s%s\n", prHeaderWidth, "Updated:", jqBodyDate(pr, "updated_at"))
+	if state == "closed" {
+		fmt.Fprintf(stdout, "  %-*s%s\n", prHeaderWidth, "Closed:", jqBodyDate(pr, "closed_at"))
+		if jqBodyString(pr, "merged") == "true" {
+			fmt.Fprintf(stdout, "  %-*s%s\n", prHeaderWidth, "Merged:", "yes "+jqBodyDate(pr, "merged_at"))
+		} else {
+			fmt.Fprintf(stdout, "  %-*s%s\n", prHeaderWidth, "Merged:", "no")
+		}
+	}
+	fmt.Fprintf(stdout, "  %-*s%s → %s\n", prHeaderWidth, "Branch:", jqBodyString(pr, "head", "label"), jqBodyString(pr, "base", "label"))
 	fmt.Fprintln(stdout)
 
 	// body=$(echo "$pr" | jq -r '.body // ""'): command substitution strips
@@ -198,28 +212,6 @@ func prView(args []string) {
 		// printf '%s\n' "$inline_output"
 		fmt.Fprintf(stdout, "%s\n", inlineOutput.String())
 	}
-}
-
-// printPRMergedLine prints `  Merged: YYYY-MM-DD` after the Branch header
-// line (allod/tools#193 design) only when the API's merged is true; an open
-// or unmerged-closed pull request gets no line at all, so the existing header
-// tests keep passing unchanged. Date rule matches prStatusCell: the first 10
-// characters of merged_at, or "yes" when merged_at is missing.
-func printPRMergedLine(pr []byte) {
-	if jsonIsEmpty(pr) {
-		return
-	}
-	root := mustJSON(pr)
-	merged, _ := jsonField(root, "merged").(bool)
-	if !merged {
-		return
-	}
-	mergedAt := jsonField(root, "merged_at")
-	if mergedAt == nil {
-		fmt.Fprintln(stdout, "  Merged: yes")
-		return
-	}
-	fmt.Fprintf(stdout, "  Merged: %s\n", jqString(jqPrefixSlice(mergedAt, 10)))
 }
 
 // prReviewComments mirrors pr_review_comments (forge line 475).

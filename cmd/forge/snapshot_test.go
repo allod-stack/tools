@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-const snapshot12 = `{"number":12,"html_url":"https://forge.example/acme/widget/pulls/12","title":"Improve tool","state":"open","body":"PR body","user":{"login":"alice"},"head":{"label":"acme:topic","ref":"topic","sha":"2222222222222222222222222222222222222222","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}},"base":{"label":"master","ref":"master","sha":"1111111111111111111111111111111111111111","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`
+const snapshot12 = `{"number":12,"html_url":"https://forge.example/acme/widget/pulls/12","title":"Improve tool","state":"open","body":"PR body","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":null,"merged":false,"merged_at":null,"user":{"login":"alice"},"head":{"label":"acme:topic","ref":"topic","sha":"2222222222222222222222222222222222222222","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}},"base":{"label":"master","ref":"master","sha":"1111111111111111111111111111111111111111","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`
 
 const snapshot12Output = `{
   "schema_version": 1,
@@ -19,7 +19,13 @@ const snapshot12Output = `{
     "number": 12,
     "url": "https://forge.example/acme/widget/pulls/12",
     "title": "Improve tool",
-    "body": "PR body"
+    "body": "PR body",
+    "state": "open",
+    "created_at": "2026-01-01T00:00:00Z",
+    "updated_at": "2026-01-02T00:00:00Z",
+    "closed_at": null,
+    "merged": false,
+    "merged_at": null
   },
   "base": {
     "repository": {
@@ -59,7 +65,7 @@ func TestPRSnapshotProjectsStableSchema(t *testing.T) {
 }
 
 func TestPRSnapshotKeepsForkRepositoryIdentity(t *testing.T) {
-	body := `{"number":41,"html_url":"https://forge.example/acme/widget/pulls/41","title":"Fork contribution","state":"open","body":null,"head":{"label":"contributor:topic","ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"contributor"},"name":"widget-fork","full_name":"contributor/widget-fork","clone_url":"https://forge.example/contributor/widget-fork.git"}},"base":{"label":"master","ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`
+	body := `{"number":41,"html_url":"https://forge.example/acme/widget/pulls/41","title":"Fork contribution","state":"open","body":null,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":null,"merged":false,"merged_at":null,"head":{"label":"contributor:topic","ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"contributor"},"name":"widget-fork","full_name":"contributor/widget-fork","clone_url":"https://forge.example/contributor/widget-fork.git"}},"base":{"label":"master","ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`
 	_, out, errText, code := runSnapshotFixture(t, "41", body)
 	if code != 0 || errText != "" {
 		t.Fatalf("got (%q, %q, %d), want the fork snapshot and success", truncate(out), errText, code)
@@ -93,6 +99,10 @@ func TestPRSnapshotRejectsMalformedOrContradictoryMetadata(t *testing.T) {
 		{"48", "mixed Git object formats", `{"number":48,"html_url":"https://forge.example/acme/widget/pulls/48","title":"Mixed object formats","body":"Impossible fork metadata","head":{"ref":"topic","sha":"4444444444444444444444444444444444444444444444444444444444444444","repo":{"owner":{"login":"contributor"},"name":"widget-fork","full_name":"contributor/widget-fork","clone_url":"https://forge.example/contributor/widget-fork.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`},
 		{"49", "query-bearing clone URL", `{"number":49,"html_url":"https://forge.example/acme/widget/pulls/49","title":"Credential query","body":"Unsafe transport metadata","head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"contributor"},"name":"widget-fork","full_name":"contributor/widget-fork","clone_url":"https://forge.example/contributor/widget-fork.git?token=credential-material"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`},
 		{"50", "fork clone URL contradicting repository identity", `{"number":50,"html_url":"https://forge.example/acme/widget/pulls/50","title":"Misdirected fork","body":"Unsafe repository binding","head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"contributor"},"name":"widget-fork","full_name":"contributor/widget-fork","clone_url":"https://outside.example/unrelated.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`},
+		{"56", "malformed created_at timestamp", `{"number":56,"html_url":"https://forge.example/acme/widget/pulls/56","title":"Bad timestamp","body":"Not RFC 3339","state":"open","created_at":"not-a-timestamp","updated_at":"2026-01-02T00:00:00Z","closed_at":null,"merged":false,"merged_at":null,"head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`},
+		{"57", "merged true with a null merged_at", `{"number":57,"html_url":"https://forge.example/acme/widget/pulls/57","title":"Contradictory merge state","body":"merged without a date","state":"closed","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":"2026-01-03T00:00:00Z","merged":true,"merged_at":null,"head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`},
+		{"58", "merged_at set with merged false", `{"number":58,"html_url":"https://forge.example/acme/widget/pulls/58","title":"Contradictory merge state","body":"a date without merged","state":"closed","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":"2026-01-03T00:00:00Z","merged":false,"merged_at":"2026-01-03T00:00:00Z","head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`},
+		{"59", "closed_at on an open pull request", `{"number":59,"html_url":"https://forge.example/acme/widget/pulls/59","title":"Contradictory close state","body":"closed_at while open","state":"open","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":"2026-01-03T00:00:00Z","merged":false,"merged_at":null,"head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`},
 	}
 
 	for _, tt := range tests {
@@ -125,7 +135,7 @@ func TestPRSnapshotAGitHeadRefPolicy(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			body := fmt.Sprintf(`{"number":%s,"html_url":"https://forge.example/acme/widget/pulls/%s","title":"AGit fixture","body":"ref policy","head":{"ref":%q,"sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}},"base":{"ref":%q,"sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`, tt.number, tt.number, tt.head, tt.base)
+			body := fmt.Sprintf(`{"number":%s,"html_url":"https://forge.example/acme/widget/pulls/%s","title":"AGit fixture","body":"ref policy","state":"open","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":null,"merged":false,"merged_at":null,"head":{"ref":%q,"sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}},"base":{"ref":%q,"sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`, tt.number, tt.number, tt.head, tt.base)
 			_, out, errText, code := runSnapshotFixture(t, tt.number, body)
 			if tt.ok {
 				if code != 0 || errText != "" || !strings.Contains(out, `"ref": "refs/pull/51/head"`) {
@@ -135,6 +145,46 @@ func TestPRSnapshotAGitHeadRefPolicy(t *testing.T) {
 			}
 			if code != 1 || out != "" || !strings.Contains(errText, "missing or has malformed snapshot fields") {
 				t.Errorf("got (%q, %q, %d), want the malformed-snapshot error and exit 1", out, errText, code)
+			}
+		})
+	}
+}
+
+// TestPRSnapshotProjectsMergeAndCloseState covers the two closed shapes the
+// open case in TestPRSnapshotProjectsStableSchema does not: a closed pull
+// request that was never merged, and one that was.
+func TestPRSnapshotProjectsMergeAndCloseState(t *testing.T) {
+	tests := []struct {
+		number    string
+		name      string
+		state     string
+		merged    bool
+		mergedAt  string // "" renders JSON null
+		wantMerge string
+	}{
+		{"60", "closed and unmerged", "closed", false, "", `"merged": false,
+    "merged_at": null`},
+		{"61", "closed and merged", "closed", true, "2026-01-03T00:00:00Z", `"merged": true,
+    "merged_at": "2026-01-03T00:00:00Z"`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mergedAtJSON := "null"
+			if tt.mergedAt != "" {
+				mergedAtJSON = `"` + tt.mergedAt + `"`
+			}
+			body := fmt.Sprintf(`{"number":%s,"html_url":"https://forge.example/acme/widget/pulls/%s","title":"Close fixture","body":"close/merge state","state":%q,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":"2026-01-03T00:00:00Z","merged":%t,"merged_at":%s,"head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`,
+				tt.number, tt.number, tt.state, tt.merged, mergedAtJSON)
+
+			_, out, errText, code := runSnapshotFixture(t, tt.number, body)
+			if code != 0 || errText != "" {
+				t.Fatalf("got (%q, %q, %d), want success", truncate(out), errText, code)
+			}
+			if !strings.Contains(out, `"state": "closed"`) ||
+				!strings.Contains(out, `"closed_at": "2026-01-03T00:00:00Z"`) ||
+				!strings.Contains(out, tt.wantMerge) {
+				t.Errorf("snapshot = %s, want it to carry state/closed_at/merged fields matching the fixture", out)
 			}
 		})
 	}

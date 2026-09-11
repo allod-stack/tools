@@ -136,6 +136,8 @@ func issueView(args []string) {
 	title := jqBodyString(issueResp, "title")
 	state := jqBodyString(issueResp, "state")
 	author := jqBodyString(issueResp, "user", "login")
+	created := jqBodyDate(issueResp, "created_at")
+	updated := jqBodyDate(issueResp, "updated_at")
 	labels, milestone := "", ""
 	if !jsonIsEmpty(issueResp) {
 		decoded := mustJSON(issueResp)
@@ -143,11 +145,19 @@ func issueView(args []string) {
 		milestone = chompNewlines(formatIssueMilestoneTitle(decoded))
 	}
 
+	// Column width 11 = len("Milestone: "), the widest label plus one space;
+	// Created/Updated/Closed all fit inside it.
+	const issueHeaderWidth = 11
 	fmt.Fprintf(stdout, "Issue #%s: %s\n", number, title)
-	fmt.Fprintf(stdout, "  State:     %s\n", state)
-	fmt.Fprintf(stdout, "  Author:    %s\n", author)
-	fmt.Fprintf(stdout, "  Labels:    %s\n", labels)
-	fmt.Fprintf(stdout, "  Milestone: %s\n", milestone)
+	fmt.Fprintf(stdout, "  %-*s%s\n", issueHeaderWidth, "State:", state)
+	fmt.Fprintf(stdout, "  %-*s%s\n", issueHeaderWidth, "Author:", author)
+	fmt.Fprintf(stdout, "  %-*s%s\n", issueHeaderWidth, "Created:", created)
+	fmt.Fprintf(stdout, "  %-*s%s\n", issueHeaderWidth, "Updated:", updated)
+	if state == "closed" {
+		fmt.Fprintf(stdout, "  %-*s%s\n", issueHeaderWidth, "Closed:", jqBodyDate(issueResp, "closed_at"))
+	}
+	fmt.Fprintf(stdout, "  %-*s%s\n", issueHeaderWidth, "Labels:", labels)
+	fmt.Fprintf(stdout, "  %-*s%s\n", issueHeaderWidth, "Milestone:", milestone)
 	fmt.Fprintln(stdout)
 
 	body := jqBodyAlt(issueResp, "", "body")

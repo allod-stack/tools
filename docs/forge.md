@@ -92,9 +92,9 @@ be repeated (`gh`'s multi-value shape): `--json number,title` and
 `title`, `body`, `state`, `author`, `labels`, `milestone`, `url`, `createdAt`,
 `updatedAt`, `closedAt`, `headRefName`, `baseRefName`, `merged`, `mergedAt`.
 `merged` is the raw boolean and `mergedAt` the raw merge timestamp or `null`,
-both straight from the API. Outside `--json`, a merged pull request's `pr
-view` prints a `Merged: YYYY-MM-DD` line after `Branch:`; an open or
-unmerged-closed pull request prints no such line. The JSON object form
+both straight from the API. Outside `--json`, a closed pull request's `pr
+view` prints a `Closed:` line and then `Merged:   yes YYYY-MM-DD` or
+`Merged:   no`; an open pull request prints neither. The JSON object form
 (`--json body`) carries the body exactly as the API returned it, with a null
 body rendered as the empty string. This lets an edit start from the body as it
 currently is on the forge instead of a retyped rendering of it:
@@ -126,7 +126,13 @@ breaking consumers:
     "number": 12,
     "url": "https://forge.example/acme/widget/pulls/12",
     "title": "Improve widget",
-    "body": "Why this change is useful"
+    "body": "Why this change is useful",
+    "state": "closed",
+    "created_at": "2026-01-01T00:00:00Z",
+    "updated_at": "2026-01-02T00:00:00Z",
+    "closed_at": "2026-01-03T00:00:00Z",
+    "merged": true,
+    "merged_at": "2026-01-03T00:00:00Z"
   },
   "base": {
     "repository": {
@@ -151,13 +157,20 @@ breaking consumers:
 }
 ```
 
-All projected fields are present and non-null; a missing PR body becomes the
-empty string. The command fails instead of emitting partial JSON when the API
-omits repository identity, an HTTPS clone URL without userinfo, query, or
-fragment, a ref, or a 40/64-character hexadecimal Git object ID. Both sides must use the same object
-format, and terminal-facing identity fields cannot contain control characters.
-`base.repository` and `head.repository` are independent, which is what lets the
-same contract represent both same-repository and fork heads.
+All projected fields are present; a missing PR body becomes the empty string.
+`pull_request.closed_at` and `pull_request.merged_at` are `null` until the pull
+request is closed or merged; every other field is always non-null.
+`created_at`, `updated_at`, `closed_at`, and `merged_at` carry the API's full
+RFC 3339 timestamps verbatim. The command fails instead of emitting partial or
+contradictory JSON when the API omits repository identity, an HTTPS clone URL
+without userinfo, query, or fragment, a ref, a 40/64-character hexadecimal Git
+object ID, a valid `state` (`open` or `closed`), a parseable timestamp, or when
+the merge fields disagree with each other (`merged: true` with a null
+`merged_at`, or the reverse) or `closed_at` is set on a PR the API still calls
+open. Both sides must use the same object format, and terminal-facing identity
+fields cannot contain control characters. `base.repository` and
+`head.repository` are independent, which is what lets the same contract
+represent both same-repository and fork heads.
 
 `base.ref` and `head.ref` must each be an ordinary branch name, with one
 exception: `head.ref` may instead be the exact AGit pull-request ref
