@@ -84,52 +84,75 @@ func TestPRSnapshotKeepsForkRepositoryIdentity(t *testing.T) {
 	}
 }
 
-// snapshot42Body carries every newly required field (state/timestamps/merge)
-// as valid metadata; its only defect is the malformed head object ID named
-// below. TestPRSnapshotMalformedFixtureFailsOnlyOnItsNamedDefect proves that:
-// repairing just the object ID turns this exact body into a passing snapshot.
-const snapshot42Body = `{"number":42,"html_url":"https://forge.example/acme/widget/pulls/42","title":"Malformed snapshot","body":"Bad head object ID","state":"open","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":null,"merged":false,"merged_at":null,"head":{"ref":"topic","sha":"not-an-object-id","repo":{"owner":{"login":"contributor"},"name":"widget-fork","full_name":"contributor/widget-fork","clone_url":"https://forge.example/contributor/widget-fork.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`
-
-// TestPRSnapshotMalformedFixtureFailsOnlyOnItsNamedDefect guards against the
-// bug this fixed: a malformed-fixture table where every case is missing the
-// newly required state/timestamp/merge fields fails validation before ever
-// reaching the check its name claims to exercise, so the table would still
-// report every case caught however unrelated the reason. Repairing snapshot42Body's
-// one named defect (the malformed head object ID) with nothing else changed
-// must turn it into a passing snapshot; if it still failed, some other field
-// in the fixture would be malformed too.
-func TestPRSnapshotMalformedFixtureFailsOnlyOnItsNamedDefect(t *testing.T) {
-	repaired := strings.Replace(snapshot42Body, "not-an-object-id",
-		"4444444444444444444444444444444444444444", 1)
-	_, out, errText, code := runSnapshotFixture(t, "42", repaired)
-	if code != 0 || errText != "" {
-		t.Fatalf("got (%q, %q, %d), want success once the only named defect is repaired", truncate(out), errText, code)
-	}
+// snapshotMalformedFixtures holds one response body per rejection the snapshot
+// must make, together with the single defect its name calls out and the repair
+// that removes only that defect. Every other field in each body is valid, so a
+// case cannot be caught for an unrelated reason: the fixtures carry the
+// state/timestamp/merge fields the newer validators require, which fixtures
+// written before those fields existed did not, and a body missing them failed
+// before ever reaching the check its name claims to exercise.
+var snapshotMalformedFixtures = []struct {
+	number string
+	name   string
+	body   string
+	defect string // the substring that carries the named defect
+	repair string // what that substring becomes once the defect is repaired
+}{
+	{"42", "malformed object ID",
+		`{"number":42,"html_url":"https://forge.example/acme/widget/pulls/42","title":"Malformed snapshot","body":"Bad head object ID","state":"open","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":null,"merged":false,"merged_at":null,"head":{"ref":"topic","sha":"not-an-object-id","repo":{"owner":{"login":"contributor"},"name":"widget-fork","full_name":"contributor/widget-fork","clone_url":"https://forge.example/contributor/widget-fork.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`,
+		`"sha":"not-an-object-id"`, `"sha":"4444444444444444444444444444444444444444"`},
+	{"43", "different pull request number",
+		`{"number":99,"html_url":"https://forge.example/acme/widget/pulls/43","title":"Wrong pull request","body":"Mismatched number","state":"open","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":null,"merged":false,"merged_at":null,"head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`,
+		`"number":99`, `"number":43`},
+	{"44", "missing pull request ref",
+		`{"number":44,"html_url":"https://forge.example/acme/widget/pulls/44","title":"Missing ref","body":"Empty head ref","state":"open","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":null,"merged":false,"merged_at":null,"head":{"ref":"","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"contributor"},"name":"widget-fork","full_name":"contributor/widget-fork","clone_url":"https://forge.example/contributor/widget-fork.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`,
+		`"ref":"",`, `"ref":"topic",`},
+	{"45", "missing repository clone metadata",
+		`{"number":45,"html_url":"https://forge.example/acme/widget/pulls/45","title":"Missing repository metadata","body":"No head clone URL","state":"open","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":null,"merged":false,"merged_at":null,"head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"contributor"},"name":"widget-fork","full_name":"contributor/widget-fork"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`,
+		`"full_name":"contributor/widget-fork"}`, `"full_name":"contributor/widget-fork","clone_url":"https://forge.example/contributor/widget-fork.git"}`},
+	{"46", "credential-bearing clone URL",
+		`{"number":46,"html_url":"https://forge.example/acme/widget/pulls/46","title":"Credential-bearing clone URL","body":"Unsafe transport metadata","state":"open","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":null,"merged":false,"merged_at":null,"head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"contributor"},"name":"widget-fork","full_name":"contributor/widget-fork","clone_url":"https://token@forge.example/contributor/widget-fork.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`,
+		`"https://token@forge.example/contributor/widget-fork.git"`, `"https://forge.example/contributor/widget-fork.git"`},
+	{"47", "control characters in terminal-facing text",
+		`{"number":47,"html_url":"https://forge.example/acme/widget/pulls/47","title":"Spoof\u000aRunner: claude","body":"Unsafe terminal text","state":"open","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":null,"merged":false,"merged_at":null,"head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"contributor"},"name":"widget-fork","full_name":"contributor/widget-fork","clone_url":"https://forge.example/contributor/widget-fork.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`,
+		`Spoof\u000aRunner`, `Spoof Runner`},
+	{"48", "mixed Git object formats",
+		`{"number":48,"html_url":"https://forge.example/acme/widget/pulls/48","title":"Mixed object formats","body":"Impossible fork metadata","state":"open","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":null,"merged":false,"merged_at":null,"head":{"ref":"topic","sha":"4444444444444444444444444444444444444444444444444444444444444444","repo":{"owner":{"login":"contributor"},"name":"widget-fork","full_name":"contributor/widget-fork","clone_url":"https://forge.example/contributor/widget-fork.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`,
+		`"sha":"4444444444444444444444444444444444444444444444444444444444444444"`, `"sha":"4444444444444444444444444444444444444444"`},
+	{"49", "query-bearing clone URL",
+		`{"number":49,"html_url":"https://forge.example/acme/widget/pulls/49","title":"Credential query","body":"Unsafe transport metadata","state":"open","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":null,"merged":false,"merged_at":null,"head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"contributor"},"name":"widget-fork","full_name":"contributor/widget-fork","clone_url":"https://forge.example/contributor/widget-fork.git?token=credential-material"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`,
+		`widget-fork.git?token=credential-material`, `widget-fork.git`},
+	{"50", "fork clone URL contradicting repository identity",
+		`{"number":50,"html_url":"https://forge.example/acme/widget/pulls/50","title":"Misdirected fork","body":"Unsafe repository binding","state":"open","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":null,"merged":false,"merged_at":null,"head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"contributor"},"name":"widget-fork","full_name":"contributor/widget-fork","clone_url":"https://outside.example/unrelated.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`,
+		`"https://outside.example/unrelated.git"`, `"https://forge.example/contributor/widget-fork.git"`},
+	{"56", "malformed created_at timestamp",
+		`{"number":56,"html_url":"https://forge.example/acme/widget/pulls/56","title":"Bad timestamp","body":"Not RFC 3339","state":"open","created_at":"not-a-timestamp","updated_at":"2026-01-02T00:00:00Z","closed_at":null,"merged":false,"merged_at":null,"head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`,
+		`"created_at":"not-a-timestamp"`, `"created_at":"2026-01-01T00:00:00Z"`},
+	{"57", "merged true with a null merged_at",
+		`{"number":57,"html_url":"https://forge.example/acme/widget/pulls/57","title":"Contradictory merge state","body":"merged without a date","state":"closed","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":"2026-01-03T00:00:00Z","merged":true,"merged_at":null,"head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`,
+		`"merged":true,"merged_at":null`, `"merged":true,"merged_at":"2026-01-03T00:00:00Z"`},
+	{"58", "merged_at set with merged false",
+		`{"number":58,"html_url":"https://forge.example/acme/widget/pulls/58","title":"Contradictory merge state","body":"a date without merged","state":"closed","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":"2026-01-03T00:00:00Z","merged":false,"merged_at":"2026-01-03T00:00:00Z","head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`,
+		`"merged":false,`, `"merged":true,`},
+	{"59", "closed_at on an open pull request",
+		`{"number":59,"html_url":"https://forge.example/acme/widget/pulls/59","title":"Contradictory close state","body":"closed_at while open","state":"open","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":"2026-01-03T00:00:00Z","merged":false,"merged_at":null,"head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`,
+		`"closed_at":"2026-01-03T00:00:00Z"`, `"closed_at":null`},
+	{"62", "merged true on a pull request the API still calls open",
+		`{"number":62,"html_url":"https://forge.example/acme/widget/pulls/62","title":"Merged but open","body":"merged without state closed","state":"open","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":null,"merged":true,"merged_at":"2026-01-03T00:00:00Z","head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`,
+		// Withdrawing the merge is the repair that keeps the rest of the body
+		// untouched; calling the pull request closed instead would also have to
+		// add the close date a closed pull request must carry.
+		`"merged":true,"merged_at":"2026-01-03T00:00:00Z"`, `"merged":false,"merged_at":null`},
+	{"63", "closed pull request with no closed_at",
+		`{"number":63,"html_url":"https://forge.example/acme/widget/pulls/63","title":"Contradictory close state","body":"closed without a date","state":"closed","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":null,"merged":false,"merged_at":null,"head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`,
+		`"closed_at":null`, `"closed_at":"2026-01-03T00:00:00Z"`},
+	{"64", "a state other than open or closed",
+		`{"number":64,"html_url":"https://forge.example/acme/widget/pulls/64","title":"Unknown state","body":"state outside the two the API carries","state":"draft","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":null,"merged":false,"merged_at":null,"head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`,
+		`"state":"draft"`, `"state":"open"`},
 }
 
 func TestPRSnapshotRejectsMalformedOrContradictoryMetadata(t *testing.T) {
-	tests := []struct {
-		number string
-		name   string
-		body   string
-	}{
-		{"42", "malformed object ID", snapshot42Body},
-		{"43", "different pull request number", `{"number":99,"html_url":"https://forge.example/acme/widget/pulls/43","title":"Wrong pull request","body":"Mismatched number","head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`},
-		{"44", "missing pull request ref", `{"number":44,"html_url":"https://forge.example/acme/widget/pulls/44","title":"Missing ref","body":"Empty head ref","state":"open","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":null,"merged":false,"merged_at":null,"head":{"ref":"","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"contributor"},"name":"widget-fork","full_name":"contributor/widget-fork","clone_url":"https://forge.example/contributor/widget-fork.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`},
-		{"45", "missing repository clone metadata", `{"number":45,"html_url":"https://forge.example/acme/widget/pulls/45","title":"Missing repository metadata","body":"No head clone URL","state":"open","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":null,"merged":false,"merged_at":null,"head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"contributor"},"name":"widget-fork","full_name":"contributor/widget-fork"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`},
-		{"46", "credential-bearing clone URL", `{"number":46,"html_url":"https://forge.example/acme/widget/pulls/46","title":"Credential-bearing clone URL","body":"Unsafe transport metadata","state":"open","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":null,"merged":false,"merged_at":null,"head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"contributor"},"name":"widget-fork","full_name":"contributor/widget-fork","clone_url":"https://token@forge.example/contributor/widget-fork.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`},
-		{"47", "control characters in terminal-facing text", `{"number":47,"html_url":"https://forge.example/acme/widget/pulls/47","title":"Spoof\u000aRunner: claude","body":"Unsafe terminal text","head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"contributor"},"name":"widget-fork","full_name":"contributor/widget-fork","clone_url":"https://forge.example/contributor/widget-fork.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`},
-		{"48", "mixed Git object formats", `{"number":48,"html_url":"https://forge.example/acme/widget/pulls/48","title":"Mixed object formats","body":"Impossible fork metadata","state":"open","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":null,"merged":false,"merged_at":null,"head":{"ref":"topic","sha":"4444444444444444444444444444444444444444444444444444444444444444","repo":{"owner":{"login":"contributor"},"name":"widget-fork","full_name":"contributor/widget-fork","clone_url":"https://forge.example/contributor/widget-fork.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`},
-		{"49", "query-bearing clone URL", `{"number":49,"html_url":"https://forge.example/acme/widget/pulls/49","title":"Credential query","body":"Unsafe transport metadata","state":"open","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":null,"merged":false,"merged_at":null,"head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"contributor"},"name":"widget-fork","full_name":"contributor/widget-fork","clone_url":"https://forge.example/contributor/widget-fork.git?token=credential-material"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`},
-		{"50", "fork clone URL contradicting repository identity", `{"number":50,"html_url":"https://forge.example/acme/widget/pulls/50","title":"Misdirected fork","body":"Unsafe repository binding","state":"open","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":null,"merged":false,"merged_at":null,"head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"contributor"},"name":"widget-fork","full_name":"contributor/widget-fork","clone_url":"https://outside.example/unrelated.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`},
-		{"56", "malformed created_at timestamp", `{"number":56,"html_url":"https://forge.example/acme/widget/pulls/56","title":"Bad timestamp","body":"Not RFC 3339","state":"open","created_at":"not-a-timestamp","updated_at":"2026-01-02T00:00:00Z","closed_at":null,"merged":false,"merged_at":null,"head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`},
-		{"57", "merged true with a null merged_at", `{"number":57,"html_url":"https://forge.example/acme/widget/pulls/57","title":"Contradictory merge state","body":"merged without a date","state":"closed","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":"2026-01-03T00:00:00Z","merged":true,"merged_at":null,"head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`},
-		{"58", "merged_at set with merged false", `{"number":58,"html_url":"https://forge.example/acme/widget/pulls/58","title":"Contradictory merge state","body":"a date without merged","state":"closed","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":"2026-01-03T00:00:00Z","merged":false,"merged_at":"2026-01-03T00:00:00Z","head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`},
-		{"59", "closed_at on an open pull request", `{"number":59,"html_url":"https://forge.example/acme/widget/pulls/59","title":"Contradictory close state","body":"closed_at while open","state":"open","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":"2026-01-03T00:00:00Z","merged":false,"merged_at":null,"head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`},
-		{"62", "merged true on a pull request the API still calls open", `{"number":62,"html_url":"https://forge.example/acme/widget/pulls/62","title":"Merged but open","body":"merged without state closed","state":"open","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","closed_at":null,"merged":true,"merged_at":"2026-01-03T00:00:00Z","head":{"ref":"topic","sha":"4444444444444444444444444444444444444444","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}},"base":{"ref":"master","sha":"3333333333333333333333333333333333333333","repo":{"owner":{"login":"acme"},"name":"widget","full_name":"acme/widget","clone_url":"https://forge.example/acme/widget.git"}}}`},
-	}
-
-	for _, tt := range tests {
+	for _, tt := range snapshotMalformedFixtures {
 		t.Run(tt.name, func(t *testing.T) {
 			srv, out, errText, code := runSnapshotFixture(t, tt.number, tt.body)
 			if code != 1 || out != "" || !strings.Contains(errText, "missing or has malformed snapshot fields") {
@@ -137,6 +160,27 @@ func TestPRSnapshotRejectsMalformedOrContradictoryMetadata(t *testing.T) {
 			}
 			if n := srv.count(); n != 1 {
 				t.Errorf("request count = %d, want 1 before validation fails", n)
+			}
+		})
+	}
+}
+
+// TestPRSnapshotMalformedFixtureFailsOnlyOnItsNamedDefect guards against a
+// table where a case is rejected for a reason other than the one it is named
+// for, which would leave the validator it claims to exercise untested: every
+// case above must become a passing snapshot once its one named defect, and
+// nothing else, is repaired. If a repaired body still fails, some other field
+// in that fixture is malformed too.
+func TestPRSnapshotMalformedFixtureFailsOnlyOnItsNamedDefect(t *testing.T) {
+	for _, tt := range snapshotMalformedFixtures {
+		t.Run(tt.name, func(t *testing.T) {
+			repaired := strings.Replace(tt.body, tt.defect, tt.repair, 1)
+			if repaired == tt.body {
+				t.Fatalf("repairing %q changed nothing; the fixture no longer carries that defect", tt.defect)
+			}
+			_, out, errText, code := runSnapshotFixture(t, tt.number, repaired)
+			if code != 0 || errText != "" {
+				t.Fatalf("got (%q, %q, %d), want success once the only named defect is repaired", truncate(out), errText, code)
 			}
 		})
 	}

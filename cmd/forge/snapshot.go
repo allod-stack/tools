@@ -151,12 +151,17 @@ func projectPRSnapshot(body []byte, requestedNumber string) (prSnapshot, bool) {
 		return prSnapshot{}, false
 	}
 	// Contradictory metadata: a merge flag without a merge date or vice
-	// versa, a close date on a PR the API still calls open, or a merged PR
-	// the API still calls open (Forgejo always closes a PR it merges).
+	// versa, a close date on a PR the API still calls open, a closed PR
+	// with no close date (the snapshot documents closed_at as null only
+	// until the PR is closed), or a merged PR the API still calls open
+	// (Forgejo always closes a PR it merges).
 	if merged != (mergedAt != nil) {
 		return prSnapshot{}, false
 	}
 	if state == "open" && closedAt != nil {
+		return prSnapshot{}, false
+	}
+	if state == "closed" && closedAt == nil {
 		return prSnapshot{}, false
 	}
 	if merged && state != "closed" {
