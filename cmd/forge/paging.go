@@ -10,7 +10,10 @@ package main
 // no list or resolver can again stop at the first page and call it the whole
 // result set.
 
-import "strconv"
+import (
+	"encoding/json"
+	"strconv"
+)
 
 // serverPageCap is the largest page the server hands back regardless of the
 // limit requested.
@@ -31,6 +34,12 @@ const serverPageCap = 50
 // collected, whichever comes first; the result is truncated to limit in the
 // latter case. A failed request dies through api()'s existing error path,
 // exactly as a single-page caller's request already did.
+//
+// A server that ignores the page parameter and answers every page with the
+// same items would otherwise never produce a short page, looping forever
+// with unbounded memory. Consecutive pages are guarded against that: each
+// page's identity (pageIdentityKey of its first element) is compared with
+// the previous page's, and a repeat dies rather than looping.
 func fetchPages(basePath string, limit int) []any {
 	size := serverPageCap
 	if limit > 0 && limit < size {
@@ -43,9 +52,19 @@ func fetchPages(basePath string, limit int) []any {
 	}
 
 	var items []any
+	prevKey, havePrev := "", false
 	for page := 1; ; page++ {
 		path := basePath + sep + "limit=" + strconv.Itoa(size) + "&page=" + strconv.Itoa(page)
 		got := jsonArray(mustJSON(api("GET", path, nil)))
+
+		if len(got) > 0 {
+			key := pageIdentityKey(got[0])
+			if havePrev && key == prevKey {
+				die("server repeated page %d; refusing to loop: %s", page, basePath)
+			}
+			prevKey, havePrev = key, true
+		}
+
 		items = append(items, got...)
 		if limit > 0 && len(items) >= limit {
 			break
@@ -58,6 +77,25 @@ func fetchPages(basePath string, limit int) []any {
 		items = items[:limit]
 	}
 	return items
+}
+
+// pageIdentityKey is what fetchPages compares between consecutive pages to
+// detect a repeat: an item's id when it has one, else its number, else the
+// item's own JSON encoding -- always something, so two genuinely different
+// pages whose first element happens to lack both id and number still compare
+// by content rather than by a key both would share.
+func pageIdentityKey(item any) string {
+	if id := jsonField(item, "id"); id != nil && id != false {
+		return "id:" + jqString(id)
+	}
+	if number := jsonField(item, "number"); number != nil && number != false {
+		return "number:" + jqString(number)
+	}
+	b, err := json.Marshal(item)
+	if err != nil {
+		return ""
+	}
+	return "json:" + string(b)
 }
 
 // queryStarted reports whether basePath already carries a "?", so fetchPages

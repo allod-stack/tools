@@ -27,6 +27,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -439,14 +440,26 @@ func bashArithPositive(digits string) bool {
 	return ok && v > 0
 }
 
-// limitCount is the integer count a -L/--limit string names, using the same
-// arithmetic parsePositiveInt already validated it with (issue.go's
-// issueList, label.go's labelList). Only the pagination helper needs the
-// count; every caller still shows and forwards parsePositiveInt's own
-// verbatim string everywhere else, so a leading-zero spelling never reaches
-// the network beyond sizing and truncating pages.
+// limitCount is the decimal item count a -L/--limit string names, once
+// parsePositiveInt (issue.go's issueList, label.go's labelList) has already
+// accepted it: parsePositiveInt's own bash-arithmetic validation reads a
+// leading zero as octal, mirroring `[[ "$value" -gt 0 ]]`, but that governs
+// only whether the string is accepted. The accepted string itself is what
+// used to reach the server verbatim, and the server -- like every other
+// consumer of a plain "-L" digit string -- reads it as a decimal integer:
+// "-L 010" must fetch and print 10 rows, not the 8 that bash's octal rule
+// would give it. So pagination sizes and truncates by the decimal value of
+// the same digit string parsePositiveInt validated, not by the arithmetic
+// value that decided whether to accept it.
+//
+// More digits than fit in an int64 cannot be a real desired count, so that
+// overflow is treated as "everything": limit 0 fetches every page instead of
+// truncating to a bogus number.
 func limitCount(digits string) int {
-	v, _ := digitsValue(digits)
+	v, err := strconv.ParseInt(digits, 10, 64)
+	if err != nil {
+		return 0
+	}
 	return int(v)
 }
 

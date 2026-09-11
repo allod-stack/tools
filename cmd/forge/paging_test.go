@@ -15,18 +15,24 @@ import (
 	"testing"
 )
 
-func fillerLabels(n int) []any {
+// fillerLabels builds n label objects with distinct, non-matching ids
+// starting at startID, so a page built from one call never collides with a
+// page built from another -- fetchPages' repeated-page guard would otherwise
+// mistake two genuinely different filler pages for a server repeat.
+func fillerLabels(n, startID int) []any {
 	items := make([]any, n)
 	for i := 0; i < n; i++ {
-		items[i] = map[string]any{"id": i + 1, "name": fmt.Sprintf("filler-label-%d", i+1)}
+		items[i] = map[string]any{"id": startID + i, "name": fmt.Sprintf("filler-label-%d", startID+i)}
 	}
 	return items
 }
 
-func fillerMilestones(n int) []any {
+// fillerMilestones is fillerLabels for milestones (id and title, no
+// server-side filter applied client-side).
+func fillerMilestones(n, startID int) []any {
 	items := make([]any, n)
 	for i := 0; i < n; i++ {
-		items[i] = map[string]any{"id": i + 1, "title": fmt.Sprintf("filler-milestone-%d", i+1)}
+		items[i] = map[string]any{"id": startID + i, "title": fmt.Sprintf("filler-milestone-%d", startID+i)}
 	}
 	return items
 }
@@ -63,7 +69,7 @@ func TestLabelResolutionAcrossPages(t *testing.T) {
 	t.Run("a name on page 2 still resolves", func(t *testing.T) {
 		page2 := []any{map[string]any{"id": 99, "name": "bug"}}
 		srv := newRecordingServer(t, map[string]cannedResponse{
-			"GET /api/v1/repos/acme/widget/labels?limit=50&page=1": mustBody(t, fillerLabels(50)),
+			"GET /api/v1/repos/acme/widget/labels?limit=50&page=1": mustBody(t, fillerLabels(50, 1)),
 			"GET /api/v1/repos/acme/widget/labels?limit=50&page=2": mustBody(t, page2),
 			"DELETE /api/v1/repos/acme/widget/labels/99":           {},
 		})
@@ -82,8 +88,8 @@ func TestLabelResolutionAcrossPages(t *testing.T) {
 
 	t.Run("a name missing from every page still fails, after fetching every page", func(t *testing.T) {
 		srv := newRecordingServer(t, map[string]cannedResponse{
-			"GET /api/v1/repos/acme/widget/labels?limit=50&page=1": mustBody(t, fillerLabels(50)),
-			"GET /api/v1/repos/acme/widget/labels?limit=50&page=2": mustBody(t, fillerLabels(5)),
+			"GET /api/v1/repos/acme/widget/labels?limit=50&page=1": mustBody(t, fillerLabels(50, 1)),
+			"GET /api/v1/repos/acme/widget/labels?limit=50&page=2": mustBody(t, fillerLabels(5, 1000)),
 		})
 		useServer(t, srv)
 		useToken(t, fakeToken)
@@ -111,7 +117,7 @@ func TestMilestoneResolutionAcrossPages(t *testing.T) {
 			"open_issues": 2, "closed_issues": 1, "due_on": "2026-07-31T00:00:00Z",
 		}}
 		srv := newRecordingServer(t, map[string]cannedResponse{
-			"GET /api/v1/repos/acme/widget/milestones?state=all&name=July%20batch&limit=50&page=1": mustBody(t, fillerMilestones(50)),
+			"GET /api/v1/repos/acme/widget/milestones?state=all&name=July%20batch&limit=50&page=1": mustBody(t, fillerMilestones(50, 1)),
 			"GET /api/v1/repos/acme/widget/milestones?state=all&name=July%20batch&limit=50&page=2": mustBody(t, page2),
 			"GET /api/v1/repos/acme/widget/milestones/77": {
 				Body: `{"id":77,"title":"July batch","state":"open","description":"July work","open_issues":2,"closed_issues":1,"due_on":"2026-07-31T00:00:00Z"}`,
@@ -135,8 +141,8 @@ func TestMilestoneResolutionAcrossPages(t *testing.T) {
 
 	t.Run("a title missing from every page still fails, after fetching every page", func(t *testing.T) {
 		srv := newRecordingServer(t, map[string]cannedResponse{
-			"GET /api/v1/repos/acme/widget/milestones?state=all&name=Nonexistent&limit=50&page=1": mustBody(t, fillerMilestones(50)),
-			"GET /api/v1/repos/acme/widget/milestones?state=all&name=Nonexistent&limit=50&page=2": mustBody(t, fillerMilestones(5)),
+			"GET /api/v1/repos/acme/widget/milestones?state=all&name=Nonexistent&limit=50&page=1": mustBody(t, fillerMilestones(50, 1)),
+			"GET /api/v1/repos/acme/widget/milestones?state=all&name=Nonexistent&limit=50&page=2": mustBody(t, fillerMilestones(5, 1000)),
 		})
 		useServer(t, srv)
 		useToken(t, fakeToken)
@@ -272,6 +278,58 @@ func TestPRListAcrossPages(t *testing.T) {
 	srv.assertRequest(t, 1, "GET", "/api/v1/repos/acme/widget/pulls?state=open&limit=50&page=2")
 }
 
+// --- fetchPages refuses to loop on a server that repeats pages ---
+
+// A server that ignores the page parameter and answers every page number
+// with the same full page would otherwise never produce a short page, so
+// fetchPages would never stop: unbounded requests and unbounded memory
+// (allod/tools#89 review finding). fetchPages compares each page's first
+// element against the previous page's and dies on a repeat instead.
+func TestFetchPagesRejectsRepeatedPage(t *testing.T) {
+	t.Run("a server that repeats the same page forever is refused, not looped", func(t *testing.T) {
+		samePage := fillerPulls(50, 1)
+		srv := newRecordingServer(t, map[string]cannedResponse{
+			"GET /api/v1/repos/acme/widget/pulls?state=open&limit=50&page=1": mustBody(t, samePage),
+			"GET /api/v1/repos/acme/widget/pulls?state=open&limit=50&page=2": mustBody(t, samePage),
+		})
+		useServer(t, srv)
+		useToken(t, fakeToken)
+		useNoInferRepo(t)
+
+		out, errText, code := runForge(t, "-R", "acme/widget", "pr", "list")
+		if code != 1 {
+			t.Fatalf("exit = %d, want 1\nstdout: %s\nstderr: %s", code, out, errText)
+		}
+		want := "server repeated page 2; refusing to loop: /repos/acme/widget/pulls?state=open"
+		if !strings.Contains(errText, want) {
+			t.Errorf("stderr = %q, want it to contain %q", errText, want)
+		}
+		// Exactly the request that first saw the repeat, no third page: the
+		// guard trips before fetchPages asks again.
+		if n := srv.count(); n != 2 {
+			t.Errorf("request count = %d, want 2 (page 1, then the repeat that trips the guard)", n)
+		}
+	})
+
+	t.Run("a genuine two-page result still concatenates", func(t *testing.T) {
+		srv := newRecordingServer(t, map[string]cannedResponse{
+			"GET /api/v1/repos/acme/widget/pulls?state=open&limit=50&page=1": mustBody(t, fillerPulls(50, 1)),
+			"GET /api/v1/repos/acme/widget/pulls?state=open&limit=50&page=2": mustBody(t, fillerPulls(3, 51)),
+		})
+		useServer(t, srv)
+		useToken(t, fakeToken)
+		useNoInferRepo(t)
+
+		out, errText, code := runForge(t, "-R", "acme/widget", "pr", "list")
+		if code != 0 || errText != "" {
+			t.Fatalf("got (%q, %q, %d), want success", out, errText, code)
+		}
+		if got := strings.Count(strings.TrimRight(out, "\n"), "\n") + 1; got != 53 {
+			t.Errorf("printed %d rows, want 53 (every PR across both distinct pages)", got)
+		}
+	})
+}
+
 // --- issue list respects --limit while paging ---
 
 func TestIssueListPagination(t *testing.T) {
@@ -312,6 +370,32 @@ func TestIssueListPagination(t *testing.T) {
 		srv.assertRequest(t, 1, "GET", "/api/v1/repos/acme/widget/issues?type=issues&state=open&limit=50&page=2")
 		if got := strings.Count(strings.TrimRight(out, "\n"), "\n") + 1; got != 60 {
 			t.Errorf("printed %d rows, want 60 (truncated to the limit)", got)
+		}
+	})
+
+	// "-L 010" must be read the way the server (and every plain --limit
+	// consumer) reads it: decimal 10, not bash arithmetic's octal 8.
+	// parsePositiveInt's own leading-zero-is-octal validation still governs
+	// whether "010" is accepted at all; only the count used to size and
+	// truncate pages changed (allod/tools#89 review finding).
+	t.Run("-L 010 is read as decimal 10, not octal 8", func(t *testing.T) {
+		srv := newRecordingServer(t, map[string]cannedResponse{
+			"GET /api/v1/repos/acme/widget/issues?type=issues&state=open&limit=10&page=1": mustBody(t, fillerIssues(10, 1)),
+		})
+		useServer(t, srv)
+		useToken(t, fakeToken)
+		useNoInferRepo(t)
+
+		out, errText, code := runForge(t, "-R", "acme/widget", "issue", "list", "-L", "010")
+		if code != 0 || errText != "" {
+			t.Fatalf("got (%q, %q, %d), want success", out, errText, code)
+		}
+		srv.assertRequest(t, 0, "GET", "/api/v1/repos/acme/widget/issues?type=issues&state=open&limit=10&page=1")
+		if n := srv.count(); n != 1 {
+			t.Errorf("request count = %d, want 1", n)
+		}
+		if got := strings.Count(strings.TrimRight(out, "\n"), "\n") + 1; got != 10 {
+			t.Errorf("printed %d rows, want 10", got)
 		}
 	})
 }
