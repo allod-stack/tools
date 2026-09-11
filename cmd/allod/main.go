@@ -157,8 +157,15 @@ auto-generated in /tmp).
 '--repo <destination-repo>' sets the apply destination (default: current
 directory).
 
-Repo arguments (<source-repo> and <destination-repo>): a repo argument that
-is absolute or begins with '~', '.', or '..' is a path. Anything else is
-looked up in the repository registry first and, when no entry matches,
-treated as a relative path.
+Repo arguments: a <destination-repo> (and apply's --repo) that is absolute
+or begins with '~', '.', or '..' is a path; anything else is looked up in
+the repository registry first and, when no entry matches, treated as a
+relative path. A <source-repo> is stricter, since it names a path on the
+SOURCE machine: only an absolute path there, a '~/'-prefixed path there, or
+a registry id is accepted, because a path relative to a remote working
+directory has no meaning over SSH; anything else fails with "source repo
+must be an absolute path or a registry id". A registry-id source is sent to
+the remote as work/<checkout> and resolved against that machine's own
+$HOME, so it relies on the source checkout living at ~/work/<checkout>
+there; a source machine with a different WORK_DIR must be named by path.
 `

@@ -109,8 +109,8 @@ func resolvePatchDestinationArg(input string) string {
 // resolvePatchSourceArg resolves a fetch/receive source repo argument on the
 // LOCAL machine — the registry is the same tracked file on every machine,
 // and vm-provisioning.md requires every machine to check out at
-// $HOME/<checkout> — into the value sent to the remote host: an absolute
-// path as-is, or a path relative to the remote's own $HOME, which
+// $HOME/work/<checkout> — into the value sent to the remote host: an
+// absolute path as-is, or a path relative to the remote's own $HOME, which
 // remoteGenerateScript resolves against its own $HOME since this process
 // cannot see the remote's.
 func resolvePatchSourceArg(sourceRepo string) string {

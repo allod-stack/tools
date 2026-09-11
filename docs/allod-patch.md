@@ -45,7 +45,13 @@ Runs `fetch` then `apply`. The artifact directory is preserved after both succes
 
 ## Repo arguments
 
-`<source-repo>` and `<destination-repo>` (and `apply --repo`'s value) each accept either a filesystem path or a repository-registry id such as `allod/memory`. A repo argument that is absolute or begins with `~`, `.`, or `..` is a path. Anything else is looked up in the repository registry (`inventory/scripts/repositories.json`) first and, when no entry matches, treated as a relative path. This lets a relay command such as `allod patch receive <host>:allod/memory allod/memory` resolve both ends through the registry, so neither the agent composing the command nor the human running it needs to know where the other side's checkout lives.
+`<destination-repo>` and `apply --repo`'s value each accept either a filesystem path or a repository-registry id such as `allod/memory`: a repo argument that is absolute or begins with `~`, `.`, or `..` is a path, and anything else is looked up in the repository registry (`inventory/scripts/repositories.json`) first and, when no entry matches, treated as a relative path.
+
+`<source-repo>` is stricter, because it names a path on the *source* machine, not the one running `fetch` or `receive`: it accepts an absolute path there, a `~/`-prefixed path there, or a registry id, and nothing else — a path relative to a remote working directory has no meaning over SSH. A source value that is none of those (a bare relative path that is not a registry id, for example) fails with `source repo must be an absolute path or a registry id: <value>`.
+
+A registry-id source is sent to the remote host as `work/<checkout>` and resolved there against that machine's own `$HOME`, so it depends on the source machine keeping its checkout at `~/work/<checkout>`, the layout `vm-provisioning.md` ("Checkout Paths Are Load-Bearing") requires; a source machine that sets a different `WORK_DIR` must be named by path instead of by id.
+
+This lets a relay command such as `allod patch receive <host>:allod/memory allod/memory` resolve both ends through the registry, so neither the agent composing the command nor the human running it needs to know where the other side's checkout lives.
 
 An id that resolves to the wrong clone is not a silent misapply: `apply`'s origin-URL identity check (exit 13, below) still runs against whatever directory the id names, so a stale or wrong registry entry fails there rather than applying into an unrelated repository.
 
