@@ -16,12 +16,15 @@ package main
 // init() extends the same table with 'create' and 'rekey' from behind its
 // tag.
 //
-// declare is a text tool, not a nix one: it finds each insertion point by
-// pattern rather than by evaluating the flake, so it needs no nix on PATH
-// and can run before the branch it edits would even evaluate (a 'pending'
-// entry with no ciphertext, which is exactly the shape credential-inventory
-// accepts). Every insertion is one contiguous block; every other byte of
-// every file is untouched.
+// The three writes are textual insertions found by pattern, not by
+// evaluating the secrets flake, so declare can run before the branch it
+// edits would even evaluate (a 'pending' entry with no ciphertext, which is
+// exactly the shape credential-inventory accepts). Every insertion is one
+// contiguous block; every other byte of every file is untouched. declare
+// does need 'nix' on PATH for one thing: deriving each --to machine's
+// target kind from the inventory flake's own 'machines.<name>.type' rather
+// than taking it as a flag, so nothing on the command line can misdeclare
+// a machine's own type.
 
 import (
 	"encoding/json"
@@ -73,9 +76,12 @@ secrets.nix key, and a filename. --kind is the credential's own kind and
 must be one of: user, machine-host, forge-git, agent, service (the enum
 credential-inventory enforces). --owner is a free-form identifier. --to
 names one or more target machines, comma-separated or by repeating the
-flag; 'nexus' is the host and gets target kind "nixos-host", every other
-name is looked up in the inventory's VM registry to derive "dev-vm" or
-"privacy-vm" — a name absent there is refused. --format is one of:
+flag; each one's registry kind is read from the inventory flake's own
+'machines.<name>.type' (dev -> dev-vm, privacy -> privacy-vm, hypervisor ->
+nixos-host, service -> service-vm — nexus reaches nixos-host this way too,
+since its type is hypervisor) — a name absent there, an unexpected type, or
+a failed nix run is refused, naming the inventory checkout, the machine,
+and the accepted types. --format is one of:
 raw-forgejo-token, credential-store-url, rclone-remote-stanza. --deployed-path
 and --verify (one of: forge-token-verify, git-ls-remote, site-check) apply
 to every target. --service defaults to "none"; "forgejo" requires --account
@@ -89,9 +95,11 @@ writes text, not ciphertext, reads no identity, and never commits — review
 the diff it leaves, then run 'allod secret create <name>' to land the
 secret half.
 
-It resolves the checkout the way 'create' does: the repository registry's
-checkout under ~/work, or an explicit <checkout> path. On success it prints
-the three paths it changed, one per line, and nothing else.
+It resolves the secrets checkout the way 'create' does: the repository
+registry's checkout under ~/work, or an explicit <checkout> path. It
+resolves the inventory checkout the same way (or $INVENTORY, which always
+wins) to read machine types. On success it prints the three paths it
+changed, one per line, and nothing else.
 `
 
 // --- Argument parsing ---
@@ -243,61 +251,54 @@ func stringInList(value string, list []string) bool {
 
 // --- Target machine kind ---
 
-// declareVMSpec is the subset of one vm-specs.json entry declare reads.
-// vm-specs.json (generated from the inventory flake's 'machines' attrset by
-// mkVmSpecsJson) does not carry a 'type' field for guest machines — that
-// field is filtered out on the way to JSON, kept only inside the flake's
-// own validation. 'repos' is the one field left that distinguishes a dev VM
-// from a privacy VM in the committed public template: a dev VM carries the
-// repository checkouts an agent works in, a privacy VM carries none. This
-// is a real limitation, not the inventory 'type' field the brief that wrote
-// this command expected to read; see the worker report for allod/tools#196.
-type declareVMSpec struct {
-	Repos []string `json:"repos"`
+// declareTargetKindByType maps the inventory flake's own 'machines.<name>.type'
+// (the same field mkVmSpecs asserts is one of these four — see
+// inventory/flake.nix's runtimeFreeTypes and validRuntimes) to the registry
+// 'kind' enum validate_group_metadata (nexus/scripts/rotate-token) accepts.
+// There is no longer a literal 'nexus' special case: nexus's own type is
+// "hypervisor", so it reaches "nixos-host" through the same lookup as every
+// other machine.
+var declareTargetKindByType = map[string]string{
+	"dev":        "dev-vm",
+	"privacy":    "privacy-vm",
+	"hypervisor": "nixos-host",
+	"service":    "service-vm",
 }
 
-func declareInventoryCheckout() string {
-	if value := os.Getenv("INVENTORY"); value != "" {
-		return strings.TrimRight(value, "/")
-	}
-	return filepath.Join(workDir(), "allod", "inventory")
-}
+const declareAcceptedMachineTypes = "dev, privacy, hypervisor, service"
 
-func declareVMSpecsPath() string {
-	return filepath.Join(declareInventoryCheckout(), "scripts", "vm-specs.json")
-}
-
-// declareLoadVMSpecs is a test seam: production reads vm-specs.json from
-// disk, tests replace it with a fixture map so no inventory checkout is
-// needed to exercise the derivation.
-var declareLoadVMSpecs = func() map[string]declareVMSpec {
-	path := declareVMSpecsPath()
-	data, err := os.ReadFile(path)
+// declareEvalMachineType reads one machine's type off the inventory flake's
+// own 'machines' output — archetypes' consumption path ('machines =
+// inventory.machines' in archetypes/flake.nix), not 'lib.machines', though
+// both name the same validated value.
+func declareEvalMachineType(checkout, machine string) (string, error) {
+	data, err := nixEvalJSON(checkout, "machines."+machine+".type")
 	if err != nil {
-		die(1, "could not read the inventory VM registry %s: %s", path, err)
+		return "", err
 	}
-	var specs map[string]declareVMSpec
-	if err := json.Unmarshal(data, &specs); err != nil {
-		die(1, "%s is not valid JSON: %s", path, err)
+	var machineType string
+	if err := json.Unmarshal(data, &machineType); err != nil {
+		return "", fmt.Errorf("machines.%s.type is not a string: %w", machine, err)
 	}
-	return specs
+	return machineType, nil
 }
 
 // declareTargetKind derives one machine's registry 'kind' rather than
 // taking it as a flag, so nothing on the command line can misdeclare a
-// machine's own type. 'nexus' is the one host and is never looked up.
-func declareTargetKind(machine string, specs map[string]declareVMSpec) string {
-	if machine == "nexus" {
-		return "nixos-host"
+// machine's own type. Every failure — the machine absent from the
+// inventory, nix itself failing, or a type outside the four the flake
+// enforces — names the inventory checkout, the machine, and the accepted
+// types, so a stale pin or a typo reads the same as an absent machine.
+func declareTargetKind(inventoryCheckoutPath, machine string) string {
+	machineType, err := declareEvalMachineType(inventoryCheckoutPath, machine)
+	if err != nil {
+		die(1, "could not read the type of machine '%s' from %s: %s; accepted types: %s", machine, inventoryCheckoutPath, err, declareAcceptedMachineTypes)
 	}
-	entry, ok := specs[machine]
+	kind, ok := declareTargetKindByType[machineType]
 	if !ok {
-		die(1, "machine '%s' named in --to is not in %s", machine, declareVMSpecsPath())
+		die(1, "machine '%s' in %s has type '%s'; accepted types: %s", machine, inventoryCheckoutPath, machineType, declareAcceptedMachineTypes)
 	}
-	if len(entry.Repos) > 0 {
-		return "dev-vm"
-	}
-	return "privacy-vm"
+	return kind
 }
 
 // --- The registry group shape ---
@@ -439,18 +440,20 @@ func declareInsertCredentialsEntry(text string, parsed declareArgs) (string, err
 }
 
 // declareSecretsRecipients renders the '[ hostKey ] ++ vmKeys "<vm>" ...'
-// expression for one or more target machines, in --to order. 'nexus' is the
-// host itself: hostKey already covers it, so it contributes no vmKeys call
-// — the same shape the template's host-only lines use
-// ('"secrets/vm-host-keys/nexus-ssh.age".publicKeys = [ hostKey ];').
-func declareSecretsRecipients(to []string) string {
+// expression for one or more targets, in --to order. A target whose derived
+// kind is "nixos-host" is the host itself: hostKey already covers it, so it
+// contributes no vmKeys call — the same shape the template's host-only
+// lines use ('"secrets/vm-host-keys/nexus-ssh.age".publicKeys = [ hostKey
+// ];'). This reads each target's already-derived kind rather than
+// special-casing a machine name, so it needs no literal 'nexus' of its own.
+func declareSecretsRecipients(targets []declareTarget) string {
 	var b strings.Builder
 	b.WriteString("[ hostKey ]")
-	for _, machine := range to {
-		if machine == "nexus" {
+	for _, target := range targets {
+		if target.Kind == "nixos-host" {
 			continue
 		}
-		fmt.Fprintf(&b, " ++ vmKeys %q", machine)
+		fmt.Fprintf(&b, " ++ vmKeys %q", target.System)
 	}
 	return b.String()
 }
@@ -463,13 +466,13 @@ var declareSecretsLinePattern = regexp.MustCompile(`(?m)^  "secrets/[A-Za-z0-9._
 // the last existing line of the same shape, touching nothing else. Unlike
 // credentials.nix entries, secrets.nix lines are not blank-line separated in
 // the template, so none is added here.
-func declareInsertSecretsLine(text string, parsed declareArgs) (string, error) {
+func declareInsertSecretsLine(text string, name string, targets []declareTarget) (string, error) {
 	matches := declareSecretsLinePattern.FindAllStringIndex(text, -1)
 	if len(matches) == 0 {
 		return "", fmt.Errorf("no existing publicKeys line to insert after")
 	}
 	last := matches[len(matches)-1]
-	line := fmt.Sprintf(`  "secrets/%s.age".publicKeys = %s;`, parsed.name, declareSecretsRecipients(parsed.to))
+	line := fmt.Sprintf(`  "secrets/%s.age".publicKeys = %s;`, name, declareSecretsRecipients(targets))
 	return text[:last[1]] + "\n" + line + text[last[1]:], nil
 }
 
@@ -590,25 +593,15 @@ func secretDeclare(args []string) {
 		die(1, "credential '%s' already exists; declare never edits an existing declaration", parsed.name)
 	}
 
-	// The VM registry is loaded only if some target is not 'nexus': a
-	// declaration that targets the host alone needs no inventory checkout
-	// at all.
-	var specs map[string]declareVMSpec
-	needsVMRegistry := false
-	for _, machine := range parsed.to {
-		if machine != "nexus" {
-			needsVMRegistry = true
-			break
-		}
-	}
-	if needsVMRegistry {
-		specs = declareLoadVMSpecs()
-	}
+	// Every target's kind is derived from the inventory flake, 'nexus'
+	// included, so this always needs the inventory checkout once --to
+	// names at least one machine, which parseDeclareArgs already required.
+	inventoryCheckoutPath := inventoryCheckout()
 	targets := make([]declareTarget, 0, len(parsed.to))
 	for _, machine := range parsed.to {
 		targets = append(targets, declareTarget{
 			System:       machine,
-			Kind:         declareTargetKind(machine, specs),
+			Kind:         declareTargetKind(inventoryCheckoutPath, machine),
 			DeployedPath: parsed.deployedPath,
 			Verify:       declareVerify{Type: parsed.verify},
 		})
@@ -622,7 +615,7 @@ func secretDeclare(args []string) {
 		die(1, "credentials.nix: the edit would leave unbalanced braces; refusing to write")
 	}
 
-	newSecretsText, err := declareInsertSecretsLine(secretsText, parsed)
+	newSecretsText, err := declareInsertSecretsLine(secretsText, parsed.name, targets)
 	if err != nil {
 		die(1, "secrets.nix: %s", err)
 	}

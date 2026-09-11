@@ -19,8 +19,10 @@ package main
 // no tag while 'create' and 'rekey' do.
 
 import (
+	"bytes"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -198,4 +200,47 @@ func secretsCheckoutRelative() string {
 		}
 	}
 	return fallback
+}
+
+// inventoryCheckout resolves the inventory checkout the way
+// resolveSecretsCheckout resolves the secrets one when no override is
+// given: the repository registry's checkout for it under ~/work, or the
+// conventional allod/inventory when the registry does not name one. The
+// INVENTORY environment variable, mirroring nexus's rotate-token script,
+// always wins.
+func inventoryCheckout() string {
+	if value := os.Getenv("INVENTORY"); value != "" {
+		return strings.TrimRight(value, "/")
+	}
+	return filepath.Join(workDir(), inventoryCheckoutRelative())
+}
+
+func inventoryCheckoutRelative() string {
+	const fallback = "allod/inventory"
+	for _, alias := range []string{"inventory", "allod/inventory"} {
+		if checkout, ok := registryCheckout(alias); ok {
+			return checkout
+		}
+	}
+	return fallback
+}
+
+// --- nix eval ---
+
+// nixEvalJSON runs the checkout as its working directory and names the
+// attribute as 'path:.#<attribute>', so the path itself never has to
+// survive flake-reference or Nix-expression quoting; a checkout under a
+// directory with a space in its name evaluates the same as any other. It
+// lives here, untagged, because 'declare' needs it (to read a machine's
+// type from the inventory flake) as much as 'create' and 'rekey' do (to
+// read the secrets flake's credential inventory and rotation registry).
+func nixEvalJSON(checkout, attribute string) ([]byte, error) {
+	var out, errOut bytes.Buffer
+	cmd := exec.Command("nix", "eval", "--json", "path:.#"+attribute)
+	cmd.Dir = checkout
+	cmd.Stdout, cmd.Stderr = &out, &errOut
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("%s", strings.TrimSpace(errOut.String()))
+	}
+	return out.Bytes(), nil
 }

@@ -3,13 +3,16 @@ package main
 // Tests for 'allod secret declare' against a fixture checkout — a plain git
 // repository holding invented flake.nix, credentials.nix, secrets.nix, and
 // forgejo-token-groups.json content shaped like the secrets template's real
-// files. declareLoadVMSpecs is the one seam declare has (see
-// secret_declare.go); everything else is exercised through the real code
-// paths against real files on disk, since this command's whole job is
-// producing exact file text.
+// files. declare has no Go-level seam for the inventory lookup: it shells
+// out to the real 'nix eval', so declareFakeNix puts a fake 'nix' on PATH
+// that answers by machine name, the way TestRcloneSiteRemoteCheck
+// (site_test.go) fakes 'rclone'. Everything else is exercised through the
+// real code paths against real files on disk, since this command's whole
+// job is producing exact file text.
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -108,6 +111,32 @@ type declareFixture struct {
 	checkout string
 }
 
+// declareFakeNix puts a fake 'nix' executable on an otherwise-unchanged
+// PATH (so 'git', which resolveSecretsCheckout still needs, stays
+// reachable) that answers 'nix eval --json path:.#machines.<name>.type'
+// for every machine named in types, and fails the way an absent inventory
+// entry would for anything else.
+func declareFakeNix(t *testing.T, types map[string]string) {
+	t.Helper()
+	var cases strings.Builder
+	for machine, machineType := range types {
+		fmt.Fprintf(&cases, "    %s) printf '\"%s\"' ;;\n", machine, machineType)
+	}
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" != eval ] || [ \"$2\" != --json ]; then echo \"fake nix: unexpected args: $*\" >&2; exit 1; fi\n" +
+		"attr=${3#path:.#machines.}\n" +
+		"machine=${attr%.type}\n" +
+		"case \"$machine\" in\n" +
+		cases.String() +
+		"    *) echo \"error: attribute 'machines.$machine.type' missing\" >&2; exit 1 ;;\n" +
+		"esac\n"
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "nix"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
 func newDeclareFixtureFiles(t *testing.T, credentials, secrets, registry string) *declareFixture {
 	t.Helper()
 	dir := t.TempDir()
@@ -129,15 +158,13 @@ func newDeclareFixtureFiles(t *testing.T, credentials, secrets, registry string)
 		t.Fatalf("git init: %v\n%s", err, out)
 	}
 
-	previous := declareLoadVMSpecs
-	t.Cleanup(func() { declareLoadVMSpecs = previous })
-	declareLoadVMSpecs = func() map[string]declareVMSpec {
-		return map[string]declareVMSpec{
-			"dev-a":     {Repos: []string{"allod/tools"}},
-			"dev-b":     {Repos: []string{"allod/tools"}},
-			"privacy-1": {Repos: nil},
-		}
-	}
+	t.Setenv("INVENTORY", t.TempDir())
+	declareFakeNix(t, map[string]string{
+		"dev-a":     "dev",
+		"dev-b":     "dev",
+		"privacy-1": "privacy",
+		"nexus":     "hypervisor",
+	})
 	return fx
 }
 
@@ -413,12 +440,12 @@ func TestSecretDeclareTwoMachinesServiceForgejo(t *testing.T) {
 
 // --- --to nexus: the host, not a VM ---
 
-func TestSecretDeclareTargetingNexusNeedsNoVMLookup(t *testing.T) {
+// TestSecretDeclareTargetingNexusReadsHypervisorType pins that 'nexus'
+// reaches "nixos-host" through the same inventory lookup as every other
+// machine (its type is "hypervisor" in the flake), not a literal name
+// special case.
+func TestSecretDeclareTargetingNexusReadsHypervisorType(t *testing.T) {
 	fx := newDeclareFixture(t)
-	declareLoadVMSpecs = func() map[string]declareVMSpec {
-		t.Fatal("declare looked up the VM registry for a --to list containing only 'nexus'")
-		return nil
-	}
 	out, errText, code := fx.run(t, "host-token",
 		"--kind", "machine-host", "--owner", "nexus", "--to", "nexus",
 		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "site-check")
@@ -579,8 +606,31 @@ func TestSecretDeclareRefusesUnknownMachine(t *testing.T) {
 	if code == 0 {
 		t.Fatal("exit 0, want a refusal")
 	}
-	if !strings.Contains(errText, "machine 'ghost-vm' named in --to is not in") || !strings.Contains(errText, "vm-specs.json") {
-		t.Errorf("stderr = %q", errText)
+	for _, want := range []string{"could not read the type of machine 'ghost-vm'", "accepted types: dev, privacy, hypervisor, service"} {
+		if !strings.Contains(errText, want) {
+			t.Errorf("stderr lacks %q\ngot: %q", want, errText)
+		}
+	}
+	fx.assertUntouched(t, declareFixtureCredentials, declareFixtureSecrets, declareFixtureRegistry)
+}
+
+// TestSecretDeclareRefusesUnexpectedMachineType covers the third failure
+// mode declareTargetKind names: the inventory flake answers for the
+// machine, but with a type outside the four the flake itself enforces.
+func TestSecretDeclareRefusesUnexpectedMachineType(t *testing.T) {
+	fx := newDeclareFixtureFiles(t, declareFixtureCredentials, declareFixtureSecrets, declareFixtureRegistry)
+	t.Setenv("INVENTORY", t.TempDir())
+	declareFakeNix(t, map[string]string{"dev-a": "dev", "weird-vm": "laptop"})
+	_, errText, code := fx.run(t, "new-token",
+		"--kind", "agent", "--owner", "allod-agent", "--to", "weird-vm",
+		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote")
+	if code == 0 {
+		t.Fatal("exit 0, want a refusal")
+	}
+	for _, want := range []string{"machine 'weird-vm'", "has type 'laptop'", "accepted types: dev, privacy, hypervisor, service"} {
+		if !strings.Contains(errText, want) {
+			t.Errorf("stderr lacks %q\ngot: %q", want, errText)
+		}
 	}
 	fx.assertUntouched(t, declareFixtureCredentials, declareFixtureSecrets, declareFixtureRegistry)
 }

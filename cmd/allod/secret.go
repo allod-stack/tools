@@ -566,20 +566,9 @@ func landCommit(checkout, message string, restore func() string, files ...string
 
 // --- The world ---
 
-// Every nix invocation runs with the checkout as its working directory and
-// names it as 'path:.' or './secrets.nix', so the path itself never has to
-// survive flake-reference or Nix-expression quoting; a checkout under a
-// directory with a space in its name evaluates the same as any other.
-func nixEvalJSON(checkout, attribute string) ([]byte, error) {
-	var out, errOut bytes.Buffer
-	cmd := exec.Command("nix", "eval", "--json", "path:.#"+attribute)
-	cmd.Dir = checkout
-	cmd.Stdout, cmd.Stderr = &out, &errOut
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("%s", strings.TrimSpace(errOut.String()))
-	}
-	return out.Bytes(), nil
-}
+// nixEvalJSON lives in secret_common.go, untagged, because 'declare' needs
+// it too (to read a machine's type from the inventory flake) and only one
+// copy may exist in the package.
 
 func nixEvalCredentials(checkout string) (map[string]credentialEntry, error) {
 	data, err := nixEvalJSON(checkout, "lib.credentials")
