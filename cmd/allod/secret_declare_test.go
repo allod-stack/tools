@@ -137,6 +137,38 @@ func declareFakeNix(t *testing.T, types map[string]string) {
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
+// declareFakeNixWithSideEffect is declareFakeNix plus one extra effect: on
+// every invocation, before it answers, it appends sideEffectText to the
+// file named by sideEffectPath. This is how the concurrent-edit tests
+// simulate another process changing a file in the window between declare
+// reading it and declare writing it — the only real gap in one run is the
+// 'nix eval' call target-kind derivation makes, so that is where the
+// simulated edit happens, through the real production code path rather
+// than a test-only hook inside declare itself.
+func declareFakeNixWithSideEffect(t *testing.T, types map[string]string, sideEffectPath, sideEffectText string) {
+	t.Helper()
+	var cases strings.Builder
+	for machine, machineType := range types {
+		fmt.Fprintf(&cases, "    %s) printf '\"%s\"' ;;\n", machine, machineType)
+	}
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" != eval ] || [ \"$2\" != --json ]; then echo \"fake nix: unexpected args: $*\" >&2; exit 1; fi\n" +
+		"printf '%s' \"$DECLARE_TEST_SIDE_EFFECT_TEXT\" >> \"$DECLARE_TEST_SIDE_EFFECT_PATH\"\n" +
+		"attr=${3#path:.#machines.}\n" +
+		"machine=${attr%.type}\n" +
+		"case \"$machine\" in\n" +
+		cases.String() +
+		"    *) echo \"error: attribute 'machines.$machine.type' missing\" >&2; exit 1 ;;\n" +
+		"esac\n"
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "nix"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("DECLARE_TEST_SIDE_EFFECT_PATH", sideEffectPath)
+	t.Setenv("DECLARE_TEST_SIDE_EFFECT_TEXT", sideEffectText)
+}
+
 func newDeclareFixtureFiles(t *testing.T, credentials, secrets, registry string) *declareFixture {
 	t.Helper()
 	dir := t.TempDir()
@@ -523,6 +555,48 @@ func TestSecretDeclareSecretsLineCollisionAlone(t *testing.T) {
 	fx.assertUntouched(t, declareFixtureCredentials, secrets, declareFixtureRegistry)
 }
 
+// TestSecretDeclareCredentialsCollisionAcrossLines covers allod/tools#196
+// review finding 3: the collision regex must match across whitespace
+// including newlines, not just spaces and tabs on one line, or an existing
+// declaration split across lines slips through the gate and a duplicate
+// gets inserted.
+func TestSecretDeclareCredentialsCollisionAcrossLines(t *testing.T) {
+	credentials := strings.Replace(declareFixtureCredentials,
+		"  existing-token = {", "  existing-token\n    = {", 1)
+	fx := newDeclareFixtureFiles(t, credentials, declareFixtureSecrets, declareFixtureRegistry)
+	_, errText, code := fx.run(t, "existing-token",
+		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
+		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote")
+	if code == 0 {
+		t.Fatal("exit 0, want a refusal")
+	}
+	if want := "credentials.nix: an entry named 'existing-token' already exists"; !strings.Contains(errText, want) {
+		t.Errorf("stderr lacks %q\ngot: %q", want, errText)
+	}
+	fx.assertUntouched(t, credentials, declareFixtureSecrets, declareFixtureRegistry)
+}
+
+// TestSecretDeclareSecretsLineCollisionAcrossLines is the secrets.nix half
+// of the same finding: '.publicKeys' and '=' split across lines must still
+// be found. It uses an orphan line (no matching credentials.nix entry or
+// registry group, as TestSecretDeclareSecretsLineCollisionAlone does) so
+// the refusal it pins can only come from the secrets.nix check.
+func TestSecretDeclareSecretsLineCollisionAcrossLines(t *testing.T) {
+	secrets := declareFixtureSecrets[:len(declareFixtureSecrets)-len("}\n")] +
+		"  \"secrets/orphan.age\"\n    .publicKeys\n    = [ hostKey ];\n}\n"
+	fx := newDeclareFixtureFiles(t, declareFixtureCredentials, secrets, declareFixtureRegistry)
+	_, errText, code := fx.run(t, "orphan",
+		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
+		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote")
+	if code == 0 {
+		t.Fatal("exit 0, want a refusal")
+	}
+	if want := "secrets.nix: a publicKeys line for 'secrets/orphan.age' already exists"; !strings.Contains(errText, want) {
+		t.Errorf("stderr lacks %q\ngot: %q", want, errText)
+	}
+	fx.assertUntouched(t, declareFixtureCredentials, secrets, declareFixtureRegistry)
+}
+
 // --- Missing and invalid flags ---
 
 func TestSecretDeclareFlagErrors(t *testing.T) {
@@ -596,6 +670,95 @@ func TestSecretDeclareRequiresAName(t *testing.T) {
 	}
 }
 
+// --- Injection through flag values ---
+
+// TestSecretDeclareRefusesInjectionThroughStringFlags covers allod/tools#196
+// review finding 1: every flag value that lands in generated nix or JSON
+// text is validated as a shape before it reaches any template, so a value
+// built to break out of its quoting is refused as a usage error rather
+// than landing as attacker-controlled nix or JSON. --owner is the sharpest
+// case (interpolated raw into a double-quoted nix string in
+// credentials.nix); --kind, --account, and --ui-token-name are held to the
+// same identifier pattern, and --deployed-path to its own absolute-path
+// shape, for the same reason even though today only --owner reaches nix
+// text directly.
+func TestSecretDeclareRefusesInjectionThroughStringFlags(t *testing.T) {
+	base := map[string]string{
+		"--kind": "agent", "--owner": "allod-agent", "--to": "dev-a",
+		"--format": "raw-forgejo-token", "--deployed-path": "/root/.token", "--verify": "git-ls-remote",
+	}
+	buildArgs := func(overrides map[string]string) []string {
+		args := []string{"new-token"}
+		for flag, value := range base {
+			args = append(args, flag, value)
+		}
+		for flag, value := range overrides {
+			args = append(args, flag, value)
+		}
+		return args
+	}
+
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			"owner breaks out of a nix string",
+			buildArgs(map[string]string{"--owner": `foo"; kind = "bar`}),
+			`invalid --owner "foo\"; kind = \"bar"`,
+		},
+		{
+			"owner nix interpolation",
+			buildArgs(map[string]string{"--owner": `${builtins.abort "x"}`}),
+			"invalid --owner",
+		},
+		{
+			"account breaks out of a nix string",
+			buildArgs(map[string]string{"--service": "forgejo", "--account": `x"; y = "z`, "--ui-token-name": "spare"}),
+			"invalid --account",
+		},
+		{
+			"ui-token-name breaks out of a nix string",
+			buildArgs(map[string]string{"--service": "forgejo", "--account": "allod-agent", "--ui-token-name": `x"; y = "z`}),
+			"invalid --ui-token-name",
+		},
+		{
+			"deployed-path is not absolute",
+			buildArgs(map[string]string{"--deployed-path": "root/.token"}),
+			"invalid --deployed-path",
+		},
+		{
+			"deployed-path carries a dollar sign",
+			buildArgs(map[string]string{"--deployed-path": "/root/$HOME/.token"}),
+			"invalid --deployed-path",
+		},
+		{
+			"deployed-path carries a quote",
+			buildArgs(map[string]string{"--deployed-path": `/root/".token`}),
+			"invalid --deployed-path",
+		},
+		{
+			"deployed-path carries whitespace",
+			buildArgs(map[string]string{"--deployed-path": "/root/ .token"}),
+			"invalid --deployed-path",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newDeclareFixture(t)
+			_, errText, code := fx.run(t, tc.args...)
+			if code != 1 {
+				t.Errorf("exit code = %d, want 1", code)
+			}
+			if !strings.Contains(errText, tc.want) {
+				t.Errorf("stderr lacks %q\ngot: %q", tc.want, errText)
+			}
+			fx.assertUntouched(t, declareFixtureCredentials, declareFixtureSecrets, declareFixtureRegistry)
+		})
+	}
+}
+
 // --- Machine absent from the inventory registry ---
 
 func TestSecretDeclareRefusesUnknownMachine(t *testing.T) {
@@ -637,12 +800,24 @@ func TestSecretDeclareRefusesUnexpectedMachineType(t *testing.T) {
 
 // --- The JSON re-parse guard ---
 
-// TestDeclareInsertRegistryGroupReparseGuard pins the low-level guard
-// directly: a registry text whose final '}' closes an unterminated string,
-// not the top-level object, still satisfies the mechanical "ends in a '}'"
-// precondition insertion works from, so the insertion itself succeeds —
-// but the result must still fail json.Valid, which is what secretDeclare's
-// post-write re-parse guard checks before ever writing the file.
+// TestDeclareInsertRegistryGroupReparseGuard pins declareInsertRegistryGroup's
+// own mechanics directly, not through secretDeclare: a registry text whose
+// final '}' closes an unterminated string, not the top-level object, still
+// satisfies the mechanical "ends in a '}'" precondition insertion works
+// from, so the insertion itself succeeds — but the result must still fail
+// json.Valid.
+//
+// This has to be a unit test of the function, not an end-to-end one,
+// because no fixture reaches secretDeclare's post-build json.Valid guard
+// through the CLI: any registryText malformed enough to survive insertion
+// as invalid JSON already fails the upfront json.Unmarshal secretDeclare
+// runs for collision-checking (TestSecretDeclareRefusesWhenRegistryDoesNotParse,
+// below, pins that path), and for genuinely valid JSON input,
+// declareInsertRegistryGroup's insertion point is always the end of a
+// complete prior token, so appending a comma there cannot produce invalid
+// JSON — this function's own analysis, not an assumption. The post-build
+// guard is real defense-in-depth against a future bug in that insertion
+// logic; this test is what actually exercises it, since the CLI cannot.
 func TestDeclareInsertRegistryGroupReparseGuard(t *testing.T) {
 	group := declareGroup{
 		Service: "none", RegistryAlias: "new-token", RotationStrategy: "overlap",
@@ -659,11 +834,12 @@ func TestDeclareInsertRegistryGroupReparseGuard(t *testing.T) {
 	}
 }
 
-// TestSecretDeclareRefusesWhenRegistryDoesNotParse is the end-to-end half:
-// a checkout whose forgejo-token-groups.json is already broken — the state
-// the low-level guard above exists to prevent one command from causing —
-// is refused before anything is written, rather than declare compounding
-// the damage.
+// TestSecretDeclareRefusesWhenRegistryDoesNotParse is the CLI-level half
+// review finding 6 asked for: it drives secretDeclare itself against the
+// sabotage registry fixture and asserts both the refusal message and that
+// all three files are byte-identical afterwards, so a change that broke
+// declare's actual refuse-and-restore behavior would fail here even if the
+// unit test above kept passing.
 func TestSecretDeclareRefusesWhenRegistryDoesNotParse(t *testing.T) {
 	fx := newDeclareFixtureFiles(t, declareFixtureCredentials, declareFixtureSecrets, declareSabotageRegistry)
 	_, errText, code := fx.run(t, "new-token",
@@ -694,6 +870,90 @@ func TestSecretDeclareRefusesWhenCredentialsWouldNotBalance(t *testing.T) {
 	fx.assertUntouched(t, declareSabotageCredentials, declareFixtureSecrets, declareFixtureRegistry)
 }
 
+// --- Atomic, all-or-nothing writes ---
+
+// TestDeclareAtomicWriteReplacesInFullOrNotAtAll pins declareAtomicWrite's
+// own contract directly: a successful call leaves the new bytes in full,
+// and a call whose temp file cannot be created (the directory does not
+// exist) leaves the original file completely untouched and returns an
+// error, rather than a truncated file and a panic.
+func TestDeclareAtomicWriteReplacesInFullOrNotAtAll(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(path, []byte("original\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := declareAtomicWrite(path, []byte("replaced\n")); err != nil {
+		t.Fatalf("declareAtomicWrite: %v", err)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != "replaced\n" {
+		t.Fatalf("file = %q, err = %v, want \"replaced\\n\"", got, err)
+	}
+
+	// A target whose directory does not exist cannot even get a temp file
+	// created, so the failure happens before any rename is attempted.
+	if err := declareAtomicWrite(filepath.Join(dir, "no-such-directory", "g.txt"), []byte("replaced\n")); err == nil {
+		t.Fatal("declareAtomicWrite into a missing directory returned no error")
+	}
+}
+
+// TestDeclareUnchangedSinceDetectsAConcurrentEdit pins declareUnchangedSince
+// directly: it reports true against the bytes a file was just written
+// with, and false the moment those bytes change underneath.
+func TestDeclareUnchangedSinceDetectsAConcurrentEdit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "f.txt")
+	original := []byte("original\n")
+	if err := os.WriteFile(path, original, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if unchanged, err := declareUnchangedSince(path, original); err != nil || !unchanged {
+		t.Fatalf("unchanged = %v, err = %v, want true, nil", unchanged, err)
+	}
+	if err := os.WriteFile(path, []byte("edited by someone else\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if unchanged, err := declareUnchangedSince(path, original); err != nil || unchanged {
+		t.Fatalf("unchanged = %v, err = %v, want false, nil", unchanged, err)
+	}
+}
+
+// TestSecretDeclareRefusesAndRestoresWhenAFileChangesUnderneath drives the
+// whole command end-to-end for review findings 4 and 5: it uses
+// declareFakeNixWithSideEffect so the fake 'nix' invocation that derives
+// dev-a's target kind — the one real gap between declare reading every
+// file and declare writing any of them — also appends to secrets.nix,
+// simulating another process editing the checkout in that window.
+// credentials.nix, written first, is replaced successfully (declare cannot
+// know at that point that secrets.nix has changed); secrets.nix's own
+// re-read-before-replace catches the edit and refuses, and that refusal
+// must restore credentials.nix to its original bytes — proving both the
+// concurrent-edit guard and the restore-already-replaced-files path in one
+// real run, not through a Go-level seam.
+func TestSecretDeclareRefusesAndRestoresWhenAFileChangesUnderneath(t *testing.T) {
+	fx := newDeclareFixtureFiles(t, declareFixtureCredentials, declareFixtureSecrets, declareFixtureRegistry)
+	t.Setenv("INVENTORY", t.TempDir())
+	secretsPath := filepath.Join(fx.checkout, "secrets.nix")
+	declareFakeNixWithSideEffect(t, map[string]string{"dev-a": "dev"}, secretsPath, "\n# edited concurrently\n")
+
+	_, errText, code := fx.run(t, "new-token",
+		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
+		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote")
+	if code == 0 {
+		t.Fatal("exit 0, want a refusal")
+	}
+	for _, want := range []string{"secrets.nix changed since declare read it", "restored"} {
+		if !strings.Contains(errText, want) {
+			t.Errorf("stderr lacks %q\ngot: %q", want, errText)
+		}
+	}
+	if got, err := os.ReadFile(filepath.Join(fx.checkout, "credentials.nix")); err != nil || string(got) != declareFixtureCredentials {
+		t.Errorf("credentials.nix was not restored to its original bytes: err=%v got=%q", err, got)
+	}
+	if got, err := os.ReadFile(filepath.Join(fx.checkout, "forgejo-token-groups.json")); err != nil || string(got) != declareFixtureRegistry {
+		t.Errorf("forgejo-token-groups.json changed: err=%v got=%q", err, got)
+	}
+}
+
 // --- Name validation ---
 
 func TestDeclareNamePattern(t *testing.T) {
@@ -702,9 +962,29 @@ func TestDeclareNamePattern(t *testing.T) {
 			t.Errorf("%q should match the name pattern", valid)
 		}
 	}
-	for _, invalid := range []string{"", "-a", "Agent", "agent_token", "agent token"} {
+	// A leading digit is refused: the name becomes an unquoted nix
+	// attribute key, and '1token = { ... }' does not parse as nix.
+	for _, invalid := range []string{"", "-a", "Agent", "agent_token", "agent token", "1token", "0"} {
 		if declareNamePattern.MatchString(invalid) {
 			t.Errorf("%q should not match the name pattern", invalid)
 		}
 	}
+}
+
+// TestSecretDeclareRefusesALeadingDigitName drives the CLI, not just the
+// regex: a name starting with a digit is refused before anything is read
+// or written, since credentials.nix would not evaluate an unquoted
+// '1token = { ... }' attribute.
+func TestSecretDeclareRefusesALeadingDigitName(t *testing.T) {
+	fx := newDeclareFixture(t)
+	_, errText, code := fx.run(t, "1token",
+		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
+		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote")
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	if want := "invalid credential name \"1token\""; !strings.Contains(errText, want) {
+		t.Errorf("stderr lacks %q\ngot: %q", want, errText)
+	}
+	fx.assertUntouched(t, declareFixtureCredentials, declareFixtureSecrets, declareFixtureRegistry)
 }

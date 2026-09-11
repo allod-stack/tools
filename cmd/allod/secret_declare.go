@@ -27,6 +27,7 @@ package main
 // a machine's own type.
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -66,27 +67,41 @@ credentials.nix entry in rotation_state "pending" (the agent-pr-token
 layout), the secrets.nix recipient line ('[ hostKey ] ++ vmKeys "<vm>"' per
 target machine), and a forgejo-token-groups.json rotation registry group
 whose 'service' is "none" or "forgejo". Every insertion is one contiguous
-block; nothing else in any file changes. All three are written together or
-none are: it checks all three files for a name collision before touching
-any of them, and re-reads each file it wrote to confirm it still parses,
-restoring on the first failure.
+block; nothing else in any file changes.
 
-<name> must match ^[a-z0-9][a-z0-9-]*$ — it becomes a nix attribute name, a
+All three files are read once at the start. Every edit is built and
+validated in memory before anything is written: a name collision in any of
+the three files refuses before any of them is touched, and the built text
+for credentials.nix and secrets.nix must still have balanced nix braces and
+for forgejo-token-groups.json must still be valid JSON. Only then does
+declare replace the files, one at a time: immediately before each one, it
+re-reads that file and refuses — restoring every file already replaced,
+and saying so — if the bytes on disk no longer match what was read at the
+start, rather than silently discarding a concurrent edit. Each replacement
+itself is atomic (a temp file in the same directory, then renamed over the
+original), so a write that fails partway through never leaves a file
+truncated.
+
+<name> must match ^[a-z][a-z0-9-]*$ — it becomes a nix attribute name, a
 secrets.nix key, and a filename. --kind is the credential's own kind and
 must be one of: user, machine-host, forge-git, agent, service (the enum
-credential-inventory enforces). --owner is a free-form identifier. --to
-names one or more target machines, comma-separated or by repeating the
-flag; each one's registry kind is read from the inventory flake's own
-'machines.<name>.type' (dev -> dev-vm, privacy -> privacy-vm, hypervisor ->
-nixos-host, service -> service-vm — nexus reaches nixos-host this way too,
-since its type is hypervisor) — a name absent there, an unexpected type, or
-a failed nix run is refused, naming the inventory checkout, the machine,
-and the accepted types. --format is one of:
+credential-inventory enforces); it must also match ^[A-Za-z0-9][A-Za-z0-9_.@-]*$,
+the same identifier shape --owner, --account, and --ui-token-name must
+match — these values reach generated nix or JSON text, so their shape is
+checked before any of it is built, not interpolated raw. --to names one or
+more target machines, comma-separated or by repeating the flag; each one's
+registry kind is read from the inventory flake's own 'machines.<name>.type'
+(dev -> dev-vm, privacy -> privacy-vm, hypervisor -> nixos-host, service ->
+service-vm — nexus reaches nixos-host this way too, since its type is
+hypervisor) — a name absent there, an unexpected type, or a failed nix run
+is refused, naming the inventory checkout, the machine, and the accepted
+types. --format is one of:
 raw-forgejo-token, credential-store-url, rclone-remote-stanza. --deployed-path
-and --verify (one of: forge-token-verify, git-ls-remote, site-check) apply
-to every target. --service defaults to "none"; "forgejo" requires --account
-and --ui-token-name, and "none" refuses them. --strategy defaults to
-"overlap".
+must be an absolute path with no whitespace, control character, quote,
+backslash, or $, and --verify (one of: forge-token-verify, git-ls-remote,
+site-check) apply to every target. --service defaults to "none"; "forgejo"
+requires --account and --ui-token-name, and "none" refuses them. --strategy
+defaults to "overlap".
 
 declare refuses a name already declared anywhere: a credentials.nix entry,
 a secrets.nix line for secrets/<name>.age, or a registry group keyed <name>
@@ -119,7 +134,38 @@ type declareArgs struct {
 	strategy     string
 }
 
-var declareNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+// declareNamePattern requires a leading letter: the name becomes an
+// unquoted nix attribute key ('<name> = { ... }'), and nix identifiers
+// cannot start with a digit, so 1token = { ... } would not evaluate.
+var declareNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
+
+// declareIdentifierPattern is what --owner, --kind, --account, and
+// --ui-token-name must match. These values are interpolated into nix text
+// (--owner, inside a double-quoted nix string in the credentials.nix
+// template) or carried into JSON (--account, --ui-token-name, by
+// encoding/json, which escapes properly on its own); the pattern is the
+// safety boundary for the nix case and a sanity check for the JSON one, so
+// every such flag is held to it uniformly rather than only the ones that
+// currently reach nix text. A value like 'foo"; kind = "bar' or
+// '${builtins.abort "x"}' is refused here, before it reaches any template.
+var declareIdentifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.@-]*$`)
+
+func validateIdentifier(flag, value string) {
+	if !declareIdentifierPattern.MatchString(value) {
+		secretCommandUsageError("declare", "invalid %s %q; expected to match ^[A-Za-z0-9][A-Za-z0-9_.@-]*$", flag, value)
+	}
+}
+
+// declareDeployedPathUnsafe matches whitespace, control characters, quotes,
+// backslash, and '$' — nothing --deployed-path may contain, whatever
+// consumes the JSON later (a shell, a nix string, a display line).
+var declareDeployedPathUnsafe = regexp.MustCompile(`[\x00-\x20\x7f'"\\$]`)
+
+func validateDeployedPath(path string) {
+	if !strings.HasPrefix(path, "/") || declareDeployedPathUnsafe.MatchString(path) {
+		secretCommandUsageError("declare", "invalid --deployed-path %q; expected an absolute path with no whitespace, control character, quote, backslash, or $", path)
+	}
+}
 
 func joinList(values []string) string { return strings.Join(values, ", ") }
 
@@ -192,17 +238,19 @@ func parseDeclareArgs(args []string) declareArgs {
 	}
 
 	if !declareNamePattern.MatchString(parsed.name) {
-		secretCommandUsageError("declare", "invalid credential name %q; expected to match ^[a-z0-9][a-z0-9-]*$", parsed.name)
+		secretCommandUsageError("declare", "invalid credential name %q; expected to match ^[a-z][a-z0-9-]*$", parsed.name)
 	}
 	if parsed.kind == "" {
 		secretCommandUsageError("declare", "--kind is required")
 	}
+	validateIdentifier("--kind", parsed.kind)
 	if !stringInList(parsed.kind, declareValidKinds) {
 		secretCommandUsageError("declare", "invalid --kind %q; expected one of: %s", parsed.kind, joinList(declareValidKinds))
 	}
 	if parsed.owner == "" {
 		secretCommandUsageError("declare", "--owner is required")
 	}
+	validateIdentifier("--owner", parsed.owner)
 	if len(parsed.to) == 0 {
 		secretCommandUsageError("declare", "--to is required")
 	}
@@ -215,6 +263,7 @@ func parseDeclareArgs(args []string) declareArgs {
 	if parsed.deployedPath == "" {
 		secretCommandUsageError("declare", "--deployed-path is required")
 	}
+	validateDeployedPath(parsed.deployedPath)
 	if parsed.verify == "" {
 		secretCommandUsageError("declare", "--verify is required")
 	}
@@ -226,6 +275,12 @@ func parseDeclareArgs(args []string) declareArgs {
 	}
 	if haveStrategy && !stringInList(parsed.strategy, declareValidStrategies) {
 		secretCommandUsageError("declare", "invalid --strategy %q; expected one of: %s", parsed.strategy, joinList(declareValidStrategies))
+	}
+	if parsed.account != "" {
+		validateIdentifier("--account", parsed.account)
+	}
+	if parsed.uiTokenName != "" {
+		validateIdentifier("--ui-token-name", parsed.uiTokenName)
 	}
 	switch parsed.service {
 	case "forgejo":
@@ -362,16 +417,21 @@ func buildDeclareGroup(parsed declareArgs, targets []declareTarget) declareGroup
 
 // declareCredentialsHasEntry reports whether credentials.nix already
 // declares a literal '<name> = { ... }' or '"<name>" = { ... }' attribute,
-// the same shape flipPendingToActive (secret.go) looks for.
+// the same shape flipPendingToActive (secret.go) looks for. The gaps around
+// '=' and '{' match '\s', not just '[ \t]', so an entry split across lines
+// ('existing-token\n  = {') is still found — a name-only or one-line-only
+// match would let a duplicate through the gate.
 func declareCredentialsHasEntry(text, name string) bool {
-	pattern := regexp.MustCompile(`(?m)^[ \t]*"?` + regexp.QuoteMeta(name) + `"?[ \t]*=[ \t]*\{`)
+	pattern := regexp.MustCompile(`(?m)^[ \t]*"?` + regexp.QuoteMeta(name) + `"?\s*=\s*\{`)
 	return pattern.MatchString(text)
 }
 
 // declareSecretsHasLine reports whether secrets.nix already declares a
-// publicKeys line for the given repository-relative path.
+// publicKeys line for the given repository-relative path. Matches across
+// whitespace including newlines for the same reason
+// declareCredentialsHasEntry does.
 func declareSecretsHasLine(text, path string) bool {
-	pattern := regexp.MustCompile(`(?m)^[ \t]*"` + regexp.QuoteMeta(path) + `"\.publicKeys[ \t]*=`)
+	pattern := regexp.MustCompile(`(?m)^[ \t]*"` + regexp.QuoteMeta(path) + `"\s*\.publicKeys\s*=`)
 	return pattern.MatchString(text)
 }
 
@@ -568,6 +628,105 @@ func readDeclareFile(path string) string {
 	return string(data)
 }
 
+// declareAtomicWrite writes data to a temporary file in the same directory
+// as path and renames it over path, so path is always either its previous
+// bytes in full or its new bytes in full — never a partial write, which a
+// direct os.WriteFile leaves on disk if it fails partway through.
+func declareAtomicWrite(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".declare-"+filepath.Base(path)+"-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	_, writeErr := tmp.Write(data)
+	closeErr := tmp.Close()
+	if writeErr != nil {
+		os.Remove(tmpPath)
+		return writeErr
+	}
+	if closeErr != nil {
+		os.Remove(tmpPath)
+		return closeErr
+	}
+	if err := os.Chmod(tmpPath, 0644); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return nil
+}
+
+// declareUnchangedSince reports whether path's current bytes still equal
+// original. Called immediately before each atomic replacement, this is
+// what stands between declare and silently discarding a concurrent edit: a
+// file read at the start of the command and rewritten whole at the end
+// would otherwise lose anything another process wrote to it in between.
+func declareUnchangedSince(path string, original []byte) (bool, error) {
+	current, err := os.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+	return bytes.Equal(current, original), nil
+}
+
+// declareWrite pairs one file's already-built new content with the exact
+// bytes it was read as, so a later step can tell whether the file changed
+// underneath and can restore precisely what it replaced.
+type declareWrite struct {
+	path     string
+	original []byte
+	content  []byte
+}
+
+// declareRestore replaces every already-written file in done with its
+// original bytes, atomically, and describes the outcome for the refusal
+// message: which files were restored, or that the tree could not be fully
+// restored and must be inspected by hand.
+func declareRestore(done []declareWrite) string {
+	if len(done) == 0 {
+		return "nothing had been written yet"
+	}
+	var restored []string
+	problems := 0
+	for _, write := range done {
+		if err := declareAtomicWrite(write.path, write.original); err != nil {
+			fmt.Fprintf(stderr, "allod: could not restore %s: %s\n", write.path, err)
+			problems++
+			continue
+		}
+		restored = append(restored, write.path)
+	}
+	if problems > 0 {
+		return "the tree could NOT be fully restored; inspect it before retrying"
+	}
+	return "restored " + joinList(restored)
+}
+
+// declareWriteAll replaces every file in writes in order, atomically, after
+// confirming immediately beforehand that its bytes still match what
+// declare read at the start. The first file that changed underneath, or
+// that fails to write, refuses and restores every file already replaced;
+// nothing is left partially written either way.
+func declareWriteAll(writes []declareWrite) {
+	var done []declareWrite
+	for _, write := range writes {
+		unchanged, err := declareUnchangedSince(write.path, write.original)
+		if err != nil {
+			die(1, "could not re-read %s before writing it: %s; %s", write.path, err, declareRestore(done))
+		}
+		if !unchanged {
+			die(1, "%s changed since declare read it; refusing to overwrite a concurrent edit; %s", write.path, declareRestore(done))
+		}
+		if err := declareAtomicWrite(write.path, write.content); err != nil {
+			die(1, "could not write %s: %s; %s", write.path, err, declareRestore(done))
+		}
+		done = append(done, write)
+	}
+}
+
 func secretDeclare(args []string) {
 	parsed := parseDeclareArgs(args)
 	checkout := resolveSecretsCheckout(parsed.checkout)
@@ -632,38 +791,16 @@ func secretDeclare(args []string) {
 		die(1, "forgejo-token-groups.json: the edit would leave invalid JSON; refusing to write")
 	}
 
-	// Nothing is written until here. From here on a failed write restores
-	// every file already written, in order, before reporting.
-	writes := []struct {
-		path    string
-		content []byte
-	}{
-		{credentialsPath, []byte(newCredentialsText)},
-		{secretsPath, []byte(newSecretsText)},
-		{registryPath, []byte(newRegistryText)},
-	}
-	originals := map[string][]byte{
-		credentialsPath: []byte(credentialsText),
-		secretsPath:     []byte(secretsText),
-		registryPath:    []byte(registryText),
-	}
-	var done []string
-	for _, write := range writes {
-		if err := os.WriteFile(write.path, write.content, 0644); err != nil {
-			problems := 0
-			for _, path := range done {
-				if restoreErr := os.WriteFile(path, originals[path], 0644); restoreErr != nil {
-					fmt.Fprintf(stderr, "allod: could not restore %s: %s\n", path, restoreErr)
-					problems++
-				}
-			}
-			if problems > 0 {
-				die(1, "could not write %s: %s; the tree could NOT be fully restored, inspect it before retrying", write.path, err)
-			}
-			die(1, "could not write %s: %s; restored %s", write.path, err, joinList(done))
-		}
-		done = append(done, write.path)
-	}
+	// Nothing is written until here. From here on, immediately before each
+	// file is replaced, declareWriteAll re-reads it and refuses — restoring
+	// every file already replaced — if it no longer matches what was read
+	// above; each replacement itself is atomic (temp file, then rename), so
+	// a failed write can never leave a file partially written either.
+	declareWriteAll([]declareWrite{
+		{credentialsPath, []byte(credentialsText), []byte(newCredentialsText)},
+		{secretsPath, []byte(secretsText), []byte(newSecretsText)},
+		{registryPath, []byte(registryText), []byte(newRegistryText)},
+	})
 
 	for _, path := range []string{credentialsPath, secretsPath, registryPath} {
 		rel, err := filepath.Rel(checkout, path)
