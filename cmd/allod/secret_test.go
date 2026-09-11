@@ -316,7 +316,7 @@ func TestSecretNamespaceIsRegistered(t *testing.T) {
 		t.Fatal("the secret namespace is not registered in a tagged build")
 	}
 	out, _, _ := runAllod(t)
-	if !strings.Contains(out, "secret   Land an encrypted credential") {
+	if !strings.Contains(out, "secret   Write or land a credential") {
 		t.Errorf("top-level usage does not list the namespace\ngot: %q", out)
 	}
 	out, errText, code := runAllod(t, "secret", "--help")
@@ -338,6 +338,21 @@ func TestSecretNamespaceIsRegistered(t *testing.T) {
 	_, errText, code = runAllod(t, "secret", "create", "--to", "dev-a", "x")
 	if code != 1 || !strings.Contains(errText, "unknown option for secret create: --to") {
 		t.Errorf("an option is refused: code=%d stderr=%q", code, errText)
+	}
+}
+
+// TestSecretTaggedBuildCarriesAllThreeCommands pins the shape a
+// secret-tagged build carries: 'declare' from the untagged files plus
+// 'create' and 'rekey' this file's init() adds, and nothing else.
+func TestSecretTaggedBuildCarriesAllThreeCommands(t *testing.T) {
+	want := []string{"declare", "create", "rekey"}
+	if got := len(secretCommands); got != len(want) {
+		t.Fatalf("secretCommands has %d entries in a tagged build, want %d: %+v", got, len(want), secretCommands)
+	}
+	for _, name := range want {
+		if _, ok := secretCommandEntry(name); !ok {
+			t.Errorf("secretCommands has no %q entry: %+v", name, secretCommands)
+		}
 	}
 }
 

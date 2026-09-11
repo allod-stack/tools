@@ -98,10 +98,12 @@
         go vet -tags site ./...
         go test -tags site ./...
 
-        # 'allod secret' is behind its own 'secret' tag for the same reason,
-        # and the host sets both. Each tag is checked alone (which also runs
-        # the other's absence tests) and then together, the shape the host
-        # actually builds.
+        # 'allod secret create' and 'rekey' are behind their own 'secret'
+        # tag for the same reason ('declare' is not: it writes no
+        # ciphertext and reads no identity, so it runs untagged everywhere),
+        # and the host sets both tags. Each is checked alone (which also
+        # runs the other's absence tests) and then together, the shape the
+        # host actually builds.
         go vet -tags secret ./...
         go test -tags secret ./...
         go vet -tags site,secret ./...

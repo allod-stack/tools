@@ -2,19 +2,20 @@
 
 package main
 
-// The secret namespace lands an encrypted credential in the secrets
+// 'create' and 'rekey' land an encrypted credential in the secrets
 // repository, at the one machine that holds the age identity.
 //
-// It verifies and encrypts; it does not author. A credential's non-secret
+// They verify and encrypt; they do not author. A credential's non-secret
 // half — the credentials.nix entry in rotation_state "pending", the
 // secrets.nix recipient line, and the rotation registry entry — is written
-// by an agent's PR and reviewed there, and the inventory check has already
-// passed on it before this command is ever run. 'create' then reads the
-// plaintext, encrypts it to exactly the recipients secrets.nix declares,
-// writes the ciphertext, flips the state to "active", runs the repository's
-// checks, and commits and pushes the branch. There are no flags for kind,
-// owner, format, or recipients: the reviewed diff is the only authoring path,
-// so there is one shape to get right, and nothing on a command line can aim
+// by 'allod secret declare' (secret_declare.go, untagged) as an agent's PR
+// and reviewed there, and the inventory check has already passed on it
+// before this command is ever run. 'create' then reads the plaintext,
+// encrypts it to exactly the recipients secrets.nix declares, writes the
+// ciphertext, flips the state to "active", runs the repository's checks,
+// and commits and pushes the branch. There are no flags for kind, owner,
+// format, or recipients: the reviewed diff is the only authoring path, so
+// there is one shape to get right, and nothing on a command line can aim
 // the ciphertext at a machine the registry does not list.
 //
 // The plaintext never touches a filesystem. It arrives on stdin (or one
@@ -25,9 +26,11 @@ package main
 // recipient-only change that agenix silently skips cannot recur here.
 //
 // This file compiles only with -tags secret, which only the host toolchain
-// sets. On every other machine 'allod secret' is an unknown namespace: the
-// capability is absent, not refused, and no prose has to say an agent may
-// not do this. secret_absent_test.go pins that half; secret_test.go the other.
+// sets. On every other machine 'create' and 'rekey' are unknown secret
+// commands: that capability is absent, not refused, and no prose has to say
+// an agent may not do this. 'declare' carries no such tag — see
+// secret_declare.go. secret_absent_test.go pins the untagged half of this
+// contract; secret_test.go the tagged one.
 
 import (
 	"bytes"
@@ -40,41 +43,6 @@ import (
 	"regexp"
 	"strings"
 )
-
-const secretUsageText = `Usage:
-  allod secret create <name> [<checkout>]
-  allod secret rekey <name> [<checkout>]
-
-Commands:
-  create   Encrypt a pending credential's value and flip it to active
-  rekey    Re-encrypt an existing credential to the recipients secrets.nix declares
-
-Both commands work on the secrets checkout, found through the repository
-registry under ~/work unless <checkout> names a worktree, and on whatever
-branch is checked out there. They refuse the default branch and a dirty
-tree: the landing is a commit on a branch, and merging stays your act.
-
-'create' requires the branch to already carry, for <name>: a credentials.nix
-entry in rotation_state "pending" with exactly one agenix consumer in this
-repository, a secrets.nix line for that consumer's path whose recipients
-include this host's identity, a rotation registry entry naming both, and no
-ciphertext yet. It refuses anything else and says what it found. The value
-is read from stdin verbatim (trailing newline included, so multi-line
-formats round-trip), or as one hidden line when stdin is a terminal; an
-empty or whitespace-only value is refused. It then writes the ciphertext,
-sets the state to "active", runs 'nix flake check', restores both files if
-that fails, and otherwise commits and pushes the branch.
-
-'rekey' decrypts <name>'s existing ciphertext with the host identity and
-re-encrypts it to the recipients secrets.nix declares now, always rewriting
-the file, then checks, commits, and pushes the same way. Use it after a
-recipient line changes. For a new value of an existing credential use
-rotate-token.
-
-The identity is $AGE_IDENTITY, or ~/.ssh/host; its .pub must be among the
-recipients. The plaintext is never written to disk, printed, or passed as
-an argument.
-`
 
 // Test seams. Every effect this namespace has outside the process and git
 // goes through one of these, so the tests can drive the whole command
@@ -90,44 +58,79 @@ var (
 	secretAskOnTerminal   = askSecretOnTerminal
 )
 
+const secretCreateDetail = `'create' requires the branch to already carry, for <name>: a credentials.nix
+entry in rotation_state "pending" with exactly one agenix consumer in this
+repository, a secrets.nix line for that consumer's path whose recipients
+include this host's identity, a rotation registry entry naming both, and no
+ciphertext yet. It refuses anything else and says what it found. The value
+is read from stdin verbatim (trailing newline included, so multi-line
+formats round-trip), or as one hidden line when stdin is a terminal; an
+empty or whitespace-only value is refused. It then writes the ciphertext,
+sets the state to "active", runs 'nix flake check', restores both files if
+that fails, and otherwise commits and pushes the branch.
+
+'create' works on the secrets checkout, found through the repository
+registry under ~/work unless <checkout> names a worktree, and on whatever
+branch is checked out there. It refuses the default branch and a dirty
+tree: the landing is a commit on a branch, and merging stays your act.
+
+The identity is $AGE_IDENTITY, or ~/.ssh/host; its .pub must be among the
+recipients. The plaintext is never written to disk, printed, or passed as
+an argument.
+`
+
+const secretRekeyDetail = `'rekey' decrypts <name>'s existing ciphertext with the host identity and
+re-encrypts it to the recipients secrets.nix declares now, always rewriting
+the file, then checks, commits, and pushes the same way as 'create'. Use it
+after a recipient line changes. For a new value of an existing credential
+use rotate-token.
+
+'rekey' works on the secrets checkout, found through the repository
+registry under ~/work unless <checkout> names a worktree, and on whatever
+branch is checked out there. It refuses the default branch and a dirty
+tree: the landing is a commit on a branch, and merging stays your act.
+
+The identity is $AGE_IDENTITY, or ~/.ssh/host; its .pub must be among the
+recipients. The plaintext is never written to disk, printed, or passed as
+an argument.
+`
+
+// init extends the 'secret' namespace secret_declare.go's init() already
+// registered, adding the two commands this build's tag opts it into. It
+// appends to secretCommands rather than replacing it, and never calls
+// registerNamespace: that would panic on the duplicate word, and
+// secret_declare.go's init() is the only one allowed to call it.
 func init() {
-	registerNamespace(namespace{
-		"secret",
-		"Land an encrypted credential in the secrets repo (create, rekey)",
-		secretMain,
-	})
+	secretCommands = append(secretCommands,
+		secretCommand{
+			name:    "create",
+			summary: "Encrypt a pending credential's value and flip it to active",
+			usage:   []string{"allod secret create <name> [<checkout>]"},
+			detail:  secretCreateDetail,
+			run:     secretCreate,
+		},
+		secretCommand{
+			name:    "rekey",
+			summary: "Re-encrypt an existing credential to the recipients secrets.nix declares",
+			usage:   []string{"allod secret rekey <name> [<checkout>]"},
+			detail:  secretRekeyDetail,
+			run:     secretRekey,
+		},
+	)
 }
 
-func secretMain(args []string) {
-	if len(args) == 0 {
-		fmt.Fprint(stderr, secretUsageText)
-		exit(1)
-	}
-	switch args[0] {
-	case "-h", "--help":
-		fmt.Fprint(stdout, secretUsageText)
-	case "create":
-		secretCreate(args[1:])
-	case "rekey":
-		secretRekey(args[1:])
-	default:
-		fmt.Fprintf(stderr, "allod: unknown secret command: %s\n", args[0])
-		fmt.Fprint(stderr, secretUsageText)
-		exit(1)
-	}
-}
-
-// parseSecretArgs reads the shared '<name> [<checkout>]' shape. Every
-// option is unknown: the commands take none by design.
+// parseSecretArgs reads the shared '<name> [<checkout>]' shape 'create' and
+// 'rekey' both take. Every option is unknown: the commands take none by
+// design.
 func parseSecretArgs(command string, args []string) (name, checkout string) {
 	var positional []string
 	for _, arg := range args {
 		switch {
 		case arg == "-h" || arg == "--help":
-			fmt.Fprint(stdout, secretUsageText)
+			fmt.Fprint(stdout, secretCommandHelp(command))
 			exit(0)
 		case strings.HasPrefix(arg, "-"):
-			die(1, "unknown option for secret %s: %s", command, arg)
+			secretCommandUsageError(command, "unknown option for secret %s: %s", command, arg)
 		default:
 			positional = append(positional, arg)
 		}
@@ -138,9 +141,9 @@ func parseSecretArgs(command string, args []string) (name, checkout string) {
 	case 2:
 		return positional[0], positional[1]
 	case 0:
-		die(1, "secret %s requires a credential name", command)
+		secretCommandUsageError(command, "secret %s requires a credential name", command)
 	default:
-		die(1, "secret %s takes a credential name and at most one checkout path", command)
+		secretCommandUsageError(command, "secret %s takes a credential name and at most one checkout path", command)
 	}
 	return "", ""
 }
@@ -179,34 +182,6 @@ type secretTarget struct {
 	state      string
 	recipients []string
 	branch     string
-}
-
-// resolveSecretsCheckout finds the secrets repository the way rotate-token
-// does: the repository registry's checkout for it under ~/work, or the
-// conventional allod/secrets when the registry does not name one. An
-// explicit path — a worktree, typically — wins.
-func resolveSecretsCheckout(arg string) string {
-	path := arg
-	if path == "" {
-		path = filepath.Join(workDir(), secretsCheckoutRelative())
-	}
-	checkout := resolveGitRepo(path)
-	for _, file := range []string{"flake.nix", "secrets.nix", "credentials.nix"} {
-		if info, err := os.Stat(filepath.Join(checkout, file)); err != nil || !info.Mode().IsRegular() {
-			die(1, "%s is not a secrets checkout: no %s", checkout, file)
-		}
-	}
-	return checkout
-}
-
-func secretsCheckoutRelative() string {
-	const fallback = "allod/secrets"
-	for _, alias := range []string{"secrets", "allod/secrets"} {
-		if checkout, ok := registryCheckout(alias); ok {
-			return checkout
-		}
-	}
-	return fallback
 }
 
 // requireLandingBranch is the precondition every landing shares: a branch
