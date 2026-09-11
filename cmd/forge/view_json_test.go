@@ -192,6 +192,15 @@ func TestViewJSONValidationErrors(t *testing.T) {
 			"forge: --json requires at least one field; valid fields: number, title, body, state, author, labels, milestone, url, createdAt, updatedAt, closedAt\n",
 		},
 		{
+			// appendCSVValues (forge line 292) mirrors `IFS=, read -r -a`: it
+			// keeps only the first line and drops a trailing empty item, so a
+			// value whose first line is empty passes the raw non-empty check
+			// above but names zero fields once parsed.
+			"--json value whose first line is empty",
+			[]string{"-R", "acme/widget", "issue", "view", "20", "--json", "\nbody"},
+			"forge: --json requires at least one field; valid fields: number, title, body, state, author, labels, milestone, url, createdAt, updatedAt, closedAt\n",
+		},
+		{
 			"--jq without --json",
 			[]string{"-R", "acme/widget", "issue", "view", "20", "--jq", ".body"},
 			"forge: cannot use --jq without specifying --json\n",
