@@ -78,10 +78,10 @@ reviews, and only one API request. Fields are comma-separated and the flag may
 be repeated (`gh`'s multi-value shape): `--json number,title` and
 `--json number --json title` name the same set. Valid fields: `number`,
 `title`, `body`, `state`, `author`, `labels`, `milestone`, `url`, `createdAt`,
-`updatedAt`, `closedAt`, `headRefName`, `baseRefName`. `body` reaches stdout
-byte-for-byte as the API returned it -- no re-wrapping, no stripped trailing
-newlines -- so an edit can be built from what is actually there instead of
-retyped from the rendered view:
+`updatedAt`, `closedAt`, `headRefName`, `baseRefName`. The JSON object form
+(`--json body`) carries the body exactly as the API returned it, with a null
+body rendered as the empty string. This lets an edit start from the body as it
+currently is on the forge instead of a retyped rendering of it:
 
 ```bash
 forge pr view 12 --json body --jq .body > body.md
@@ -91,8 +91,12 @@ forge pr edit 12 --body-file body.md
 
 `--jq <expression>` filters the printed object down to one value and requires
 `--json`. Only a simple dotted field path is supported, such as `.body` or
-`.author.login`; anything else is rejected. A string prints raw with a
-trailing newline (`jq -r`'s convention); anything else prints as JSON.
+`.author.login`; anything else is rejected. A string prints raw plus one
+trailing newline (`jq -r`'s and `gh --jq`'s convention, not byte-for-byte) --
+so `--jq .body` adds a newline the JSON object form does not have, and the
+round trip above leaves the body with one more trailing newline than before
+unless the edit trims it back off. Anything other than a string prints as
+JSON.
 
 `pr snapshot` is the machine-readable interface for tools that need a pull
 request's exact commits. It emits a deliberately small, versioned schema rather
@@ -230,9 +234,14 @@ called without changes.
 object, instead of the rendered summary and comments -- the same shape as
 `pr view --json` (see PR commands above), minus `headRefName`/`baseRefName`.
 Valid fields: `number`, `title`, `body`, `state`, `author`, `labels`,
-`milestone`, `url`, `createdAt`, `updatedAt`, `closedAt`. This is the way to
-append to an issue body without clobbering what another writer added meanwhile
-(`--body-file` replaces the whole body):
+`milestone`, `url`, `createdAt`, `updatedAt`, `closedAt`. `body` behaves the
+same way as on `pr view --json`: the JSON object form carries it exactly as
+the API returned it (a null body renders as the empty string), while
+`--jq .body` prints it plus one trailing newline, not byte-for-byte. This lets
+an edit start from the body as it currently is on the forge instead of a
+retyped rendering of it (`--body-file` still replaces the whole body, so the
+edit is not a merge -- just built from the real text instead of a guess at
+it):
 
 ```bash
 forge issue view 12 --json body --jq .body > body.md

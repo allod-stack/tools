@@ -117,6 +117,17 @@ func validateJSONFields(fields, valid []string) {
 	}
 }
 
+// dieEmptyJSONFields is the "--json named no field" error, shared by every
+// path that can produce an empty field list: the flag given an empty value
+// outright, and a value whose only content is on a line appendCSVValues never
+// looks at (append_csv_values (forge line 292) mirrors `IFS=, read -r -a` --
+// one line, silently dropping everything after the first newline and any
+// trailing empty item). `forge issue view 20 --json $'\nbody'` is exactly
+// that: non-empty by the raw string, but zero usable fields once parsed.
+func dieEmptyJSONFields(valid []string) {
+	die("--json requires at least one field; valid fields: %s", strings.Join(valid, ", "))
+}
+
 func containsString(list []string, s string) bool {
 	for _, item := range list {
 		if item == s {
@@ -220,6 +231,77 @@ func jqCompactJSON(v any) string {
 		return "null"
 	}
 	return strings.TrimRight(buf.String(), "\n")
+}
+
+// parseViewArgs is the option loop shared by issue view and pr view: -R/--repo,
+// --json (comma-separated, repeatable), --jq, and exactly one positional (the
+// issue/PR number). It also runs every fatal check the two commands share, so
+// by the time it returns the caller either has a validated result or the
+// process has already exited:
+//
+//   - wrong positional count -> "usage: forge <context> <number>"
+//   - --jq without --json
+//   - --json named no field, whether from an outright empty value or one
+//     appendCSVValues silently reduced to nothing (dieEmptyJSONFields)
+//   - an unknown --json field (validateJSONFields)
+//   - an unsupported --jq expression, or one whose first segment was not
+//     requested with --json (validateJQExpr)
+//
+// fields is empty exactly when --json was not given at all: every path that
+// sets it non-nil either fills it or dies first, so callers tell "no --json"
+// from "field validated" by len(fields) alone.
+func parseViewArgs(context string, args []string, validFields []string) (number string, fields []string, jqSet bool, jqExpr string) {
+	positionalArgs = nil
+	var jsonFields []string
+	jsonSet := false
+
+	for len(args) > 0 {
+		switch args[0] {
+		case "-R", "--repo":
+			setRepoOption(args)
+			args = args[2:]
+		case "--json":
+			requireOptionValue(args[0], len(args))
+			if args[1] == "" {
+				dieEmptyJSONFields(validFields)
+			}
+			jsonSet = true
+			appendCSVValues(&jsonFields, args[0], args[1])
+			args = args[2:]
+		case "--jq":
+			requireOptionValue(args[0], len(args))
+			if jqSet {
+				die("%s specified more than once", args[0])
+			}
+			jqExpr = args[1]
+			jqSet = true
+			args = args[2:]
+		default:
+			if strings.HasPrefix(args[0], "-") {
+				die("unknown option for %s: %s", context, args[0])
+			}
+			positionalArgs = append(positionalArgs, args[0])
+			args = args[1:]
+		}
+	}
+
+	if len(positionalArgs) != 1 {
+		die("usage: forge %s <number>", context)
+	}
+	if jqSet && !jsonSet {
+		die("cannot use --jq without specifying --json")
+	}
+	if jsonSet {
+		if len(jsonFields) == 0 {
+			dieEmptyJSONFields(validFields)
+		}
+		validateJSONFields(jsonFields, validFields)
+	}
+	if jqSet {
+		validateJQExpr(jqExpr, jsonFields)
+	}
+
+	return positionalArgs[0], jsonFields, jqSet, jqExpr
 }
 
 // runViewJSON is the --json/--jq tail shared by issue view and pr view: fetch

@@ -111,58 +111,10 @@ func issueView(args []string) {
 		return
 	}
 
-	positionalArgs = nil
-	var jsonFields []string
-	jsonSet := false
-	jqExpr := ""
-	jqSet := false
-
-	for len(args) > 0 {
-		switch args[0] {
-		case "-R", "--repo":
-			setRepoOption(args)
-			args = args[2:]
-		case "--json":
-			requireOptionValue(args[0], len(args))
-			if args[1] == "" {
-				die("--json requires at least one field; valid fields: %s", strings.Join(issueViewJSONFields, ", "))
-			}
-			jsonSet = true
-			appendCSVValues(&jsonFields, args[0], args[1])
-			args = args[2:]
-		case "--jq":
-			requireOptionValue(args[0], len(args))
-			if jqSet {
-				die("%s specified more than once", args[0])
-			}
-			jqExpr = args[1]
-			jqSet = true
-			args = args[2:]
-		default:
-			if strings.HasPrefix(args[0], "-") {
-				die("unknown option for issue view: %s", args[0])
-			}
-			positionalArgs = append(positionalArgs, args[0])
-			args = args[1:]
-		}
-	}
-
-	if len(positionalArgs) != 1 {
-		die("usage: forge issue view <number>")
-	}
-	if jqSet && !jsonSet {
-		die("cannot use --jq without specifying --json")
-	}
-	if jsonSet {
-		validateJSONFields(jsonFields, issueViewJSONFields)
-	}
-	if jqSet {
-		validateJQExpr(jqExpr, jsonFields)
-	}
+	number, jsonFields, jqSet, jqExpr := parseViewArgs("issue view", args, issueViewJSONFields)
 	requireRepo()
-	number := positionalArgs[0]
 
-	if jsonSet {
+	if len(jsonFields) > 0 {
 		runViewJSON("/repos/"+repoOpt+"/issues/"+number, jsonFields, jqSet, jqExpr, nil)
 		return
 	}
