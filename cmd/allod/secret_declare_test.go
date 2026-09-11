@@ -111,30 +111,80 @@ type declareFixture struct {
 	checkout string
 }
 
-// declareFakeNix puts a fake 'nix' executable on an otherwise-unchanged
-// PATH (so 'git', which resolveSecretsCheckout still needs, stays
-// reachable) that answers 'nix eval --json path:.#machines.<name>.type'
-// for every machine named in types, and fails the way an absent inventory
-// entry would for anything else.
-func declareFakeNix(t *testing.T, types map[string]string) {
-	t.Helper()
+// declareFakeCredentialsJSON renders the object a fake 'nix eval
+// path:.#lib.credentials' answers with: one empty object per name, which is
+// all declareEvalCredentialNames reads (the keys, not the values).
+func declareFakeCredentialsJSON(names []string) string {
+	credentials := make(map[string]any, len(names))
+	for _, name := range names {
+		credentials[name] = map[string]any{}
+	}
+	data, _ := json.Marshal(credentials)
+	return string(data)
+}
+
+// declareFakeNixMachineCases renders the shell 'case' arms one fake-nix
+// script variant below shares: one per machine name in types, answering
+// its JSON-quoted type, and a catch-all that fails the way an absent
+// inventory entry would.
+func declareFakeNixMachineCases(types map[string]string) string {
 	var cases strings.Builder
 	for machine, machineType := range types {
 		fmt.Fprintf(&cases, "    %s) printf '\"%s\"' ;;\n", machine, machineType)
 	}
-	script := "#!/bin/sh\n" +
-		"if [ \"$1\" != eval ] || [ \"$2\" != --json ]; then echo \"fake nix: unexpected args: $*\" >&2; exit 1; fi\n" +
-		"attr=${3#path:.#machines.}\n" +
-		"machine=${attr%.type}\n" +
-		"case \"$machine\" in\n" +
-		cases.String() +
-		"    *) echo \"error: attribute 'machines.$machine.type' missing\" >&2; exit 1 ;;\n" +
-		"esac\n"
+	cases.WriteString("    *) echo \"error: attribute 'machines.$machine.type' missing\" >&2; exit 1 ;;\n")
+	return cases.String()
+}
+
+// declareInstallFakeNix writes script as the one 'nix' executable on an
+// otherwise-unchanged PATH (so 'git', which resolveSecretsCheckout still
+// needs, stays reachable).
+func declareInstallFakeNix(t *testing.T, script string) {
+	t.Helper()
 	binDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(binDir, "nix"), []byte(script), 0755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// declareFakeNix puts a fake 'nix' executable on PATH that answers 'nix
+// eval --json path:.#machines.<name>.type' for every machine named in
+// types (failing for an absent one, as a real inventory would), and 'nix
+// eval --json path:.#lib.credentials' with an object naming every entry in
+// evaluatedCredentialNames — the names declare's own evaluated-inventory
+// collision check (declareEvalCredentialNames) must see, independent of
+// what credentials.nix's text happens to say.
+func declareFakeNix(t *testing.T, types map[string]string, evaluatedCredentialNames []string) {
+	t.Helper()
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" != eval ] || [ \"$2\" != --json ]; then echo \"fake nix: unexpected args: $*\" >&2; exit 1; fi\n" +
+		"if [ \"$3\" = 'path:.#lib.credentials' ]; then printf '%s' \"$DECLARE_TEST_CREDENTIALS_JSON\"; exit 0; fi\n" +
+		"attr=${3#path:.#machines.}\n" +
+		"machine=${attr%.type}\n" +
+		"case \"$machine\" in\n" +
+		declareFakeNixMachineCases(types) +
+		"esac\n"
+	declareInstallFakeNix(t, script)
+	t.Setenv("DECLARE_TEST_CREDENTIALS_JSON", declareFakeCredentialsJSON(evaluatedCredentialNames))
+}
+
+// declareFakeNixFailingCredentialsEval is declareFakeNix except 'nix eval
+// path:.#lib.credentials' itself fails, the way a checkout that does not
+// evaluate at all would. It pins that declare refuses outright rather than
+// falling through to the text checks alone when the evaluated-inventory
+// check cannot run.
+func declareFakeNixFailingCredentialsEval(t *testing.T, types map[string]string) {
+	t.Helper()
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" != eval ] || [ \"$2\" != --json ]; then echo \"fake nix: unexpected args: $*\" >&2; exit 1; fi\n" +
+		"if [ \"$3\" = 'path:.#lib.credentials' ]; then echo 'error: infinite recursion encountered' >&2; exit 1; fi\n" +
+		"attr=${3#path:.#machines.}\n" +
+		"machine=${attr%.type}\n" +
+		"case \"$machine\" in\n" +
+		declareFakeNixMachineCases(types) +
+		"esac\n"
+	declareInstallFakeNix(t, script)
 }
 
 // declareFakeNixWithSideEffect is declareFakeNix plus one extra effect: on
@@ -142,34 +192,34 @@ func declareFakeNix(t *testing.T, types map[string]string) {
 // file named by sideEffectPath. This is how the concurrent-edit tests
 // simulate another process changing a file in the window between declare
 // reading it and declare writing it — the only real gap in one run is the
-// 'nix eval' call target-kind derivation makes, so that is where the
-// simulated edit happens, through the real production code path rather
-// than a test-only hook inside declare itself.
-func declareFakeNixWithSideEffect(t *testing.T, types map[string]string, sideEffectPath, sideEffectText string) {
+// 'nix eval' calls declare makes (for lib.credentials and for each
+// target's machine type), so that is where the simulated edit happens,
+// through the real production code path rather than a test-only hook
+// inside declare itself.
+func declareFakeNixWithSideEffect(t *testing.T, types map[string]string, evaluatedCredentialNames []string, sideEffectPath, sideEffectText string) {
 	t.Helper()
-	var cases strings.Builder
-	for machine, machineType := range types {
-		fmt.Fprintf(&cases, "    %s) printf '\"%s\"' ;;\n", machine, machineType)
-	}
 	script := "#!/bin/sh\n" +
 		"if [ \"$1\" != eval ] || [ \"$2\" != --json ]; then echo \"fake nix: unexpected args: $*\" >&2; exit 1; fi\n" +
 		"printf '%s' \"$DECLARE_TEST_SIDE_EFFECT_TEXT\" >> \"$DECLARE_TEST_SIDE_EFFECT_PATH\"\n" +
+		"if [ \"$3\" = 'path:.#lib.credentials' ]; then printf '%s' \"$DECLARE_TEST_CREDENTIALS_JSON\"; exit 0; fi\n" +
 		"attr=${3#path:.#machines.}\n" +
 		"machine=${attr%.type}\n" +
 		"case \"$machine\" in\n" +
-		cases.String() +
-		"    *) echo \"error: attribute 'machines.$machine.type' missing\" >&2; exit 1 ;;\n" +
+		declareFakeNixMachineCases(types) +
 		"esac\n"
-	binDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(binDir, "nix"), []byte(script), 0755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	declareInstallFakeNix(t, script)
+	t.Setenv("DECLARE_TEST_CREDENTIALS_JSON", declareFakeCredentialsJSON(evaluatedCredentialNames))
 	t.Setenv("DECLARE_TEST_SIDE_EFFECT_PATH", sideEffectPath)
 	t.Setenv("DECLARE_TEST_SIDE_EFFECT_TEXT", sideEffectText)
 }
 
-func newDeclareFixtureFiles(t *testing.T, credentials, secrets, registry string) *declareFixture {
+// declareFixtureEvaluatedCredentialNames is what the fake nix answers 'nix
+// eval path:.#lib.credentials' with by default: 'existing-token', matching
+// what declareFixtureCredentials actually declares as a literal entry, the
+// way a real evaluation of that file would.
+var declareFixtureEvaluatedCredentialNames = []string{"existing-token"}
+
+func newDeclareFixtureFilesWithEvaluatedNames(t *testing.T, credentials, secrets, registry string, evaluatedCredentialNames []string) *declareFixture {
 	t.Helper()
 	dir := t.TempDir()
 	fx := &declareFixture{checkout: dir}
@@ -196,8 +246,19 @@ func newDeclareFixtureFiles(t *testing.T, credentials, secrets, registry string)
 		"dev-b":     "dev",
 		"privacy-1": "privacy",
 		"nexus":     "hypervisor",
-	})
+	}, evaluatedCredentialNames)
 	return fx
+}
+
+// newDeclareFixtureFiles is newDeclareFixtureFilesWithEvaluatedNames with
+// the evaluated inventory answering exactly declareFixtureEvaluatedCredentialNames
+// — the right default for every fixture built from declareFixtureCredentials
+// or a text-only variant of it (a split-line or commented rewrite still
+// declares the same one name). Tests that need the evaluated inventory to
+// disagree with the text call the *WithEvaluatedNames form directly.
+func newDeclareFixtureFiles(t *testing.T, credentials, secrets, registry string) *declareFixture {
+	t.Helper()
+	return newDeclareFixtureFilesWithEvaluatedNames(t, credentials, secrets, registry, declareFixtureEvaluatedCredentialNames)
 }
 
 func newDeclareFixture(t *testing.T) *declareFixture {
@@ -329,7 +390,8 @@ const declareExpectedRegistryOneMachine = `{
             "kind": "dev-vm",
             "deployed_path": "/root/.token",
             "verify": {
-              "type": "git-ls-remote"
+              "type": "git-ls-remote",
+              "repo_url": "https://forge.example/allod/example.git"
             }
           }
         ]
@@ -343,7 +405,7 @@ func TestSecretDeclareOneMachineServiceNone(t *testing.T) {
 	fx := newDeclareFixture(t)
 	out, errText, code := fx.run(t, "new-token",
 		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
-		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote")
+		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote", "--verify-repo-url", "https://forge.example/allod/example.git")
 	if code != 0 {
 		t.Fatalf("exit %d, stderr: %s", code, errText)
 	}
@@ -424,7 +486,9 @@ const declareExpectedGroupMultiMachine = `  "multi-token": {
             "kind": "dev-vm",
             "deployed_path": "/root/.git-credentials",
             "verify": {
-              "type": "git-ls-remote"
+              "type": "git-ls-remote",
+              "repo_url": "https://forge.example/allod/multi.git",
+              "credential_context": "the multi-token repository"
             }
           },
           {
@@ -432,7 +496,9 @@ const declareExpectedGroupMultiMachine = `  "multi-token": {
             "kind": "dev-vm",
             "deployed_path": "/root/.git-credentials",
             "verify": {
-              "type": "git-ls-remote"
+              "type": "git-ls-remote",
+              "repo_url": "https://forge.example/allod/multi.git",
+              "credential_context": "the multi-token repository"
             }
           }
         ]
@@ -447,6 +513,7 @@ func TestSecretDeclareTwoMachinesServiceForgejo(t *testing.T) {
 	_, errText, code := fx.run(t, "multi-token",
 		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a,dev-b",
 		"--format", "credential-store-url", "--deployed-path", "/root/.git-credentials", "--verify", "git-ls-remote",
+		"--verify-repo-url", "https://forge.example/allod/multi.git", "--verify-context", "the multi-token repository",
 		"--service", "forgejo", "--account", "allod-agent", "--ui-token-name", "multi-token")
 	if code != 0 {
 		t.Fatalf("exit %d, stderr: %s", code, errText)
@@ -479,7 +546,7 @@ func TestSecretDeclareTwoMachinesServiceForgejo(t *testing.T) {
 func TestSecretDeclareTargetingNexusReadsHypervisorType(t *testing.T) {
 	fx := newDeclareFixture(t)
 	out, errText, code := fx.run(t, "host-token",
-		"--kind", "machine-host", "--owner", "nexus", "--to", "nexus",
+		"--kind", "service", "--owner", "nexus", "--to", "nexus",
 		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "site-check")
 	if code != 0 {
 		t.Fatalf("exit %d, stderr: %s", code, errText)
@@ -500,12 +567,47 @@ func TestSecretDeclareTargetingNexusReadsHypervisorType(t *testing.T) {
 	}
 }
 
+// --- --kind is restricted to what declare can write correctly ---
+
+// TestSecretDeclareRefusesGeneratedKinds covers allod/tools#196 review
+// finding 1: forge-git and machine-host are real credential-inventory
+// kinds, but the shape declare writes for any --kind (public_key null, one
+// agenix consumer) is exactly what credential-inventory rejects for them —
+// a forge-git entry needs a real public_key and one forge-key-secret plus
+// one forgejo-ssh consumer, and machine-host entries are generated by
+// hostEntries, never hand-declared. Both are refused, naming the three
+// --kind does accept.
+func TestSecretDeclareRefusesGeneratedKinds(t *testing.T) {
+	for _, kind := range []string{"forge-git", "machine-host"} {
+		t.Run(kind, func(t *testing.T) {
+			fx := newDeclareFixture(t)
+			_, errText, code := fx.run(t, "new-token",
+				"--kind", kind, "--owner", "allod-agent", "--to", "dev-a",
+				"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "site-check")
+			if code != 1 {
+				t.Errorf("exit code = %d, want 1", code)
+			}
+			for _, want := range []string{
+				"invalid --kind \"" + kind + "\"",
+				"expected one of: user, agent, service",
+				"generated by the template, not declared",
+			} {
+				if !strings.Contains(errText, want) {
+					t.Errorf("stderr lacks %q\ngot: %q", want, errText)
+				}
+			}
+			fx.assertUntouched(t, declareFixtureCredentials, declareFixtureSecrets, declareFixtureRegistry)
+		})
+	}
+}
+
 // --- Collisions ---
 
 func TestSecretDeclareCollisions(t *testing.T) {
 	validArgs := []string{
 		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
 		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote",
+		"--verify-repo-url", "https://forge.example/allod/example.git",
 	}
 	cases := []struct {
 		name string
@@ -545,7 +647,7 @@ func TestSecretDeclareSecretsLineCollisionAlone(t *testing.T) {
 	fx := newDeclareFixtureFiles(t, declareFixtureCredentials, secrets, declareFixtureRegistry)
 	_, errText, code := fx.run(t, "orphan",
 		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
-		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote")
+		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote", "--verify-repo-url", "https://forge.example/allod/example.git")
 	if code == 0 {
 		t.Fatal("exit 0, want a refusal")
 	}
@@ -566,7 +668,7 @@ func TestSecretDeclareCredentialsCollisionAcrossLines(t *testing.T) {
 	fx := newDeclareFixtureFiles(t, credentials, declareFixtureSecrets, declareFixtureRegistry)
 	_, errText, code := fx.run(t, "existing-token",
 		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
-		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote")
+		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote", "--verify-repo-url", "https://forge.example/allod/example.git")
 	if code == 0 {
 		t.Fatal("exit 0, want a refusal")
 	}
@@ -587,7 +689,7 @@ func TestSecretDeclareSecretsLineCollisionAcrossLines(t *testing.T) {
 	fx := newDeclareFixtureFiles(t, declareFixtureCredentials, secrets, declareFixtureRegistry)
 	_, errText, code := fx.run(t, "orphan",
 		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
-		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote")
+		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote", "--verify-repo-url", "https://forge.example/allod/example.git")
 	if code == 0 {
 		t.Fatal("exit 0, want a refusal")
 	}
@@ -597,12 +699,101 @@ func TestSecretDeclareSecretsLineCollisionAcrossLines(t *testing.T) {
 	fx.assertUntouched(t, declareFixtureCredentials, secrets, declareFixtureRegistry)
 }
 
+// TestSecretDeclareCredentialsCollisionAcrossAComment covers allod/tools#196
+// review finding 5: the collision regexes span newlines but must also span
+// a nix line comment sitting between the name and '=' — a comment hides
+// nothing from nix either, so it must hide nothing from the collision
+// check.
+func TestSecretDeclareCredentialsCollisionAcrossAComment(t *testing.T) {
+	credentials := strings.Replace(declareFixtureCredentials,
+		"  existing-token = {", "  existing-token # already active\n    = {", 1)
+	fx := newDeclareFixtureFiles(t, credentials, declareFixtureSecrets, declareFixtureRegistry)
+	_, errText, code := fx.run(t, "existing-token",
+		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
+		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote", "--verify-repo-url", "https://forge.example/allod/example.git")
+	if code == 0 {
+		t.Fatal("exit 0, want a refusal")
+	}
+	if want := "credentials.nix: an entry named 'existing-token' already exists"; !strings.Contains(errText, want) {
+		t.Errorf("stderr lacks %q\ngot: %q", want, errText)
+	}
+	fx.assertUntouched(t, credentials, declareFixtureSecrets, declareFixtureRegistry)
+}
+
+// TestSecretDeclareSecretsLineCollisionAcrossAComment is the secrets.nix
+// half of the same finding.
+func TestSecretDeclareSecretsLineCollisionAcrossAComment(t *testing.T) {
+	secrets := declareFixtureSecrets[:len(declareFixtureSecrets)-len("}\n")] +
+		"  \"secrets/orphan.age\" # already declared\n    .publicKeys = [ hostKey ];\n}\n"
+	fx := newDeclareFixtureFiles(t, declareFixtureCredentials, secrets, declareFixtureRegistry)
+	_, errText, code := fx.run(t, "orphan",
+		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
+		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote", "--verify-repo-url", "https://forge.example/allod/example.git")
+	if code == 0 {
+		t.Fatal("exit 0, want a refusal")
+	}
+	if want := "secrets.nix: a publicKeys line for 'secrets/orphan.age' already exists"; !strings.Contains(errText, want) {
+		t.Errorf("stderr lacks %q\ngot: %q", want, errText)
+	}
+	fx.assertUntouched(t, declareFixtureCredentials, secrets, declareFixtureRegistry)
+}
+
+// TestSecretDeclareRefusesWhenOnlyTheEvaluatedInventoryKnowsTheName covers
+// allod/tools#196 review finding 3: credentials.nix is 'hostEntries //
+// activeEntries // stagedEntries // forgeGitEntries // { ...literal...;
+// }', so a name produced by one of the generated attrsets is invisible to
+// the textual scan, which only sees the literal block. This fixture's
+// credentials.nix text names only 'existing-token', but the fake
+// evaluated inventory also knows 'generated-only-token' — standing in for
+// a name credentials.nix generates rather than writes out — and that must
+// refuse just as a textual collision would, naming the evaluated source.
+func TestSecretDeclareRefusesWhenOnlyTheEvaluatedInventoryKnowsTheName(t *testing.T) {
+	fx := newDeclareFixtureFilesWithEvaluatedNames(t, declareFixtureCredentials, declareFixtureSecrets, declareFixtureRegistry,
+		[]string{"existing-token", "generated-only-token"})
+	_, errText, code := fx.run(t, "generated-only-token",
+		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
+		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote", "--verify-repo-url", "https://forge.example/allod/example.git")
+	if code == 0 {
+		t.Fatal("exit 0, want a refusal")
+	}
+	if want := "lib.credentials (evaluated): an entry named 'generated-only-token' already exists"; !strings.Contains(errText, want) {
+		t.Errorf("stderr lacks %q\ngot: %q", want, errText)
+	}
+	fx.assertUntouched(t, declareFixtureCredentials, declareFixtureSecrets, declareFixtureRegistry)
+}
+
+// TestSecretDeclareRefusesWhenCredentialsEvalFails covers the other half of
+// finding 3: "a failed evaluation refuses; it never falls through to the
+// text checks alone." A name absent from every text file would otherwise
+// sail through the textual checks; with the evaluated-inventory check
+// itself failing (the checkout does not evaluate, say), declare must
+// refuse outright rather than treating the text checks as sufficient on
+// their own.
+func TestSecretDeclareRefusesWhenCredentialsEvalFails(t *testing.T) {
+	fx := newDeclareFixture(t)
+	declareFakeNixFailingCredentialsEval(t, map[string]string{"dev-a": "dev"})
+	_, errText, code := fx.run(t, "new-token",
+		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
+		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote", "--verify-repo-url", "https://forge.example/allod/example.git")
+	if code == 0 {
+		t.Fatal("exit 0, want a refusal")
+	}
+	if want := "could not evaluate"; !strings.Contains(errText, want) {
+		t.Errorf("stderr lacks %q\ngot: %q", want, errText)
+	}
+	if strings.Contains(errText, "already exists") {
+		t.Errorf("a failed evaluation must refuse outright, not report a (non-)collision: %q", errText)
+	}
+	fx.assertUntouched(t, declareFixtureCredentials, declareFixtureSecrets, declareFixtureRegistry)
+}
+
 // --- Missing and invalid flags ---
 
 func TestSecretDeclareFlagErrors(t *testing.T) {
 	base := map[string]string{
 		"--kind": "agent", "--owner": "allod-agent", "--to": "dev-a",
 		"--format": "raw-forgejo-token", "--deployed-path": "/root/.token", "--verify": "git-ls-remote",
+		"--verify-repo-url": "https://forge.example/allod/example.git",
 	}
 	buildArgs := func(overrides map[string]string, omit string) []string {
 		args := []string{"new-token"}
@@ -629,6 +820,15 @@ func TestSecretDeclareFlagErrors(t *testing.T) {
 		{"missing --format", buildArgs(nil, "--format"), "--format is required"},
 		{"missing --deployed-path", buildArgs(nil, "--deployed-path"), "--deployed-path is required"},
 		{"missing --verify", buildArgs(nil, "--verify"), "--verify is required"},
+		{"missing --verify-repo-url", buildArgs(nil, "--verify-repo-url"), "--verify git-ls-remote requires --verify-repo-url"},
+		{"verify-repo-url misuse", buildArgs(map[string]string{"--verify": "site-check"}, ""), "--verify-repo-url and --verify-context apply only to --verify git-ls-remote"},
+		{"verify-user misuse", buildArgs(map[string]string{"--verify-user": "root"}, ""), "--verify-user applies only to --verify forge-token-verify"},
+		{
+			"forge-token-verify needs verify-user",
+			[]string{"new-token", "--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
+				"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "forge-token-verify"},
+			"--verify forge-token-verify requires --verify-user",
+		},
 		{"invalid --kind", buildArgs(map[string]string{"--kind": "bogus"}, ""), "invalid --kind \"bogus\""},
 		{"invalid --format", buildArgs(map[string]string{"--format": "bogus"}, ""), "invalid --format \"bogus\""},
 		{"invalid --verify", buildArgs(map[string]string{"--verify": "bogus"}, ""), "invalid --verify \"bogus\""},
@@ -686,6 +886,7 @@ func TestSecretDeclareRefusesInjectionThroughStringFlags(t *testing.T) {
 	base := map[string]string{
 		"--kind": "agent", "--owner": "allod-agent", "--to": "dev-a",
 		"--format": "raw-forgejo-token", "--deployed-path": "/root/.token", "--verify": "git-ls-remote",
+		"--verify-repo-url": "https://forge.example/allod/example.git",
 	}
 	buildArgs := func(overrides map[string]string) []string {
 		args := []string{"new-token"}
@@ -743,6 +944,21 @@ func TestSecretDeclareRefusesInjectionThroughStringFlags(t *testing.T) {
 			buildArgs(map[string]string{"--deployed-path": "/root/ .token"}),
 			"invalid --deployed-path",
 		},
+		{
+			"verify-repo-url is not https",
+			buildArgs(map[string]string{"--verify-repo-url": "http://forge.example/allod/example.git"}),
+			"invalid --verify-repo-url",
+		},
+		{
+			"verify-repo-url carries a dollar sign",
+			buildArgs(map[string]string{"--verify-repo-url": "https://forge.example/$USER/example.git"}),
+			"invalid --verify-repo-url",
+		},
+		{
+			"verify-context carries a control character",
+			buildArgs(map[string]string{"--verify-context": "the example\trepository"}),
+			"invalid --verify-context",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -765,7 +981,7 @@ func TestSecretDeclareRefusesUnknownMachine(t *testing.T) {
 	fx := newDeclareFixture(t)
 	_, errText, code := fx.run(t, "new-token",
 		"--kind", "agent", "--owner", "allod-agent", "--to", "ghost-vm",
-		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote")
+		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote", "--verify-repo-url", "https://forge.example/allod/example.git")
 	if code == 0 {
 		t.Fatal("exit 0, want a refusal")
 	}
@@ -783,10 +999,10 @@ func TestSecretDeclareRefusesUnknownMachine(t *testing.T) {
 func TestSecretDeclareRefusesUnexpectedMachineType(t *testing.T) {
 	fx := newDeclareFixtureFiles(t, declareFixtureCredentials, declareFixtureSecrets, declareFixtureRegistry)
 	t.Setenv("INVENTORY", t.TempDir())
-	declareFakeNix(t, map[string]string{"dev-a": "dev", "weird-vm": "laptop"})
+	declareFakeNix(t, map[string]string{"dev-a": "dev", "weird-vm": "laptop"}, declareFixtureEvaluatedCredentialNames)
 	_, errText, code := fx.run(t, "new-token",
 		"--kind", "agent", "--owner", "allod-agent", "--to", "weird-vm",
-		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote")
+		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote", "--verify-repo-url", "https://forge.example/allod/example.git")
 	if code == 0 {
 		t.Fatal("exit 0, want a refusal")
 	}
@@ -844,7 +1060,7 @@ func TestSecretDeclareRefusesWhenRegistryDoesNotParse(t *testing.T) {
 	fx := newDeclareFixtureFiles(t, declareFixtureCredentials, declareFixtureSecrets, declareSabotageRegistry)
 	_, errText, code := fx.run(t, "new-token",
 		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
-		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote")
+		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote", "--verify-repo-url", "https://forge.example/allod/example.git")
 	if code == 0 {
 		t.Fatal("exit 0, want a refusal")
 	}
@@ -860,7 +1076,7 @@ func TestSecretDeclareRefusesWhenCredentialsWouldNotBalance(t *testing.T) {
 	fx := newDeclareFixtureFiles(t, declareSabotageCredentials, declareFixtureSecrets, declareFixtureRegistry)
 	_, errText, code := fx.run(t, "new-token",
 		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
-		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote")
+		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote", "--verify-repo-url", "https://forge.example/allod/example.git")
 	if code == 0 {
 		t.Fatal("exit 0, want a refusal")
 	}
@@ -933,11 +1149,11 @@ func TestSecretDeclareRefusesAndRestoresWhenAFileChangesUnderneath(t *testing.T)
 	fx := newDeclareFixtureFiles(t, declareFixtureCredentials, declareFixtureSecrets, declareFixtureRegistry)
 	t.Setenv("INVENTORY", t.TempDir())
 	secretsPath := filepath.Join(fx.checkout, "secrets.nix")
-	declareFakeNixWithSideEffect(t, map[string]string{"dev-a": "dev"}, secretsPath, "\n# edited concurrently\n")
+	declareFakeNixWithSideEffect(t, map[string]string{"dev-a": "dev"}, declareFixtureEvaluatedCredentialNames, secretsPath, "\n# edited concurrently\n")
 
 	_, errText, code := fx.run(t, "new-token",
 		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
-		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote")
+		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote", "--verify-repo-url", "https://forge.example/allod/example.git")
 	if code == 0 {
 		t.Fatal("exit 0, want a refusal")
 	}
@@ -979,7 +1195,7 @@ func TestSecretDeclareRefusesALeadingDigitName(t *testing.T) {
 	fx := newDeclareFixture(t)
 	_, errText, code := fx.run(t, "1token",
 		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
-		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote")
+		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote", "--verify-repo-url", "https://forge.example/allod/example.git")
 	if code != 1 {
 		t.Errorf("exit code = %d, want 1", code)
 	}
@@ -987,4 +1203,30 @@ func TestSecretDeclareRefusesALeadingDigitName(t *testing.T) {
 		t.Errorf("stderr lacks %q\ngot: %q", want, errText)
 	}
 	fx.assertUntouched(t, declareFixtureCredentials, declareFixtureSecrets, declareFixtureRegistry)
+}
+
+// TestSecretDeclareRefusesNixKeywordNames covers allod/tools#196 review
+// finding 4: every name in declareNixKeywords matches declareNamePattern
+// (lowercase letters only) but is still not usable as an unquoted nix
+// attribute name — 'let = { ... };' is a syntax error, not an attribute
+// named "let".
+func TestSecretDeclareRefusesNixKeywordNames(t *testing.T) {
+	for _, keyword := range declareNixKeywords {
+		t.Run(keyword, func(t *testing.T) {
+			if !declareNamePattern.MatchString(keyword) {
+				t.Fatalf("%q should match declareNamePattern, or this test proves nothing about the keyword check", keyword)
+			}
+			fx := newDeclareFixture(t)
+			_, errText, code := fx.run(t, keyword,
+				"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
+				"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote", "--verify-repo-url", "https://forge.example/allod/example.git")
+			if code != 1 {
+				t.Errorf("exit code = %d, want 1", code)
+			}
+			if want := "invalid credential name \"" + keyword + "\": a nix keyword"; !strings.Contains(errText, want) {
+				t.Errorf("stderr lacks %q\ngot: %q", want, errText)
+			}
+			fx.assertUntouched(t, declareFixtureCredentials, declareFixtureSecrets, declareFixtureRegistry)
+		})
+	}
 }
