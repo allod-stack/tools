@@ -501,6 +501,73 @@ func TestSecretCreateRefusals(t *testing.T) {
 	}
 }
 
+// A checkout whose origin/HEAD is unset must be refused rather than compared
+// against a guessed 'master': on a repository whose default is 'main', the
+// guess would let the landing be pushed straight to the default branch.
+func TestSecretCreateRefusesWhenDefaultBranchIsUnknown(t *testing.T) {
+	fx := newSecretFixture(t)
+	gitRun(t, fx.checkout, "remote", "set-head", "origin", "-d")
+	fx.pipe("value\n")
+	before := fx.head(t)
+
+	_, errText, code := fx.run(t, "secret", "create", "new-token")
+	if code != 1 || !strings.Contains(errText, "could not resolve the default branch") || !strings.Contains(errText, "remote set-head origin -a") {
+		t.Errorf("code=%d stderr=%q", code, errText)
+	}
+	fx.assertUntouched(t, before)
+}
+
+// installFailingPreCommit makes every commit in the fixture fail, the way a
+// policy hook or a missing author identity would on a real host.
+func installFailingPreCommit(t *testing.T, fx *secretFixture) {
+	t.Helper()
+	hook := filepath.Join(fx.checkout, ".git", "hooks", "pre-commit")
+	if err := os.MkdirAll(filepath.Dir(hook), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\necho 'policy: no' >&2\nexit 1\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSecretCreateRestoresTreeWhenCommitFails(t *testing.T) {
+	fx := newSecretFixture(t)
+	installFailingPreCommit(t, fx)
+	fx.pipe("value\n")
+	before := fx.head(t)
+
+	_, errText, code := fx.run(t, "secret", "create", "new-token")
+	if code == 0 {
+		t.Fatal("exit 0 despite a failed commit")
+	}
+	if !strings.Contains(errText, "git commit failed; restored") || !strings.Contains(errText, "policy: no") {
+		t.Errorf("stderr = %q", errText)
+	}
+	if fx.checkCalls != 1 {
+		t.Errorf("flake check ran %d times, want 1", fx.checkCalls)
+	}
+	fx.encryptCalls = 0
+	fx.assertUntouched(t, before)
+	if staged := gitRun(t, fx.checkout, "diff", "--cached", "--name-only"); staged != "" {
+		t.Errorf("files left staged: %q", staged)
+	}
+}
+
+func TestSecretRekeyRestoresCiphertextWhenCommitFails(t *testing.T) {
+	fx := newSecretFixture(t)
+	installFailingPreCommit(t, fx)
+	before := fx.head(t)
+
+	if _, errText, code := fx.run(t, "secret", "rekey", "old-token"); code == 0 || !strings.Contains(errText, "git commit failed; restored") {
+		t.Errorf("code=%d stderr=%q", code, errText)
+	}
+	if got := fx.file(t, "secrets/old-token.age"); got != fixtureOldCiphertext {
+		t.Error("the original ciphertext was not restored")
+	}
+	fx.encryptCalls = 0
+	fx.assertUntouched(t, before)
+}
+
 func TestSecretCreateRestoresBothFilesWhenChecksFail(t *testing.T) {
 	fx := newSecretFixture(t)
 	fx.checkStatus = 3
@@ -671,6 +738,31 @@ func TestFlipPendingToActive(t *testing.T) {
 	want := strings.Replace(fixtureCredentialsNix, "rotation_state = \"pending\";", "rotation_state = \"active\";", 1)
 	if got != want {
 		t.Errorf("flip changed more than one line:\n%s", got)
+	}
+
+	// A comment quoting the field is neither a second assignment nor a
+	// line to rewrite.
+	commented := strings.Replace(fixtureCredentialsNix,
+		"    rotation_state = \"pending\";",
+		"    # rotation_state = \"pending\" until allod secret create lands it\n    rotation_state = \"pending\";", 1)
+	got, err = flipPendingToActive(commented, "new-token")
+	if err != nil {
+		t.Fatalf("commented entry: %v", err)
+	}
+	if !strings.Contains(got, "# rotation_state = \"pending\" until allod secret create lands it\n    rotation_state = \"active\";") {
+		t.Errorf("commented entry: comment rewritten or field not flipped:\n%s", got)
+	}
+
+	// A brace inside a string or a comment does not close the entry.
+	braced := strings.Replace(fixtureCredentialsNix,
+		"    kind           = \"agent\";",
+		"    kind           = \"agent\";\n    description    = \"} not a closer \\\" either\";\n    # nor this: }", 1)
+	got, err = flipPendingToActive(braced, "new-token")
+	if err != nil {
+		t.Fatalf("braced entry: %v", err)
+	}
+	if !strings.Contains(got, "# nor this: }\n    owner          = \"allod-agent\";") || strings.Count(got, "rotation_state = \"active\";") != 2 {
+		t.Errorf("braced entry: wrong flip:\n%s", got)
 	}
 
 	quoted := strings.Replace(fixtureCredentialsNix, "  new-token = {", "  \"new-token\" = {", 1)

@@ -227,10 +227,20 @@ func secretsCheckoutRelative() string {
 // too, and is named as such rather than silently swept into the landing.
 func requireLandingBranch(checkout string) string {
 	branch := currentBranch(checkout)
+	// defaultRemoteBranch guesses 'master' when origin/HEAD is unset, and a
+	// guess is not good enough here: a checkout whose default is 'main' would
+	// pass the comparison and the landing would be pushed straight to it.
+	if !gitQuiet(checkout, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD") {
+		die(1, "could not resolve the default branch of %s; run: git -C %s remote set-head origin -a", checkout, checkout)
+	}
 	if branch == defaultRemoteBranch(checkout) {
 		die(1, "%s is on its default branch '%s'; check out the branch that declares the credential (an agent's agent/<description> branch) and rerun. Merging stays a separate act.", checkout, branch)
 	}
-	if status, _ := gitOutput(checkout, "status", "--porcelain"); status != "" {
+	status, ok := gitOutput(checkout, "status", "--porcelain")
+	if !ok {
+		die(1, "git status failed in %s; refusing to guess whether the tree is clean", checkout)
+	}
+	if status != "" {
 		fmt.Fprintf(stderr, "allod: %s has uncommitted or untracked changes:\n%s\n", checkout, status)
 		die(1, "commit or remove them first; the landing must be the only change in its commit")
 	}
@@ -382,31 +392,61 @@ func flipPendingToActive(text, name string) (string, error) {
 		return "", fmt.Errorf("no literal '%s = { ... }' entry in credentials.nix; the command flips only entries written out there", name)
 	}
 	start := location[1] - 1 // the '{'
-	depth, end := 0, -1
+	end := matchingBrace(text, start)
+	if end < 0 {
+		return "", fmt.Errorf("the '%s = {' entry in credentials.nix has no closing brace", name)
+	}
+	// Comment lines are skipped, so a note quoting the field next to the
+	// real one neither counts as a second assignment nor gets rewritten.
+	lines := strings.Split(text[start:end+1], "\n")
+	found := 0
+	for index, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		matches := len(rotationStatePending.FindAllStringIndex(line, -1))
+		if matches == 0 {
+			continue
+		}
+		found += matches
+		lines[index] = rotationStatePending.ReplaceAllString(line, `${1}"active"${2}`)
+	}
+	if found != 1 {
+		return "", fmt.Errorf("expected exactly one literal 'rotation_state = \"pending\"' inside the '%s' entry of credentials.nix, found %d", name, found)
+	}
+	return text[:start] + strings.Join(lines, "\n") + text[end+1:], nil
+}
+
+// matchingBrace returns the index of the '}' that closes the '{' at start,
+// or -1. Braces inside double-quoted strings and '#' comments do not count,
+// so a value such as description = "}" cannot end the entry early. Nix's
+// indented ” strings are not recognised; no inventory entry uses one.
+func matchingBrace(text string, start int) int {
+	depth := 0
 	for index := start; index < len(text); index++ {
 		switch text[index] {
+		case '#':
+			for index < len(text) && text[index] != '\n' {
+				index++
+			}
+		case '"':
+			index++
+			for index < len(text) && text[index] != '"' {
+				if text[index] == '\\' {
+					index++
+				}
+				index++
+			}
 		case '{':
 			depth++
 		case '}':
 			depth--
 			if depth == 0 {
-				end = index
+				return index
 			}
 		}
-		if end >= 0 {
-			break
-		}
 	}
-	if end < 0 {
-		return "", fmt.Errorf("the '%s = {' entry in credentials.nix has no closing brace", name)
-	}
-	block := text[start : end+1]
-	matches := rotationStatePending.FindAllStringIndex(block, -1)
-	if len(matches) != 1 {
-		return "", fmt.Errorf("expected exactly one literal 'rotation_state = \"pending\"' inside the '%s' entry of credentials.nix, found %d", name, len(matches))
-	}
-	flipped := rotationStatePending.ReplaceAllString(block, `${1}"active"${2}`)
-	return text[:start] + flipped + text[end+1:], nil
+	return -1
 }
 
 // --- Commands ---
@@ -440,34 +480,41 @@ func secretCreate(args []string) {
 	value = nil
 
 	// Nothing has been written until here. From here on, a failure restores
-	// both files before reporting, so the tree is clean either way.
-	restore := func() {
-		os.Remove(file)
-		os.WriteFile(credentialsPath, original, 0644)
+	// both files before reporting, and says so if it could not.
+	restore := func() string {
+		problems := 0
+		if err := os.Remove(file); err != nil && !os.IsNotExist(err) {
+			fmt.Fprintf(stderr, "allod: could not remove %s: %s\n", file, err)
+			problems++
+		}
+		if err := os.WriteFile(credentialsPath, original, 0644); err != nil {
+			fmt.Fprintf(stderr, "allod: could not restore %s: %s\n", credentialsPath, err)
+			problems++
+		}
+		if problems > 0 {
+			return "the tree could NOT be fully restored; inspect it before retrying"
+		}
+		return fmt.Sprintf("restored credentials.nix and removed %s", target.path)
 	}
 	if err := os.MkdirAll(filepath.Dir(file), 0755); err != nil {
 		die(1, "could not create %s", filepath.Dir(file))
 	}
 	if err := os.WriteFile(file, ciphertext, 0644); err != nil {
-		restore()
-		die(1, "could not write %s", file)
+		die(1, "could not write %s: %s; %s", file, err, restore())
 	}
 	if err := os.WriteFile(credentialsPath, []byte(flipped), 0644); err != nil {
-		restore()
-		die(1, "could not write %s", credentialsPath)
+		die(1, "could not write %s: %s; %s", credentialsPath, err, restore())
 	}
 	// The textual flip is verified the way every consumer will read it.
 	credentials, err := secretEvalCredentials(checkout)
 	if err != nil || credentials[name].RotationState != "active" {
-		restore()
-		die(1, "credentials.nix does not evaluate '%s' as active after the flip; restored both files", name)
+		die(1, "credentials.nix does not evaluate '%s' as active after the flip; %s", name, restore())
 	}
 	if status := secretFlakeCheck(checkout); status != 0 {
-		restore()
-		die(status, "the repository's checks failed; restored credentials.nix and removed %s", target.path)
+		die(status, "the repository's checks failed; %s", restore())
 	}
 
-	commit := landCommit(checkout, fmt.Sprintf("Land %s: write its ciphertext and set rotation_state active", name), target.path, "credentials.nix")
+	commit := landCommit(checkout, fmt.Sprintf("Land %s: write its ciphertext and set rotation_state active", name), restore, target.path, "credentials.nix")
 	fmt.Fprintf(stdout, "Wrote %s, encrypted to %d recipients from secrets.nix\n", target.path, len(target.recipients))
 	fmt.Fprintf(stdout, "credentials.nix: %s pending -> active\n", name)
 	fmt.Fprintf(stdout, "Committed %s on %s and pushed to origin; merging is yours\n", commit, branch)
@@ -499,17 +546,21 @@ func secretRekey(args []string) {
 	ciphertext := encryptOrDie(target, value)
 	value = nil
 
-	restore := func() { os.WriteFile(file, original, 0644) }
+	restore := func() string {
+		if err := os.WriteFile(file, original, 0644); err != nil {
+			fmt.Fprintf(stderr, "allod: could not restore %s: %s\n", file, err)
+			return "the previous ciphertext could NOT be restored; inspect the tree before retrying"
+		}
+		return fmt.Sprintf("restored %s", target.path)
+	}
 	if err := os.WriteFile(file, ciphertext, 0644); err != nil {
-		restore()
-		die(1, "could not write %s", file)
+		die(1, "could not write %s: %s; %s", file, err, restore())
 	}
 	if status := secretFlakeCheck(checkout); status != 0 {
-		restore()
-		die(status, "the repository's checks failed; restored %s", target.path)
+		die(status, "the repository's checks failed; %s", restore())
 	}
 
-	commit := landCommit(checkout, fmt.Sprintf("Rekey %s to the recipients secrets.nix declares", name), target.path)
+	commit := landCommit(checkout, fmt.Sprintf("Rekey %s to the recipients secrets.nix declares", name), restore, target.path)
 	fmt.Fprintf(stdout, "Rewrote %s, encrypted to %d recipients from secrets.nix\n", target.path, len(target.recipients))
 	fmt.Fprintf(stdout, "Committed %s on %s and pushed to origin; merging is yours\n", commit, branch)
 }
@@ -526,15 +577,21 @@ func encryptOrDie(target secretTarget, value []byte) []byte {
 }
 
 // landCommit stages exactly the named files, commits, and pushes the current
-// branch. A push failure leaves the commit in place and says so: the
-// landing happened, the publication did not.
-func landCommit(checkout, message string, files ...string) string {
+// branch. A failed add or commit — a pre-commit hook, a missing author
+// identity — unstages and restores the files, so the tree is as clean as
+// every other refusal leaves it. A push failure leaves the commit in place
+// and says so: the landing happened, the publication did not.
+func landCommit(checkout, message string, restore func() string, files ...string) string {
+	unstageAndRestore := func() string {
+		captureCommand(checkout, nil, true, "git", append([]string{"reset", "-q", "--"}, files...)...)
+		return restore()
+	}
 	args := append([]string{"add", "--"}, files...)
 	if output, status := captureCommand(checkout, nil, true, "git", args...); status != 0 {
-		die(status, "git add failed:\n%s", output)
+		die(status, "git add failed; %s:\n%s", unstageAndRestore(), output)
 	}
 	if output, status := captureCommand(checkout, nil, true, "git", "commit", "-q", "-m", message); status != 0 {
-		die(status, "git commit failed:\n%s", output)
+		die(status, "git commit failed; %s:\n%s", unstageAndRestore(), output)
 	}
 	commit, _ := gitOutput(checkout, "rev-parse", "--short", "HEAD")
 	if output, status := captureCommand(checkout, nil, true, "git", "push", "origin", "HEAD"); status != 0 {
@@ -546,9 +603,14 @@ func landCommit(checkout, message string, files ...string) string {
 
 // --- The world ---
 
+// Every nix invocation runs with the checkout as its working directory and
+// names it as 'path:.' or './secrets.nix', so the path itself never has to
+// survive flake-reference or Nix-expression quoting; a checkout under a
+// directory with a space in its name evaluates the same as any other.
 func nixEvalJSON(checkout, attribute string) ([]byte, error) {
 	var out, errOut bytes.Buffer
-	cmd := exec.Command("nix", "eval", "--json", "path:"+checkout+"#"+attribute)
+	cmd := exec.Command("nix", "eval", "--json", "path:.#"+attribute)
+	cmd.Dir = checkout
 	cmd.Stdout, cmd.Stderr = &out, &errOut
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("%s", strings.TrimSpace(errOut.String()))
@@ -585,7 +647,7 @@ func nixEvalTokenGroups(checkout string) (map[string]tokenGroup, error) {
 // handed. The path has already passed validSecretPath, so it is safe to
 // place inside a nix string literal.
 func nixEvalRecipients(checkout, path string) ([]string, error) {
-	expression := fmt.Sprintf(`(import %s/secrets.nix)."%s".publicKeys`, filepath.Join(checkout), path)
+	expression := fmt.Sprintf(`(import ./secrets.nix)."%s".publicKeys`, path)
 	var out, errOut bytes.Buffer
 	cmd := exec.Command("nix", "eval", "--json", "--impure", "--expr", expression)
 	cmd.Dir = checkout
@@ -631,5 +693,5 @@ func ageDecrypt(identity, file string) ([]byte, error) {
 // nixFlakeCheck runs the repository's own checks with their output on
 // stderr, so the operator watches the same thing a reviewer would.
 func nixFlakeCheck(checkout string) int {
-	return runCommand(checkout, nil, stderr, stderr, "nix", "flake", "check", "path:"+checkout)
+	return runCommand(checkout, nil, stderr, stderr, "nix", "flake", "check", "path:.")
 }

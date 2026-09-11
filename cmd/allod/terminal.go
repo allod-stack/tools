@@ -106,7 +106,7 @@ func disableEcho(tty *os.File) (func(), error) {
 
 func getTermios(tty *os.File, out *syscall.Termios) error {
 	_, _, errno := syscall.Syscall6(syscall.SYS_IOCTL, tty.Fd(),
-		uintptr(syscall.TCGETS), uintptr(unsafe.Pointer(out)), 0, 0, 0)
+		uintptr(ioctlReadTermios), uintptr(unsafe.Pointer(out)), 0, 0, 0)
 	if errno != 0 {
 		return errno
 	}
@@ -115,7 +115,7 @@ func getTermios(tty *os.File, out *syscall.Termios) error {
 
 func setTermios(tty *os.File, in *syscall.Termios) error {
 	_, _, errno := syscall.Syscall6(syscall.SYS_IOCTL, tty.Fd(),
-		uintptr(syscall.TCSETS), uintptr(unsafe.Pointer(in)), 0, 0, 0)
+		uintptr(ioctlWriteTermios), uintptr(unsafe.Pointer(in)), 0, 0, 0)
 	if errno != 0 {
 		return errno
 	}
