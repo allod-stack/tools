@@ -212,13 +212,27 @@ func validateDeployedPath(path string) {
 	}
 }
 
+const declareVerifyRepoScheme = "https://"
+
+// declareVerifyRepoHostStart is what has to follow the scheme: the first
+// character of a host name. Anything else after 'https://' means there is
+// no host: nothing at all, '/allod/x.git', and '?query' all leave
+// rotate-token printing a 'git ls-remote' command with no repository in it.
+var declareVerifyRepoHostStart = regexp.MustCompile(`^[A-Za-z0-9]`)
+
 // validateVerifyRepoURL holds --verify-repo-url to the same unsafe-character
 // set as --deployed-path (rotate-token's own git-ls-remote verification
 // command interpolates it unquoted: 'git ls-remote <repo-url> HEAD'), plus
-// an 'https://' scheme.
+// an 'https://' scheme followed by a host. A bare 'https://' passes a
+// prefix check on its own and would make the printed verification command
+// 'git ls-remote https:// HEAD'.
 func validateVerifyRepoURL(url string) {
-	if !strings.HasPrefix(url, "https://") || declareDeployedPathUnsafe.MatchString(url) {
-		secretCommandUsageError("declare", "invalid --verify-repo-url %q; expected an https:// URL with no whitespace, control character, quote, backslash, or $", url)
+	host := strings.TrimPrefix(url, declareVerifyRepoScheme)
+	valid := strings.HasPrefix(url, declareVerifyRepoScheme) &&
+		declareVerifyRepoHostStart.MatchString(host) &&
+		!declareDeployedPathUnsafe.MatchString(url)
+	if !valid {
+		secretCommandUsageError("declare", "invalid --verify-repo-url %q; expected an https://<host>/... URL whose host starts with a letter or digit, with no whitespace, control character, quote, backslash, or $", url)
 	}
 }
 
@@ -287,6 +301,12 @@ func parseDeclareArgs(args []string) declareArgs {
 				if machine == "" {
 					secretCommandUsageError("declare", "--to names an empty machine in %q", args[1])
 				}
+				// A machine name is interpolated into the nix eval
+				// attribute path ('machines.<name>.type'), into the
+				// secrets.nix recipient line, and into the JSON group, so
+				// it is held to the same identifier shape as every other
+				// flag value that reaches nix or JSON text.
+				validateIdentifier("--to", machine)
 				parsed.to = append(parsed.to, machine)
 			}
 			args = args[2:]

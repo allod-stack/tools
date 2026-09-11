@@ -878,10 +878,13 @@ func TestSecretDeclareRequiresAName(t *testing.T) {
 // built to break out of its quoting is refused as a usage error rather
 // than landing as attacker-controlled nix or JSON. --owner is the sharpest
 // case (interpolated raw into a double-quoted nix string in
-// credentials.nix); --kind, --account, and --ui-token-name are held to the
-// same identifier pattern, and --deployed-path to its own absolute-path
-// shape, for the same reason even though today only --owner reaches nix
-// text directly.
+// credentials.nix); --to is the other one that reaches nix text (the
+// 'machines.<name>.type' attribute path the inventory is evaluated at, and
+// the secrets.nix recipient line); --kind, --account, and --ui-token-name
+// are held to the same identifier pattern, and --deployed-path to its own
+// absolute-path shape, for the same reason even though they reach only
+// JSON today. --verify-repo-url needs a host as well as the scheme,
+// because rotate-token prints it into 'git ls-remote <repo-url> HEAD'.
 func TestSecretDeclareRefusesInjectionThroughStringFlags(t *testing.T) {
 	base := map[string]string{
 		"--kind": "agent", "--owner": "allod-agent", "--to": "dev-a",
@@ -945,8 +948,38 @@ func TestSecretDeclareRefusesInjectionThroughStringFlags(t *testing.T) {
 			"invalid --deployed-path",
 		},
 		{
+			"to is a quoted name",
+			buildArgs(map[string]string{"--to": `"dev-a"`}),
+			"invalid --to",
+		},
+		{
+			"to carries a dollar sign",
+			buildArgs(map[string]string{"--to": "${builtins.abort \"x\"}"}),
+			"invalid --to",
+		},
+		{
+			"to carries whitespace",
+			buildArgs(map[string]string{"--to": "dev-a dev-b"}),
+			"invalid --to",
+		},
+		{
 			"verify-repo-url is not https",
 			buildArgs(map[string]string{"--verify-repo-url": "http://forge.example/allod/example.git"}),
+			"invalid --verify-repo-url",
+		},
+		{
+			"verify-repo-url has no host",
+			buildArgs(map[string]string{"--verify-repo-url": "https://"}),
+			"invalid --verify-repo-url",
+		},
+		{
+			"verify-repo-url host starts with a slash",
+			buildArgs(map[string]string{"--verify-repo-url": "https:///allod/example.git"}),
+			"invalid --verify-repo-url",
+		},
+		{
+			"verify-repo-url host starts with a query",
+			buildArgs(map[string]string{"--verify-repo-url": "https://?query"}),
 			"invalid --verify-repo-url",
 		},
 		{
@@ -1227,6 +1260,28 @@ func TestSecretDeclareRefusesNixKeywordNames(t *testing.T) {
 				t.Errorf("stderr lacks %q\ngot: %q", want, errText)
 			}
 			fx.assertUntouched(t, declareFixtureCredentials, declareFixtureSecrets, declareFixtureRegistry)
+		})
+	}
+}
+
+// --- INVENTORY override ---
+
+// TestInventoryCheckoutFromEnvironment covers allod/tools#196 review
+// finding 3: INVENTORY=/ used to be trimmed to the empty string, which
+// 'nix eval' would then read as "run in the process working directory"
+// rather than "run in /". filepath.Clean keeps the root a root and still
+// strips a trailing slash everywhere else.
+func TestInventoryCheckoutFromEnvironment(t *testing.T) {
+	for _, tc := range []struct{ value, want string }{
+		{"/", "/"},
+		{"/tmp/x/", "/tmp/x"},
+		{"/tmp/x", "/tmp/x"},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			t.Setenv("INVENTORY", tc.value)
+			if got := inventoryCheckout(); got != tc.want {
+				t.Errorf("inventoryCheckout() = %q, want %q", got, tc.want)
+			}
 		})
 	}
 }
