@@ -783,7 +783,7 @@ assert_status 0 "apply happy path exits 0"
 assert_contains "$CAPTURE_OUTPUT" "applied 1 patch" "apply reports patch count"
 post_head=$(git -C "$dest_repo" rev-parse HEAD)
 [[ "$post_head" != "$pre_head" ]] && pass "apply advances HEAD" || fail "apply advances HEAD"
-assert_contains "$CAPTURE_OUTPUT" "git push" "apply without --push shows push reminder"
+assert_contains "$CAPTURE_OUTPUT" "git push" "apply shows push reminder"
 
 # Verify content was applied
 applied_content=$(cat "$dest_repo/tracked.txt")
@@ -1219,29 +1219,7 @@ capture "$ALLOD" patch apply "$artifact" --repo "$dest_repo_ahead"
 assert_status 0 "apply with destination ahead of base exits 0"
 rm -rf "$artifact"
 
-# --- --push via mock git ---
-source_repo="$TMP/repos/apply-push-source"
-init_repo "$source_repo" master
-add_commit "$source_repo" "push test"
-
-dest_repo_push="$TMP/repos/apply-push-dest"
-clone_repo "$source_repo" "$dest_repo_push"
-
-artifact="$TMP/artifacts/apply-push"
-make_artifact "$source_repo" "$artifact"
-
-push_log="$TMP/push-apply.log"
-: > "$push_log"
-export REAL_GIT GIT_PUSH_LOG="$push_log"
-mock_git_path=$(make_mock_git_path apply-push)
-
-capture_with_path "$mock_git_path" "$ALLOD" patch apply "$artifact" --repo "$dest_repo_push" --push
-assert_status 0 "apply --push exits 0"
-push_calls=$(cat "$push_log")
-assert_contains "$push_calls" "push" "apply --push calls git push"
-rm -rf "$artifact"
-
-# --- Without --push: no git push ---
+# --- apply never calls git push ---
 source_repo="$TMP/repos/apply-nopush-source"
 init_repo "$source_repo" master
 add_commit "$source_repo" "no push test"
@@ -1254,15 +1232,20 @@ make_artifact "$source_repo" "$artifact"
 
 push_log="$TMP/push-nopush.log"
 : > "$push_log"
-export GIT_PUSH_LOG="$push_log"
+export REAL_GIT GIT_PUSH_LOG="$push_log"
 mock_git_path=$(make_mock_git_path apply-nopush)
 
 capture_with_path "$mock_git_path" "$ALLOD" patch apply "$artifact" --repo "$dest_repo_nopush"
-assert_status 0 "apply without --push exits 0"
+assert_status 0 "apply exits 0"
 push_calls=$(cat "$push_log")
-[[ -z "$push_calls" ]] && pass "apply without --push does not call git push" || \
-  fail "apply without --push does not call git push" "$push_calls"
+[[ -z "$push_calls" ]] && pass "apply does not call git push" || \
+  fail "apply does not call git push" "$push_calls"
 rm -rf "$artifact"
+
+# --- --push is rejected as an unknown option ---
+capture "$ALLOD" patch apply "$artifact" --repo "$dest_repo_nopush" --push
+assert_status 1 "apply --push exits 1"
+assert_contains "$CAPTURE_OUTPUT" "unknown option for patch apply: --push" "apply --push is rejected"
 
 # --- Multiple patches ---
 source_repo="$TMP/repos/apply-multi-source"
@@ -1289,7 +1272,8 @@ rm -rf "$artifact"
 
 # --- Post-apply whitespace report ---
 # fetch refuses a range that fails git diff --check, so an artifact carrying
-# one is built by hand here. apply reports it, keeps the commits, and pushes.
+# one is built by hand here. apply reports it, and the commits stay applied
+# for the human to push.
 source_repo="$TMP/repos/apply-whitespace-source"
 init_repo "$source_repo" master
 printf 'trailing whitespace   \n' > "$source_repo/tracked.txt"
@@ -1313,7 +1297,7 @@ jq -n \
   > "$artifact/manifest.json"
 
 pre_head=$(git -C "$dest_repo_ws" rev-parse HEAD)
-capture "$ALLOD" patch apply "$artifact" --repo "$dest_repo_ws" --push
+capture "$ALLOD" patch apply "$artifact" --repo "$dest_repo_ws"
 assert_status 0 "apply whitespace report exits 0"
 assert_contains "$CAPTURE_OUTPUT" "applied 1 patch" "apply whitespace report still reports the apply"
 assert_contains "$CAPTURE_OUTPUT" "git diff --check" "apply whitespace report names the check"
@@ -1322,33 +1306,6 @@ assert_not_contains "$CAPTURE_OUTPUT" "reset --hard" "apply whitespace report of
 post_head=$(git -C "$dest_repo_ws" rev-parse HEAD)
 [[ "$post_head" != "$pre_head" ]] && pass "apply whitespace report keeps applied commits" || \
   fail "apply whitespace report keeps applied commits"
-pushed_head=$(git -C "$dest_repo_ws" rev-parse origin/master)
-assert_equal "$pushed_head" "$post_head" "apply whitespace report still pushes"
-rm -rf "$artifact"
-
-# --- --push failure ---
-source_repo="$TMP/repos/apply-push-fail-source"
-init_repo "$source_repo" master
-add_commit "$source_repo" "push fail test"
-
-dest_repo_pf="$TMP/repos/apply-push-fail-dest"
-clone_repo "$source_repo" "$dest_repo_pf"
-# Break the actual bare remote so push fails without changing the URL
-remote_url=$(git -C "$dest_repo_pf" remote get-url origin)
-rm -rf "$remote_url"
-
-artifact="$TMP/artifacts/apply-push-fail"
-make_artifact "$source_repo" "$artifact"
-
-capture "$ALLOD" patch apply "$artifact" --repo "$dest_repo_pf" --push
-assert_status 1 "apply --push failure exits 1"
-assert_contains "$CAPTURE_OUTPUT" "push failed" "apply push failure message"
-assert_contains "$CAPTURE_OUTPUT" "pre-apply HEAD" "apply push failure shows pre-apply HEAD"
-# Commits should still be in place
-post_head=$(git -C "$dest_repo_pf" rev-parse HEAD)
-pre_head=$(git -C "$dest_repo_pf" rev-parse HEAD~1)
-[[ "$post_head" != "$pre_head" ]] && pass "apply push failure keeps applied commits" || \
-  fail "apply push failure keeps applied commits"
 rm -rf "$artifact"
 
 # ================================================================
@@ -1540,25 +1497,10 @@ capture_with_path "$MOCK_PATH" "$ALLOD" patch receive "testhost:$source_repo" "$
 assert_status 13 "receive propagates apply failure exit code (13 for mismatch)"
 assert_contains "$CAPTURE_OUTPUT" "artifact dir:" "receive prints artifact dir on apply failure"
 
-# --- --push passthrough ---
-source_repo="$TMP/repos/receive-push-source"
-init_repo "$source_repo" master
-add_commit "$source_repo" "push passthrough"
-
-dest_repo_rp="$TMP/repos/receive-push-dest"
-clone_repo "$source_repo" "$dest_repo_rp"
-
-push_log="$TMP/push-receive.log"
-: > "$push_log"
-export REAL_GIT GIT_PUSH_LOG="$push_log"
-mock_git_path=$(make_mock_git_path receive-push)
-combined_path="${mock_git_path%%:*}:$MOCK_PATH"
-
-reset_mock_ssh
-capture_with_path "$combined_path" "$ALLOD" patch receive "testhost:$source_repo" "$dest_repo_rp" --push
-assert_status 0 "receive --push exits 0"
-push_calls=$(cat "$push_log")
-assert_contains "$push_calls" "push" "receive --push triggers git push"
+# --- --push is rejected as an unknown option ---
+capture "$ALLOD" patch receive "testhost:$source_repo" "$dest_repo_af" --push
+assert_status 1 "receive --push exits 1"
+assert_contains "$CAPTURE_OUTPUT" "unknown option for patch receive: --push" "receive --push is rejected"
 
 # ================================================================
 # Additional validation tests (review findings)

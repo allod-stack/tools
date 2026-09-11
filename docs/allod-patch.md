@@ -24,22 +24,21 @@ The whitespace check is `git diff --check` over the export range, run on the sou
 Apply fetched patches to a local destination repo.
 
 ```
-allod patch apply <artifact-dir> [--repo <destination-repo>] [--push]
+allod patch apply <artifact-dir> [--repo <destination-repo>]
 ```
 
 - `--repo <path>` - Destination repo (default: current directory)
-- `--push` - Push after successful apply
 
 Validates the manifest and checksums, verifies the destination repo matches the source's origin URL, and applies patches with `git am --3way`. Common equivalent remote URL forms such as `https://github.com/org/repo.git`, `git@github.com:org/repo.git`, and `ssh://git@github.com/org/repo.git` are normalized before comparison. Root exports can only be applied to an empty destination history; if a root-export source has no `origin`, the remote identity check is skipped only for that empty-destination bootstrap case.
 
-After `git am`, the same `git diff --check` runs over the applied range. Because `fetch` already refuses a range that fails it, this only fires for an artifact that did not come through `fetch`. It reports the offending lines on stderr and does not fail: the applied commits stay applied and `--push` still runs.
+After `git am`, the same `git diff --check` runs over the applied range. Because `fetch` already refuses a range that fails it, this only fires for an artifact that did not come through `fetch`. It reports the offending lines on stderr and does not fail: the applied commits stay applied, and the human pushes.
 
 ### receive
 
 Fetch and apply patches in one step.
 
 ```
-allod patch receive <ssh-host>:<source-repo> <destination-repo> [--base <ref>] [--push]
+allod patch receive <ssh-host>:<source-repo> <destination-repo> [--base <ref>]
 ```
 
 Runs `fetch` then `apply`. The artifact directory is preserved after both success and failure for inspection.
@@ -93,11 +92,11 @@ allod patch fetch devvm:/home/user/work/myrepo
 Apply fetched patches:
 
 ```sh
-allod patch apply /tmp/allod-patch.abcdefghij --repo ~/work/myrepo --push
+allod patch apply /tmp/allod-patch.abcdefghij --repo ~/work/myrepo
 ```
 
 One-step fetch and apply:
 
 ```sh
-allod patch receive devvm:/home/user/work/myrepo ~/work/myrepo --push
+allod patch receive devvm:/home/user/work/myrepo ~/work/myrepo
 ```

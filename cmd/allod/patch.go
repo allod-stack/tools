@@ -559,14 +559,11 @@ func remotesMatch(left, right string) bool {
 
 func patchApply(args []string) {
 	artifact, repoPath := "", ""
-	push := false
 	for len(args) > 0 {
 		switch args[0] {
 		case "--repo":
 			requireValue(args, args[0])
 			repoPath, args = args[1], args[2:]
-		case "--push":
-			push, args = true, args[1:]
 		case "-h", "--help":
 			fmt.Fprint(stdout, patchUsageText)
 			return
@@ -737,24 +734,7 @@ func patchApply(args []string) {
 		fmt.Fprintln(stderr, "allod: WARNING: whitespace check (git diff --check) flagged the applied commits; they stay applied:")
 		fmt.Fprint(stderr, whitespace.String())
 	}
-	if push {
-		if status := gitInherit(repo, "push"); status != 0 {
-			fmt.Fprintln(stderr, "allod: git push failed")
-			fmt.Fprintf(stderr, "allod: repo: %s\n", repo)
-			fmt.Fprintf(stderr, "allod: pre-apply HEAD: %s\n", preHead)
-			current, _ := gitOutput(repo, "rev-parse", "HEAD")
-			fmt.Fprintf(stderr, "allod: current HEAD: %s\n", current)
-			fmt.Fprintf(stderr, "allod: to push manually: git -C \"%s\" push\n", repo)
-			if preHead == "<unborn>" {
-				fmt.Fprintln(stderr, "allod: to undo: reclone or manually remove the newly created history")
-			} else {
-				fmt.Fprintf(stderr, "allod: to undo: git -C \"%s\" reset --hard %s\n", repo, preHead)
-			}
-			exit(1)
-		}
-	} else {
-		fmt.Fprintln(stdout, "allod: run git push to publish applied patches")
-	}
+	fmt.Fprintln(stdout, "allod: run git push to publish applied patches")
 }
 
 func isDirectory(path string) bool {
@@ -778,7 +758,7 @@ func captureExit(fn func()) (code int) {
 
 func patchReceive(args []string) {
 	target, destination, base := "", "", ""
-	baseSet, push := false, false
+	baseSet := false
 	for len(args) > 0 {
 		switch args[0] {
 		case "--base":
@@ -787,8 +767,6 @@ func patchReceive(args []string) {
 				die(1, "--base cannot be empty")
 			}
 			base, baseSet, args = args[1], true, args[2:]
-		case "--push":
-			push, args = true, args[1:]
 		case "-h", "--help":
 			fmt.Fprint(stdout, patchUsageText)
 			return
@@ -832,9 +810,6 @@ func patchReceive(args []string) {
 		exit(fetchStatus)
 	}
 	applyArgs := []string{artifact, "--repo", destination}
-	if push {
-		applyArgs = append(applyArgs, "--push")
-	}
 	applyStatus := captureExit(func() { patchApply(applyArgs) })
 	fmt.Fprintf(stdout, "allod: artifact dir: %s\n", artifact)
 	if applyStatus != 0 {
