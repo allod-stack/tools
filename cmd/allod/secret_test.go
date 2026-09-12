@@ -344,11 +344,11 @@ func TestSecretNamespaceIsRegistered(t *testing.T) {
 	}
 }
 
-// TestSecretTaggedBuildCarriesAllThreeCommands pins the shape a
+// TestSecretTaggedBuildCarriesEveryCommand pins the shape a
 // secret-tagged build carries: 'declare' from the untagged files plus
-// 'create' and 'rekey' this file's init() adds, and nothing else.
-func TestSecretTaggedBuildCarriesAllThreeCommands(t *testing.T) {
-	want := []string{"declare", "create", "rekey"}
+// the three secret.go's init() adds, and nothing else.
+func TestSecretTaggedBuildCarriesEveryCommand(t *testing.T) {
+	want := []string{"declare", "create", "rekey", "rotate"}
 	if got := len(secretCommands); got != len(want) {
 		t.Fatalf("secretCommands has %d entries in a tagged build, want %d: %+v", got, len(want), secretCommands)
 	}

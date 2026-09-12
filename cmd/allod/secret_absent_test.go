@@ -40,8 +40,8 @@ func TestSecretNamespaceExistsWithDeclareOnly(t *testing.T) {
 // identity fail exactly the way a typo does, saying so in the same words
 // 'unknown secret command' always has and then, like any unknown secret
 // command, printing the short usage rather than nothing.
-func TestUntaggedSecretCreateRekeyAreUnknown(t *testing.T) {
-	for _, command := range []string{"create", "rekey"} {
+func TestUntaggedSecretTaggedCommandsAreUnknown(t *testing.T) {
+	for _, command := range []string{"create", "rekey", "rotate"} {
 		t.Run(command, func(t *testing.T) {
 			out, errText, code := runAllod(t, "secret", command, "new-token")
 			if code != 1 {
@@ -75,6 +75,7 @@ func TestUntaggedSecretUsageListsOnlyDeclare(t *testing.T) {
 			for _, absent := range []string{
 				"allod secret create <name> [<checkout>]",
 				"allod secret rekey <name> [<checkout>]",
+				"allod secret rotate <name> [<checkout>]",
 				"create   Encrypt a pending credential's value",
 				"rekey    Re-encrypt an existing credential",
 			} {

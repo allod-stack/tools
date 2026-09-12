@@ -2,20 +2,19 @@
 
 package main
 
-// 'create' and 'rekey' land an encrypted credential in the secrets
+// The secret namespace lands an encrypted credential in the secrets
 // repository, at the one machine that holds the age identity.
 //
-// They verify and encrypt; they do not author. A credential's non-secret
+// It verifies and encrypts; it does not author. A credential's non-secret
 // half — the credentials.nix entry in rotation_state "pending", the
 // secrets.nix recipient line, and the rotation registry entry — is written
-// by 'allod secret declare' (secret_declare.go, untagged) as an agent's PR
-// and reviewed there, and the inventory check has already passed on it
-// before this command is ever run. 'create' then reads the plaintext,
-// encrypts it to exactly the recipients secrets.nix declares, writes the
-// ciphertext, flips the state to "active", runs the repository's checks,
-// and commits and pushes the branch. There are no flags for kind, owner,
-// format, or recipients: the reviewed diff is the only authoring path, so
-// there is one shape to get right, and nothing on a command line can aim
+// by an agent's PR and reviewed there, and the inventory check has already
+// passed on it before this command is ever run. 'create' then reads the
+// plaintext, encrypts it to exactly the recipients secrets.nix declares,
+// writes the ciphertext, flips the state to "active", runs the repository's
+// checks, and commits and pushes the branch. There are no flags for kind,
+// owner, format, or recipients: the reviewed diff is the only authoring path,
+// so there is one shape to get right, and nothing on a command line can aim
 // the ciphertext at a machine the registry does not list.
 //
 // The plaintext never touches a filesystem. It arrives on stdin (or one
@@ -26,11 +25,9 @@ package main
 // recipient-only change that agenix silently skips cannot recur here.
 //
 // This file compiles only with -tags secret, which only the host toolchain
-// sets. On every other machine 'create' and 'rekey' are unknown secret
-// commands: that capability is absent, not refused, and no prose has to say
-// an agent may not do this. 'declare' carries no such tag — see
-// secret_declare.go. secret_absent_test.go pins the untagged half of this
-// contract; secret_test.go the tagged one.
+// sets. On every other machine 'allod secret' is an unknown namespace: the
+// capability is absent, not refused, and no prose has to say an agent may
+// not do this. secret_absent_test.go pins that half; secret_test.go the other.
 
 import (
 	"bytes"
@@ -42,20 +39,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-)
-
-// Test seams. Every effect this namespace has outside the process and git
-// goes through one of these, so the tests can drive the whole command
-// against a real git fixture without nix, age, or a terminal.
-var (
-	secretEvalCredentials = nixEvalCredentials
-	secretEvalRegistry    = nixEvalTokenGroups
-	secretEvalRecipients  = nixEvalRecipients
-	secretEncrypt         = ageEncrypt
-	secretDecrypt         = ageDecrypt
-	secretFlakeCheck      = nixFlakeCheck
-	secretStdinIsTerminal = func() bool { return isTerminal(os.Stdin) }
-	secretAskOnTerminal   = askSecretOnTerminal
 )
 
 const secretCreateDetail = `'create' requires the branch to already carry, for <name>: a credentials.nix
@@ -83,7 +66,7 @@ const secretRekeyDetail = `'rekey' decrypts <name>'s existing ciphertext with th
 re-encrypts it to the recipients secrets.nix declares now, always rewriting
 the file, then checks, commits, and pushes the same way as 'create'. Use it
 after a recipient line changes. For a new value of an existing credential
-use rotate-token.
+run 'allod secret rotate <name>'.
 
 'rekey' works on the secrets checkout, found through the repository
 registry under ~/work unless <checkout> names a worktree, and on whatever
@@ -96,7 +79,7 @@ an argument.
 `
 
 // init extends the 'secret' namespace secret_declare.go's init() already
-// registered, adding the two commands this build's tag opts it into. It
+// registered, adding the three commands this build's tag opts it into. It
 // appends to secretCommands rather than replacing it, and never calls
 // registerNamespace: that would panic on the duplicate word, and
 // secret_declare.go's init() is the only one allowed to call it.
@@ -116,8 +99,29 @@ func init() {
 			detail:  secretRekeyDetail,
 			run:     secretRekey,
 		},
+		secretCommand{
+			name:    "rotate",
+			summary: "Replace a credential's value, and every value its rotation group shares it with",
+			usage:   []string{"allod secret rotate <name> [<checkout>] [--dry-run]"},
+			detail:  secretRotateDetail,
+			run:     secretRotate,
+		},
 	)
 }
+
+// Test seams. Every effect this namespace has outside the process and git
+// goes through one of these, so the tests can drive the whole command
+// against a real git fixture without nix, age, or a terminal.
+var (
+	secretEvalCredentials = nixEvalCredentials
+	secretEvalRegistry    = nixEvalTokenGroups
+	secretEvalRecipients  = nixEvalRecipients
+	secretEncrypt         = ageEncrypt
+	secretDecrypt         = ageDecrypt
+	secretFlakeCheck      = nixFlakeCheck
+	secretStdinIsTerminal = func() bool { return isTerminal(os.Stdin) }
+	secretAskOnTerminal   = askSecretOnTerminal
+)
 
 // parseSecretArgs reads the shared '<name> [<checkout>]' shape 'create' and
 // 'rekey' both take. Every option is unknown: the commands take none by
@@ -168,10 +172,49 @@ type credentialEntry struct {
 type registryCredential struct {
 	Credential string `json:"credential"`
 	SecretPath string `json:"secret_path"`
+
+	// The remaining fields serve 'rotate' only; 'create' and 'rekey' read
+	// nothing past SecretPath.
+	Format  string           `json:"format"`
+	Targets []registryTarget `json:"targets"`
+}
+
+// registryTarget and registryVerify serve 'rotate' only, in secret_rotate.go.
+type registryTarget struct {
+	System       string         `json:"system"`
+	Kind         string         `json:"kind"`
+	User         string         `json:"user"`
+	DeployedPath string         `json:"deployed_path"`
+	Verify       registryVerify `json:"verify"`
+}
+
+type registryVerify struct {
+	Type              string `json:"type"`
+	RepoURL           string `json:"repo_url"`
+	CredentialContext string `json:"credential_context"`
+}
+
+// localAuthRefreshEntry mirrors one entry of a group's local_auth_refresh
+// array. 'rotate' reads it only to decide whether to print the operator's
+// next step; installing the bundle stays rotate-token's job (see
+// secret_rotate.go).
+type localAuthRefreshEntry struct {
+	Contract         string `json:"contract"`
+	System           string `json:"system"`
+	LocalUsername    string `json:"local_username"`
+	SourceCredential string `json:"source_credential"`
 }
 
 type tokenGroup struct {
 	Credentials []registryCredential `json:"credentials"`
+
+	// The remaining fields serve 'rotate' only.
+	RegistryAlias    string                  `json:"registry_alias"`
+	Service          string                  `json:"service"`
+	Account          string                  `json:"account"`
+	UITokenName      string                  `json:"ui_token_name"`
+	RotationStrategy string                  `json:"rotation_strategy"`
+	LocalAuthRefresh []localAuthRefreshEntry `json:"local_auth_refresh"`
 }
 
 // secretTarget is everything 'create' and 'rekey' verified about one
@@ -477,7 +520,7 @@ func secretCreate(args []string) {
 		die(status, "the repository's checks failed; %s", restore())
 	}
 
-	commit := landCommit(checkout, fmt.Sprintf("Land %s: write its ciphertext and set rotation_state active", name), restore, target.path, "credentials.nix")
+	commit := landCommit(checkout, branch, fmt.Sprintf("Land %s: write its ciphertext and set rotation_state active", name), restore, target.path, "credentials.nix")
 	fmt.Fprintf(stdout, "Wrote %s, encrypted to %d recipients from secrets.nix\n", target.path, len(target.recipients))
 	fmt.Fprintf(stdout, "credentials.nix: %s pending -> active\n", name)
 	fmt.Fprintf(stdout, "Committed %s on %s and pushed to origin; merging is yours\n", commit, branch)
@@ -523,7 +566,7 @@ func secretRekey(args []string) {
 		die(status, "the repository's checks failed; %s", restore())
 	}
 
-	commit := landCommit(checkout, fmt.Sprintf("Rekey %s to the recipients secrets.nix declares", name), restore, target.path)
+	commit := landCommit(checkout, branch, fmt.Sprintf("Rekey %s to the recipients secrets.nix declares", name), restore, target.path)
 	fmt.Fprintf(stdout, "Rewrote %s, encrypted to %d recipients from secrets.nix\n", target.path, len(target.recipients))
 	fmt.Fprintf(stdout, "Committed %s on %s and pushed to origin; merging is yours\n", commit, branch)
 }
@@ -544,7 +587,44 @@ func encryptOrDie(target secretTarget, value []byte) []byte {
 // identity — unstages and restores the files, so the tree is as clean as
 // every other refusal leaves it. A push failure leaves the commit in place
 // and says so: the landing happened, the publication did not.
-func landCommit(checkout, message string, restore func() string, files ...string) string {
+func landCommit(checkout, branch, message string, restore func() string, files ...string) string {
+	commit, pushStatus, pushOutput := landCommitOrReportPush(checkout, branch, message, restore, files...)
+	if pushStatus != 0 {
+		fmt.Fprintf(stderr, "allod: committed %s but the push failed:\n%s\n", commit, pushOutput)
+		die(pushStatus, "push the branch yourself once the cause is fixed: git -C %s push origin HEAD", checkout)
+	}
+	return commit
+}
+
+// currentBranchName reports HEAD's branch with 'git rev-parse --abbrev-ref
+// HEAD', which prints the literal 'HEAD' for a detached checkout rather
+// than the empty string 'git branch --show-current' (currentBranch, used by
+// the initial gate) would. Either way a detached checkout will not equal
+// the gated branch name, but the literal word makes landCommitOrReportPush's
+// refusal read correctly instead of naming an empty branch.
+func currentBranchName(checkout string) string {
+	current, _ := gitOutput(checkout, "rev-parse", "--abbrev-ref", "HEAD")
+	return current
+}
+
+// landCommitOrReportPush stages, commits, and attempts to push exactly like
+// landCommit; unlike landCommit, a push failure is reported to the caller
+// instead of being fatal. landCommit itself wraps this with the die() above,
+// so create and rekey see no change in behavior; 'rotate' calls this
+// directly because it has its deploy/verify/revocation steps still worth
+// printing even when the push failed (see secret_rotate.go).
+//
+// branch is re-verified here, immediately before 'git add', because the
+// caller's own gate ran before whatever checks it runs on the written
+// files — a nix flake check evaluates the whole repository and can take a
+// while — and a checkout that moved to a different branch during that wait
+// must not have its landing committed there. Nothing runs between this
+// check and the 'git add' below, so no further window is left for the
+// branch to move again.
+func landCommitOrReportPush(checkout, branch, message string, restore func() string, files ...string) (commit string, pushStatus int, pushOutput string) {
+	if current := currentBranchName(checkout); current != branch {
+		die(1, "%s moved from branch '%s' to '%s' while the checks ran; refusing to land on a branch nobody asked for; %s", checkout, branch, current, restore())
+	}
 	unstageAndRestore := func() string {
 		captureCommand(checkout, nil, true, "git", append([]string{"reset", "-q", "--"}, files...)...)
 		return restore()
@@ -556,12 +636,11 @@ func landCommit(checkout, message string, restore func() string, files ...string
 	if output, status := captureCommand(checkout, nil, true, "git", "commit", "-q", "-m", message); status != 0 {
 		die(status, "git commit failed; %s:\n%s", unstageAndRestore(), output)
 	}
-	commit, _ := gitOutput(checkout, "rev-parse", "--short", "HEAD")
+	commit, _ = gitOutput(checkout, "rev-parse", "--short", "HEAD")
 	if output, status := captureCommand(checkout, nil, true, "git", "push", "origin", "HEAD"); status != 0 {
-		fmt.Fprintf(stderr, "allod: committed %s but the push failed:\n%s\n", commit, output)
-		die(status, "push the branch yourself once the cause is fixed: git -C %s push origin HEAD", checkout)
+		return commit, status, output
 	}
-	return commit
+	return commit, 0, ""
 }
 
 // --- The world ---
