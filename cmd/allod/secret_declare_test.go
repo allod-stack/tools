@@ -1098,6 +1098,15 @@ func TestSecretDeclareValueTemplateRefusals(t *testing.T) {
 			want:      `--value-encode "rot13" is not exported by lib.credentialEncodings`,
 		},
 		{
+			// encoding/json turns an invalid byte into U+FFFD without
+			// complaining, so an unrefused template here would be stored
+			// as different bytes than were given and deployed that way.
+			name:  "a template that is not UTF-8",
+			extra: []string{"--value-template-stdin"},
+			stdin: "prefix-\x80{secret}",
+			want:  "the value template on stdin is not valid UTF-8",
+		},
+		{
 			name:  "encoder without a template",
 			extra: []string{"--value-encode", "rclone-obscure"},
 			want:  "--value-encode requires a value template",
@@ -1127,6 +1136,29 @@ func TestSecretDeclareValueTemplateRefusals(t *testing.T) {
 			fx.assertUntouched(t, declareFixtureCredentials, declareFixtureSecrets, declareFixtureRegistry)
 		})
 	}
+}
+
+// TestSecretDeclareRefusesANonUTF8TemplateFile covers the other input path
+// for the same rule: a template file whose bytes are not UTF-8 is refused
+// rather than landed as U+FFFD, and nothing is written.
+func TestSecretDeclareRefusesANonUTF8TemplateFile(t *testing.T) {
+	fx := newDeclareFixture(t)
+	templatePath := filepath.Join(t.TempDir(), "template")
+	if err := os.WriteFile(templatePath, []byte("prefix-\x80{secret}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, errText, code := fx.run(t, "new-token",
+		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
+		"--deployed-path", "/root/.token", "--verify", declareFixtureVerifyCommand,
+		"--value-template-file", templatePath)
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	if want := "is not valid UTF-8"; !strings.Contains(errText, want) {
+		t.Errorf("stderr lacks %q\ngot: %q", want, errText)
+	}
+	fx.assertUntouched(t, declareFixtureCredentials, declareFixtureSecrets, declareFixtureRegistry)
 }
 
 // --- Machine absent from the inventory registry ---
@@ -1242,28 +1274,37 @@ func TestSecretDeclareRefusesWhenCredentialsWouldNotBalance(t *testing.T) {
 
 // --- Atomic, all-or-nothing writes ---
 
-// TestDeclareAtomicWriteReplacesInFullOrNotAtAll pins declareAtomicWrite's
-// own contract directly: a successful call leaves the new bytes in full,
-// and a call whose temp file cannot be created (the directory does not
-// exist) leaves the original file completely untouched and returns an
-// error, rather than a truncated file and a panic.
-func TestDeclareAtomicWriteReplacesInFullOrNotAtAll(t *testing.T) {
+// TestAtomicWriteReplacesInFullOrNotAtAll pins atomicWrite's own contract
+// directly: a successful call leaves the new bytes in full and no temp file
+// beside them, and a call whose temp file cannot be created (the directory
+// does not exist) leaves the original file completely untouched and returns
+// an error, rather than a truncated file and a panic. This is the one
+// atomic writer in the namespace — 'declare', 'create', 'rekey', 'rotate',
+// and 'migrate' all replace files through it.
+func TestAtomicWriteReplacesInFullOrNotAtAll(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f.txt")
 	if err := os.WriteFile(path, []byte("original\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := declareAtomicWrite(path, []byte("replaced\n")); err != nil {
-		t.Fatalf("declareAtomicWrite: %v", err)
+	if err := atomicWrite(path, []byte("replaced\n")); err != nil {
+		t.Fatalf("atomicWrite: %v", err)
 	}
 	if got, err := os.ReadFile(path); err != nil || string(got) != "replaced\n" {
 		t.Fatalf("file = %q, err = %v, want \"replaced\\n\"", got, err)
 	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("directory has %d entries after a write, want exactly the one final file (no leftover temp): %v", len(entries), entries)
+	}
 
 	// A target whose directory does not exist cannot even get a temp file
 	// created, so the failure happens before any rename is attempted.
-	if err := declareAtomicWrite(filepath.Join(dir, "no-such-directory", "g.txt"), []byte("replaced\n")); err == nil {
-		t.Fatal("declareAtomicWrite into a missing directory returned no error")
+	if err := atomicWrite(filepath.Join(dir, "no-such-directory", "g.txt"), []byte("replaced\n")); err == nil {
+		t.Fatal("atomicWrite into a missing directory returned no error")
 	}
 }
 

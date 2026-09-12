@@ -1057,41 +1057,6 @@ func TestSecretRotateReportsPushFailureAndKeepsCommit(t *testing.T) {
 	}
 }
 
-// --- writeCiphertextAtomic ---
-
-func TestWriteCiphertextAtomicReplacesFileWhollyOrNotAtAll(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "secret.age")
-	if err := os.WriteFile(path, []byte("old bytes"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := writeCiphertextAtomic(path, []byte("new bytes"), 0644); err != nil {
-		t.Fatalf("write failed: %v", err)
-	}
-	got, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != "new bytes" {
-		t.Errorf("content = %q, want %q", got, "new bytes")
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 1 {
-		t.Errorf("directory has %d entries after a write, want exactly the one final file (no leftover temp): %v", len(entries), entries)
-	}
-
-	// A destination whose directory does not exist fails at CreateTemp,
-	// before anything touches the real file; there is nothing to restore
-	// because nothing was opened for writing at the real path.
-	if err := writeCiphertextAtomic(filepath.Join(dir, "no-such-dir", "x.age"), []byte("x"), 0644); err == nil {
-		t.Error("a write into a missing directory did not fail")
-	}
-}
-
 func TestSecretRotateLeavesNoTemporaryFilesBehind(t *testing.T) {
 	rf := newRotateFixture(t)
 	rf.addGroup(t, "raw.rotate", forgejoGroup("raw.rotate"),
@@ -1233,5 +1198,129 @@ func TestSecretRotateRefusesWhenTheBranchChangedWhileWaitingForTheValue(t *testi
 	}
 	if got := gitRun(t, rf.checkout, "log", "-1", "--format=%s", "agent/hijacked"); got != "fixture: add raw.rotate" {
 		t.Errorf("a commit landed on agent/hijacked: %q", got)
+	}
+}
+
+// --- The encoder's own output never carries the candidate out ---
+
+// installEchoingRclone puts an 'rclone' on PATH that copies its stdin to
+// stderr and fails, which is what a broken build, a debug build, or an
+// 'rclone' put there by somebody else can do with a value handed to it on
+// stdin. Nothing the command prints may contain that value.
+func installEchoingRclone(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	script := "#!/bin/sh\ncat >&2\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(dir, "rclone"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestSecretRotateNeverPrintsAnEncodersOutput(t *testing.T) {
+	installEchoingRclone(t)
+	rf := newRotateFixture(t)
+	rf.addGroup(t, "obscured.rotate", forgejoGroup("obscured.rotate"),
+		rotateGroupCredential{name: "obscured-cred", system: "fixture-host", kind: "nixos-host",
+			deployedPath: "/root/.config/rclone/rclone.conf", verify: "allod site check",
+			value: &credentialValue{Template: fixtureRcloneTemplate, Encode: "rclone-obscure"}})
+	const candidate = "correct-horse-fixture"
+	rf.pipe(candidate)
+
+	out, errText, code := rf.run(t, "secret", "rotate", "obscured-cred")
+	if code == 0 {
+		t.Fatal("exit 0 despite a failing encoder")
+	}
+	if strings.Contains(out, candidate) || strings.Contains(errText, candidate) {
+		t.Errorf("the candidate value reached the output\nstdout: %q\nstderr: %q", out, errText)
+	}
+	if want := "'rclone obscure -' failed (exit status 1)"; !strings.Contains(errText, want) {
+		t.Errorf("stderr lacks %q\ngot: %q", want, errText)
+	}
+	if rf.encryptCalls != 0 {
+		t.Errorf("age was asked to encrypt %d times, want 0", rf.encryptCalls)
+	}
+	if got := rf.status(t); got != "" {
+		t.Errorf("tree is not clean after a refusal:\n%s", got)
+	}
+}
+
+// --- One entry per credential, in one group ---
+
+// TestSecretRotateRefusesADuplicateEntryInOneGroup covers what counting
+// groups instead of entries used to allow: two entries of the same name in
+// one group are one group, and rotate would render the new value through
+// whichever declaration came first.
+func TestSecretRotateRefusesADuplicateEntryInOneGroup(t *testing.T) {
+	rf := newRotateFixture(t)
+	rf.addGroup(t, "dup.rotate", forgejoGroup("dup.rotate"),
+		rotateGroupCredential{name: "dup-cred", system: "dev-a", kind: "dev-vm", deployedPath: "/home/fixture-user/token",
+			verify: "forge token verify < /home/fixture-user/token"})
+	// A second entry with the same name, the shape a hand edit produces.
+	group := rf.registry["dup.rotate"]
+	group.Credentials = append(group.Credentials, group.Credentials[0])
+	rf.registry["dup.rotate"] = group
+	rf.pipe("tok-fixture\n")
+
+	_, errText, code := rf.run(t, "secret", "rotate", "dup-cred")
+	if code == 0 {
+		t.Fatal("exit 0, want a refusal")
+	}
+	if want := "credential 'dup-cred' is listed 2 times in rotation registry group 'dup.rotate'"; !strings.Contains(errText, want) {
+		t.Errorf("stderr lacks %q\ngot: %q", want, errText)
+	}
+	if rf.encryptCalls != 0 || rf.decryptCalls != 0 {
+		t.Errorf("encrypt=%d decrypt=%d, want 0 and 0", rf.encryptCalls, rf.decryptCalls)
+	}
+	if got := rf.status(t); got != "" {
+		t.Errorf("tree is not clean after a refusal:\n%s", got)
+	}
+}
+
+// TestSecretRotateSendsAPlainLegacyEntryToARegistryEdit pins the other half
+// of the legacy refusal: 'migrate' has no container to take apart for a
+// plain legacy value, so naming it would send the operator on a hop that
+// ends in a refusal. The command that refuses says what actually works.
+func TestSecretRotateSendsAPlainLegacyEntryToARegistryEdit(t *testing.T) {
+	cases := []struct {
+		name       string
+		credential string
+		want       string
+	}{
+		{"the selected credential is legacy", "plain-legacy-cred",
+			"credential 'plain-legacy-cred' uses legacy format 'raw-forgejo-token'; it is a plain legacy value that 'rotate-token' still rotates"},
+		{"another group member is legacy", "new-shape-cred",
+			"rotation registry group 'plain.rotate' also lists legacy credential 'plain-legacy-cred' (format 'raw-forgejo-token'); it is a plain legacy value that 'rotate-token' still rotates"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rf := newRotateFixture(t)
+			rf.addGroup(t, "plain.rotate", forgejoGroup("plain.rotate"),
+				rotateGroupCredential{
+					name: "new-shape-cred", system: "dev-a", kind: "dev-vm", deployedPath: "/home/fixture-user/token",
+					verify: "forge token verify < /home/fixture-user/token",
+					value:  &credentialValue{Template: "https://fixture-user:{secret}@example.test"},
+				},
+				rotateGroupCredential{
+					name: "plain-legacy-cred", format: "raw-forgejo-token", system: "fixture-host", kind: "nixos-host",
+					deployedPath: "/root/.token",
+					rawVerify:    json.RawMessage(`{"type":"forge-token-verify"}`),
+				})
+			rf.pipe("tok-fixture\n")
+
+			_, errText, code := rf.run(t, "secret", "rotate", tc.credential)
+			if code == 0 {
+				t.Fatal("exit 0, want a refusal")
+			}
+			if !strings.Contains(errText, tc.want) {
+				t.Errorf("stderr lacks %q\ngot: %q", tc.want, errText)
+			}
+			if strings.Contains(errText, "allod secret migrate") {
+				t.Errorf("the refusal names migrate for a format migrate refuses\ngot: %q", errText)
+			}
+			if want := "drops its 'format'"; !strings.Contains(errText, want) {
+				t.Errorf("stderr lacks the registry edit it should name\ngot: %q", errText)
+			}
+		})
 	}
 }

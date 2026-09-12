@@ -21,7 +21,9 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -118,14 +120,22 @@ var rcloneObscuredForm = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 // for as long as the process lives. The obscured form is reversible by
 // anyone with rclone, so it is exactly as sensitive as the password itself
 // and is never printed or logged either.
+//
+// The encoder's own output is dropped rather than reported. A process
+// handed a secret on stdin can put that secret into anything it writes — a
+// debug build, a usage message that echoes its input, an 'rclone' put on
+// PATH by someone else — and this error reaches the operator through die(),
+// which prints it. The exit status is what a diagnosis needs from a process
+// that was handed a secret; reading a program's own message back is a thing
+// to do with a value that is not one.
 func rcloneObscure(secret []byte) ([]byte, error) {
-	var out, errOut bytes.Buffer
+	var out bytes.Buffer
 	cmd := exec.Command("rclone", "obscure", "-")
 	cmd.Stdin = bytes.NewReader(secret)
 	cmd.Stdout = &out
-	cmd.Stderr = &errOut
+	cmd.Stderr = io.Discard
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("'rclone obscure -' failed: %s", strings.TrimSpace(errOut.String()))
+		return nil, fmt.Errorf("'rclone obscure -' failed (%s); its own output is withheld, since an encoder handed a secret can echo it", encoderExitStatus(err))
 	}
 	obscured := bytes.TrimRight(out.Bytes(), "\r\n")
 	if !rcloneObscuredForm.Match(obscured) {
@@ -170,30 +180,56 @@ func verifyCommand(raw json.RawMessage) (string, error) {
 // --- The registry ---
 
 // registryCredentialFor finds the one registry entry for a credential and
-// the alias of the group holding it. Zero and more than one are both
-// refused: rotate and migrate both act on a group, and a credential in two
-// groups has no single answer to which group that is.
+// the alias of the group holding it. It counts entries, not groups: two
+// entries with the same name inside one group are two entries a command
+// would have to choose between, and 'migrate' rewriting only the first
+// would leave the second behind in the legacy shape, committed and
+// unnoticed. Zero, two in one group, and one in each of two groups are all
+// refused, because rotate and migrate each act on exactly one entry.
 func registryCredentialFor(groups map[string]tokenGroup, name string) (registryCredential, string, error) {
-	var aliases []string
+	found, aliases := registryCredentialEntries(groups, name)
+	distinct := distinctSorted(aliases)
+	switch {
+	case len(aliases) == 1:
+		return found, aliases[0], nil
+	case len(aliases) == 0:
+		return registryCredential{}, "", fmt.Errorf("no rotation registry entry for '%s' in forgejo-token-groups.json", name)
+	case len(distinct) > 1:
+		return registryCredential{}, "", fmt.Errorf("credential '%s' is registered in more than one rotation registry group (%s); fix the registry so each credential belongs to one group", name, strings.Join(distinct, ", "))
+	default:
+		return registryCredential{}, "", fmt.Errorf("credential '%s' is listed %d times in rotation registry group '%s'; a command acts on one entry, so a second entry of the same name would be left behind. Fix the registry so each credential is listed once", name, len(aliases), distinct[0])
+	}
+}
+
+// registryCredentialEntries returns the last entry named name and the alias
+// of the group holding each entry — one alias per entry, so two entries in
+// one group appear twice and the caller can count them.
+func registryCredentialEntries(groups map[string]tokenGroup, name string) (registryCredential, []string) {
 	var found registryCredential
+	var aliases []string
 	for alias, group := range groups {
 		for _, credential := range group.Credentials {
 			if credential.Credential == name {
 				aliases = append(aliases, alias)
 				found = credential
-				break
 			}
 		}
 	}
 	sort.Strings(aliases)
-	switch len(aliases) {
-	case 1:
-		return found, aliases[0], nil
-	case 0:
-		return registryCredential{}, "", fmt.Errorf("no rotation registry entry for '%s' in forgejo-token-groups.json", name)
-	default:
-		return registryCredential{}, "", fmt.Errorf("credential '%s' is registered in more than one rotation registry group (%s); fix the registry so each credential belongs to one group", name, strings.Join(aliases, ", "))
+	return found, aliases
+}
+
+// distinctSorted is the sorted set of values, used to tell "two entries in
+// one group" from "one entry in each of two groups" when both are refused.
+func distinctSorted(values []string) []string {
+	var distinct []string
+	for _, value := range values {
+		if !stringInList(value, distinct) {
+			distinct = append(distinct, value)
+		}
 	}
+	sort.Strings(distinct)
+	return distinct
 }
 
 // isLegacyCredential reports the shape a credential still carries. The
@@ -201,6 +237,24 @@ func registryCredentialFor(groups map[string]tokenGroup, name string) (registryC
 // refuses a credential carrying both, so this command reads the same one
 // field rather than inventing a second rule.
 func isLegacyCredential(credential registryCredential) bool { return credential.Format != "" }
+
+// legacyCredentialContainers are the two legacy formats whose plaintext is
+// a container with non-secret text around the secret. Those are the two
+// 'migrate' can take apart; every other legacy format stores the secret on
+// its own, so there is nothing to recover and nothing to decrypt.
+var legacyCredentialContainers = []string{"credential-store-url", "rclone-remote-stanza"}
+
+// legacyRefusalReason says how one legacy credential reaches the new shape,
+// which depends on which legacy format it carries. Sending an operator to
+// 'migrate' for a plain entry would be a wasted hop: migrate refuses it and
+// names a registry edit, so the command that refused says so directly.
+// action names what the caller was about to do, e.g. "rotating it".
+func legacyRefusalReason(credential registryCredential, action string) string {
+	if stringInList(credential.Format, legacyCredentialContainers) {
+		return fmt.Sprintf("run 'allod secret migrate %s' before %s", credential.Credential, action)
+	}
+	return "it is a plain legacy value that 'rotate-token' still rotates, and migrate has no container to take apart: it becomes new-shape by a registry edit that drops its 'format' and turns each target's 'verify' object into its command string, which needs no decryption"
+}
 
 // credentialShapeError refuses the one shape the coexistence rule forbids:
 // a credential is wholly legacy or wholly new, never both. The secrets
@@ -213,4 +267,14 @@ func credentialShapeError(credential registryCredential) error {
 		return nil
 	}
 	return fmt.Errorf("credential '%s' carries both a legacy 'format' and a declared 'value'; a credential is one shape or the other, so fix the registry entry before landing anything for it", credential.Credential)
+}
+
+// encoderExitStatus describes how an encoder process ended without quoting
+// anything the process itself produced.
+func encoderExitStatus(err error) string {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return fmt.Sprintf("exit status %d", exitErr.ExitCode())
+	}
+	return "it could not be run"
 }

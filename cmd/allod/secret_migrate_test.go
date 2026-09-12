@@ -828,3 +828,339 @@ func TestFindRegistryCredentialSpan(t *testing.T) {
 		t.Error("an absent group was located")
 	}
 }
+
+// --- The legacy 'user' field ---
+
+// migrateTokenRegistry carries the one legacy shape that still has a
+// target-level 'user': a forge-token-verify probe on a nixos-host, where
+// rotate-token baked the user into 'sudo -u <user>'.
+const migrateTokenRegistry = `{
+  "token.rotate": {
+    "service": "forgejo",
+    "account": "fixture-user",
+    "ui_token_name": "fixture-token",
+    "registry_alias": "token.rotate",
+    "rotation_strategy": "overlap",
+    "credentials": [
+      {
+        "credential": "store-cred",
+        "secret_path": "secrets/store-cred.age",
+        "format": "credential-store-url",
+        "targets": [
+          {
+            "system": "fixture-host",
+            "kind": "nixos-host",
+            "user": "fixture-user",
+            "deployed_path": "/home/fixture-user/token",
+            "verify": { "type": "forge-token-verify" }
+          }
+        ]
+      }
+    ]
+  }
+}
+`
+
+// TestSecretMigrateBakesTheLegacyUserIntoTheCommand pins the disappearance
+// of the 'user' field end to end: it is consumed by the command string and
+// then gone from the registry, because command-specific metadata now lives
+// in the string rather than in a field beside it.
+func TestSecretMigrateBakesTheLegacyUserIntoTheCommand(t *testing.T) {
+	mf := newMigrateFixture(t, migrateTokenRegistry)
+	mf.addCredential(t, "store-cred", "https://fixture-user:tok-fixture@example.test")
+	mf.commit(t)
+
+	_, errText, code := mf.run(t, "secret", "migrate", "store-cred")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, errText)
+	}
+	want := `{
+  "token.rotate": {
+    "service": "forgejo",
+    "account": "fixture-user",
+    "ui_token_name": "fixture-token",
+    "registry_alias": "token.rotate",
+    "rotation_strategy": "overlap",
+    "credentials": [
+      {
+        "credential": "store-cred",
+        "secret_path": "secrets/store-cred.age",
+        "value": {
+          "template": "https://fixture-user:{secret}@example.test"
+        },
+        "targets": [
+          {
+            "system": "fixture-host",
+            "kind": "nixos-host",
+            "deployed_path": "/home/fixture-user/token",
+            "verify": "sudo -u fixture-user forge token verify < /home/fixture-user/token"
+          }
+        ]
+      }
+    ]
+  }
+}
+`
+	if got := mf.file(t, "forgejo-token-groups.json"); got != want {
+		t.Errorf("forgejo-token-groups.json =\n%s\nwant\n%s", got, want)
+	}
+}
+
+// TestSecretMigrateRefusesAUserItCannotCarry is the other half: 'user' is
+// registry data, and only forge-token-verify has anywhere to put it. On any
+// other verify type, dropping it would lose data the migration exists to
+// carry forward.
+func TestSecretMigrateRefusesAUserItCannotCarry(t *testing.T) {
+	registry := strings.Replace(migrateStoreRegistry,
+		`"kind": "nixos-host",`,
+		`"kind": "nixos-host",
+            "user": "fixture-user",`, 1)
+	mf := newMigrateFixture(t, registry)
+	mf.addCredential(t, "store-cred", "https://fixture-user:tok-fixture@example.test")
+	mf.commit(t)
+	before := mf.file(t, "forgejo-token-groups.json")
+
+	_, errText, code := mf.run(t, "secret", "migrate", "store-cred")
+	if code == 0 {
+		t.Fatal("exit 0, want a refusal")
+	}
+	if want := "its verify type 'git-ls-remote' has no use for the target's 'user' field"; !strings.Contains(errText, want) {
+		t.Errorf("stderr lacks %q\ngot: %q", want, errText)
+	}
+	if len(mf.decryptedFor) != 0 {
+		t.Errorf("decrypted %v before refusing on registry data alone", mf.decryptedFor)
+	}
+	if got := mf.file(t, "forgejo-token-groups.json"); got != before {
+		t.Error("the registry was changed despite the refusal")
+	}
+}
+
+// TestSecretMigrateRefusesAnUnknownVerifyField is the same fail-closed rule
+// applied inside the verify object: a field this command does not model
+// would vanish when the object becomes a string.
+func TestSecretMigrateRefusesAnUnknownVerifyField(t *testing.T) {
+	registry := strings.Replace(migrateStoreRegistry,
+		`"type": "git-ls-remote",`,
+		`"type": "git-ls-remote",
+              "timeout_seconds": 30,`, 1)
+	mf := newMigrateFixture(t, registry)
+	mf.addCredential(t, "store-cred", "https://fixture-user:tok-fixture@example.test")
+	mf.commit(t)
+
+	_, errText, code := mf.run(t, "secret", "migrate", "store-cred")
+	if code == 0 {
+		t.Fatal("exit 0, want a refusal")
+	}
+	if want := "not a structured legacy probe object migrate can translate without losing a field"; !strings.Contains(errText, want) {
+		t.Errorf("stderr lacks %q\ngot: %q", want, errText)
+	}
+	if len(mf.decryptedFor) != 0 {
+		t.Errorf("decrypted %v before refusing on registry data alone", mf.decryptedFor)
+	}
+}
+
+// --- Legacy metadata is not shell syntax ---
+
+// TestSecretMigrateRefusesLegacyMetadataThatWouldBecomeShellText covers the
+// fields that reach the verify command unquoted. The legacy shape never
+// constrained them, and a one-line string passes the new validator, so a
+// 'user' or a 'repo_url' carrying shell syntax would become a second
+// command in a line printed for an operator to paste into a shell.
+func TestSecretMigrateRefusesLegacyMetadataThatWouldBecomeShellText(t *testing.T) {
+	cases := []struct {
+		name     string
+		registry string
+		want     string
+	}{
+		{
+			name: "a user carrying a command separator",
+			registry: strings.Replace(migrateTokenRegistry,
+				`"user": "fixture-user",`, `"user": "root; touch /tmp/migrate-fixture #",`, 1),
+			want: `its user "root; touch /tmp/migrate-fixture #" does not match`,
+		},
+		{
+			name: "a repo_url carrying a command separator",
+			registry: strings.Replace(migrateStoreRegistry,
+				`"repo_url": "https://example.test/fixture/repo.git",`,
+				`"repo_url": "https://example.test/fixture/repo.git; touch /tmp/migrate-fixture #",`, 1),
+			want: "is not an https://<host>/... URL",
+		},
+		{
+			name: "a deployed_path carrying a quote",
+			registry: strings.Replace(migrateTokenRegistry,
+				`"deployed_path": "/home/fixture-user/token",`,
+				`"deployed_path": "/home/fixture-user/'token'",`, 1),
+			want: "is not an absolute path free of whitespace",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mf := newMigrateFixture(t, tc.registry)
+			mf.addCredential(t, "store-cred", "https://fixture-user:tok-fixture@example.test")
+			mf.commit(t)
+			before := mf.file(t, "forgejo-token-groups.json")
+			beforeHead := mf.head(t)
+
+			_, errText, code := mf.run(t, "secret", "migrate", "store-cred")
+			if code == 0 {
+				t.Fatal("exit 0, want a refusal")
+			}
+			if !strings.Contains(errText, tc.want) {
+				t.Errorf("stderr lacks %q\ngot: %q", tc.want, errText)
+			}
+			if !strings.Contains(errText, "write") || !strings.Contains(errText, "by hand") {
+				t.Errorf("the refusal does not tell the operator to write the command by hand\ngot: %q", errText)
+			}
+			if len(mf.decryptedFor) != 0 {
+				t.Errorf("decrypted %v before refusing on registry data alone", mf.decryptedFor)
+			}
+			if got := mf.file(t, "forgejo-token-groups.json"); got != before {
+				t.Error("the registry was changed despite the refusal")
+			}
+			if got := mf.head(t); got != beforeHead {
+				t.Error("a commit was made")
+			}
+		})
+	}
+}
+
+// --- Gates that must precede the decrypt ---
+
+// TestSecretMigrateRefusesAnUnexportedEncoderBeforeDecrypting pins the
+// order: an rclone migration declares value.encode "rclone-obscure", and a
+// checkout that no longer exports it would have its registry rejected by
+// its own flake check — after the ciphertext had been opened for nothing.
+func TestSecretMigrateRefusesAnUnexportedEncoderBeforeDecrypting(t *testing.T) {
+	mf := newMigrateFixture(t, migrateRcloneRegistry)
+	mf.encodings = nil
+	mf.addCredential(t, "site-cred", migrateCanonicalStanza)
+	mf.commit(t)
+	before := mf.file(t, "forgejo-token-groups.json")
+
+	_, errText, code := mf.run(t, "secret", "migrate", "site-cred")
+	if code == 0 {
+		t.Fatal("exit 0, want a refusal")
+	}
+	if want := `declares value.encode "rclone-obscure"`; !strings.Contains(errText, want) {
+		t.Errorf("stderr lacks %q\ngot: %q", want, errText)
+	}
+	if len(mf.decryptedFor) != 0 {
+		t.Errorf("decrypted %v before refusing on registry data alone", mf.decryptedFor)
+	}
+	if got := mf.file(t, "forgejo-token-groups.json"); got != before {
+		t.Error("the registry was changed despite the refusal")
+	}
+	if mf.checkCalls != 0 {
+		t.Errorf("flake check ran %d times on a refusal", mf.checkCalls)
+	}
+}
+
+// --- The written declaration is validated too ---
+
+// TestSecretMigrateRefusesATemplateTheRegistryWouldReject is the case both
+// byte proofs pass and the declaration is still unusable: a legacy host
+// containing a literal '{secret}' round-trips exactly, and the extracted
+// token appears nowhere in the surrounding text, yet the template it
+// produces holds two placeholders.
+func TestSecretMigrateRefusesATemplateTheRegistryWouldReject(t *testing.T) {
+	mf := newMigrateFixture(t, migrateStoreRegistry)
+	mf.addCredential(t, "store-cred", "https://fixture-user:tok-fixture@x{secret}y")
+	mf.commit(t)
+	before := mf.file(t, "forgejo-token-groups.json")
+	beforeHead := mf.head(t)
+
+	_, errText, code := mf.run(t, "secret", "migrate", "store-cred")
+	if code == 0 {
+		t.Fatal("exit 0, want a refusal")
+	}
+	if want := "value.template must contain exactly one {secret} placeholder"; !strings.Contains(errText, want) {
+		t.Errorf("stderr lacks %q\ngot: %q", want, errText)
+	}
+	if got := mf.file(t, "forgejo-token-groups.json"); got != before {
+		t.Error("the registry was changed despite the refusal")
+	}
+	if got := mf.head(t); got != beforeHead {
+		t.Error("a commit was made")
+	}
+}
+
+// TestSecretMigrateRefusesANonUTF8Template pins the byte-preserving
+// contract at the one place it cannot be kept: a template is JSON text, and
+// encoding/json would replace the invalid byte with U+FFFD, storing a
+// declaration that renders something the credential never held.
+func TestSecretMigrateRefusesANonUTF8Template(t *testing.T) {
+	mf := newMigrateFixture(t, migrateStoreRegistry)
+	mf.addCredential(t, "store-cred", "https://fix\x80ture-user:tok-fixture@example.test")
+	mf.commit(t)
+	before := mf.file(t, "forgejo-token-groups.json")
+	beforeCiphertext := mf.file(t, "secrets/store-cred.age")
+	beforeHead := mf.head(t)
+
+	_, errText, code := mf.run(t, "secret", "migrate", "store-cred")
+	if code == 0 {
+		t.Fatal("exit 0, want a refusal")
+	}
+	if want := "is not valid UTF-8"; !strings.Contains(errText, want) {
+		t.Errorf("stderr lacks %q\ngot: %q", want, errText)
+	}
+	if got := mf.file(t, "forgejo-token-groups.json"); got != before {
+		t.Error("the registry was changed despite the refusal")
+	}
+	if got := mf.file(t, "secrets/store-cred.age"); got != beforeCiphertext {
+		t.Error("the ciphertext was rewritten despite the refusal")
+	}
+	if got := mf.head(t); got != beforeHead {
+		t.Error("a commit was made")
+	}
+}
+
+// --- One entry, in one group ---
+
+// TestSecretMigrateRefusesADuplicateEntryInOneGroup covers the shape the
+// "one group" check used to let through: two entries of the same name in
+// one group are one group, and migrate would rewrite the first textual
+// entry and commit, leaving the second in the legacy shape.
+func TestSecretMigrateRefusesADuplicateEntryInOneGroup(t *testing.T) {
+	registry := strings.Replace(migrateStoreRegistry,
+		`    "credentials": [
+      {
+        "credential": "store-cred",`,
+		`    "credentials": [
+      {
+        "credential": "store-cred",
+        "secret_path": "secrets/store-cred.age",
+        "format": "credential-store-url",
+        "targets": [
+          {
+            "system": "dev-a",
+            "kind": "dev-vm",
+            "deployed_path": "/root/.git-credentials",
+            "verify": { "type": "site-check" }
+          }
+        ]
+      },
+      {
+        "credential": "store-cred",`, 1)
+	mf := newMigrateFixture(t, registry)
+	mf.addCredential(t, "store-cred", "https://fixture-user:tok-fixture@example.test")
+	mf.commit(t)
+	before := mf.file(t, "forgejo-token-groups.json")
+	beforeHead := mf.head(t)
+
+	_, errText, code := mf.run(t, "secret", "migrate", "store-cred")
+	if code == 0 {
+		t.Fatal("exit 0, want a refusal")
+	}
+	if want := "credential 'store-cred' is listed 2 times in rotation registry group 'store.rotate'"; !strings.Contains(errText, want) {
+		t.Errorf("stderr lacks %q\ngot: %q", want, errText)
+	}
+	if len(mf.decryptedFor) != 0 {
+		t.Errorf("decrypted %v before refusing on registry data alone", mf.decryptedFor)
+	}
+	if got := mf.file(t, "forgejo-token-groups.json"); got != before {
+		t.Error("the registry was changed despite the refusal")
+	}
+	if got := mf.head(t); got != beforeHead {
+		t.Error("a commit was made")
+	}
+}

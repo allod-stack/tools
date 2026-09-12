@@ -12,16 +12,21 @@ package main
 // how a credential that predates the declaration acquires one.
 //
 // Everything it can check without the plaintext, it checks first: the
-// branch and the clean tree, the registry lookup, that the credential is
-// still legacy, that no local_auth_refresh entry names it, that its format
-// is one of the two containers, and that every one of its targets'
-// structured verify objects converts to a command. Only then is the
-// ciphertext decrypted, into memory and nowhere else, and the template
-// built from it must pass two proofs before anything is written:
-// substituting the extracted secret back into the template must reproduce
-// the decrypted bytes exactly, and the extracted bytes must appear nowhere
-// in the template outside the placeholder. Either proof failing is a
-// refusal with no write.
+// branch and the clean tree, the registry lookup (exactly one entry, in
+// exactly one group), that the credential is still legacy, that no
+// local_auth_refresh entry names it, that its format is one of the two
+// containers, that every one of its targets' structured verify objects
+// converts to a command whose interpolated fields are inside the grammar
+// 'declare' holds the same fields to, and that the checkout exports the
+// encoder the migrated declaration would name. Only then is the ciphertext
+// decrypted, into memory and nowhere else, and the template built from it
+// must pass two byte proofs and the registry's own value validation before
+// anything is written: substituting the extracted secret back into the
+// template must reproduce the decrypted bytes exactly, the extracted bytes
+// must appear nowhere in the template outside the placeholder, the template
+// must be valid UTF-8 (JSON carries nothing else, and a template's bytes
+// are preserved), and it must hold exactly one placeholder. Any of them
+// failing is a refusal with no write.
 //
 // The ciphertext is never rewritten, so nothing a machine deploys changes;
 // the commit is a registry edit and nothing else. Delete this file when
@@ -35,6 +40,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 const secretMigrateDetail = `'migrate' rewrites one legacy container credential's rotation registry
@@ -48,17 +54,29 @@ It decrypts <name> once, in memory, only to recover the non-secret text
 around the stored secret, and only after every check that does not need the
 plaintext has passed. The decrypted bytes must match the exact byte shape
 rotate-token writes for that format; substituting the extracted secret into
-the proposed template must reproduce those bytes exactly; and the extracted
-bytes must occur nowhere else in the template. The plaintext is never
-written to disk, printed, or passed as an argument.
+the proposed template must reproduce those bytes exactly; the extracted
+bytes must occur nowhere else in the template; and the template must be
+valid UTF-8 holding exactly one placeholder, the same thing 'declare'
+requires of a template written by hand. The plaintext is never written to
+disk, printed, or passed as an argument.
+
+A target's structured verify object is translated only when every field
+that reaches the command is inside the grammar 'declare' applies to the
+same field: the command becomes a line an operator runs in a shell, and
+these legacy fields were never constrained. A 'user' on a target whose
+verify is not forge-token-verify is refused too, since there is nowhere in
+the command to put it and migrate drops no registry data. Either refusal
+names the target and asks for that command to be written into the registry
+by hand.
 
 'migrate' refuses a credential that already has a 'value', one that is in
-no registry group or in two, one named by a group's local_auth_refresh
-(that consumer still needs the legacy shape — allod/nexus#52), and any
-legacy format other than the two containers. A plain legacy entry
-('raw-forgejo-token' or 'raw') needs no decryption at all: migrate it by
-editing the registry directly, dropping 'format' and converting each
-target's 'verify' object to its command string.
+no registry group, in two groups, or listed twice inside one group, one
+named by a group's local_auth_refresh (that consumer still needs the legacy
+shape — allod/nexus#52), and any legacy format other than the two
+containers. A plain legacy entry ('raw-forgejo-token' or 'raw') needs no
+decryption at all: migrate it by editing the registry directly, dropping
+'format' and converting each target's 'verify' object to its command
+string.
 
 'migrate' works on the secrets checkout, found through the repository
 registry under ~/work unless <checkout> names a worktree, and on whatever
@@ -167,6 +185,17 @@ func secretMigrate(args []string) {
 		}
 		commands[index] = command
 	}
+	// The encoder the migrated declaration would name has to be one this
+	// checkout exports, and that is registry data: checking it after the
+	// decrypt would open a ciphertext only to write a registry the
+	// repository's own check then rejects.
+	encodings, err := secretEvalEncodings(checkout)
+	if err != nil {
+		die(1, "could not evaluate lib.credentialEncodings in %s: %s", checkout, err)
+	}
+	if encoder := migrateDeclaredEncoding(credential.Format); encoder != "" && !stringInList(encoder, encodings) {
+		die(1, "migrating a '%s' credential declares value.encode %q, which %s does not export as lib.credentialEncodings; nothing was decrypted or changed", credential.Format, encoder, checkout)
+	}
 
 	target := lookupSecret(checkout, name)
 	identity := ageIdentityPath()
@@ -189,15 +218,35 @@ func secretMigrate(args []string) {
 		die(1, "the secret stored in %s also occurs in the non-secret text around it, so a template would leak it; nothing was changed", target.path)
 	}
 	rendered, raw = nil, nil
+	// The template becomes JSON text, and JSON carries UTF-8 and nothing
+	// else: encoding/json would silently replace an invalid byte with
+	// U+FFFD and store text the credential never had. The contract is that
+	// every byte of the template survives, so a legacy plaintext whose
+	// non-secret half is not UTF-8 is refused instead of quietly altered.
+	if !utf8.ValidString(value.Template) {
+		die(1, "the non-secret text around the secret in %s is not valid UTF-8, and a template is JSON text; a declaration could not hold those bytes unchanged, so nothing was changed", target.path)
+	}
+	// The same validation every other command applies to a declared value,
+	// applied to the one this command is about to write. The two byte
+	// proofs above say the template reproduces the plaintext; they do not
+	// say it is a template the registry accepts — a legacy host containing
+	// a literal '{secret}' round-trips perfectly and still leaves two
+	// placeholders for the next rotation to choose between.
+	if err := validateCredentialValue(value, encodings); err != nil {
+		die(1, "the declaration migrate would write for '%s' is not a usable value: %s; nothing was changed", name, err)
+	}
 
 	entry.Format = ""
 	entry.Value = value
 	for index := range entry.Targets {
 		// Command-specific metadata belongs in the verify string now, not
 		// in a registry field beside it, so the legacy 'user' is cleared
-		// once it has been baked into the command above.
+		// once it has been baked into the command above. Only a
+		// forge-token-verify target ever reaches here with one:
+		// legacyVerifyCommand refuses a 'user' on any other type rather
+		// than dropping data it has nowhere to put.
 		entry.Targets[index].User = ""
-		encoded, err := json.Marshal(commands[index])
+		encoded, err := jsonStringLiteral(commands[index])
 		if err != nil {
 			die(1, "could not encode the verify command for target '%s': %s", entry.Targets[index].System, err)
 		}
@@ -216,13 +265,13 @@ func secretMigrate(args []string) {
 	}
 
 	restore := func() string {
-		if err := declareAtomicWrite(registryPath, original); err != nil {
+		if err := atomicWrite(registryPath, original); err != nil {
 			fmt.Fprintf(stderr, "allod: could not restore %s: %s\n", registryPath, err)
 			return "forgejo-token-groups.json could NOT be restored; inspect it before retrying"
 		}
 		return "restored forgejo-token-groups.json"
 	}
-	if err := declareAtomicWrite(registryPath, updated); err != nil {
+	if err := atomicWrite(registryPath, updated); err != nil {
 		die(1, "could not write %s: %s", registryPath, err)
 	}
 	if status := secretFlakeCheck(checkout); status != 0 {
@@ -231,6 +280,18 @@ func secretMigrate(args []string) {
 	commit := landCommit(checkout, branch, fmt.Sprintf("Migrate %s to a credential value template", name), restore, "forgejo-token-groups.json")
 	fmt.Fprintf(stdout, "forgejo-token-groups.json: %s in group %s now declares a value template; %s is unchanged\n", name, alias, target.path)
 	fmt.Fprintf(stdout, "Committed %s on %s and pushed to origin; merging is yours\n", commit, branch)
+}
+
+// migrateDeclaredEncoding is the 'value.encode' the migrated declaration
+// would name for one legacy format, or the empty string for a format whose
+// stored value needs no encoder. It is stated once, here, so the gate that
+// proves the checkout exports the encoder and the code that writes the
+// declaration cannot drift apart.
+func migrateDeclaredEncoding(format string) string {
+	if format == "rclone-remote-stanza" {
+		return "rclone-obscure"
+	}
+	return ""
 }
 
 // legacyValueTemplate parses one legacy container's canonical bytes and
@@ -266,7 +327,7 @@ func legacyValueTemplate(format string, raw []byte, path string) (*credentialVal
 		// already-obscured bytes; the encoder named here is not applied
 		// now. It describes what the next 'allod secret rotate' does: that
 		// run takes a raw password and obscures it before substitution.
-		return &credentialValue{Template: template, Encode: "rclone-obscure"}, match[3], nil
+		return &credentialValue{Template: template, Encode: migrateDeclaredEncoding(format)}, match[3], nil
 	default:
 		return nil, nil, fmt.Errorf("migrate has no translation for legacy format '%s'", format)
 	}
@@ -277,26 +338,52 @@ func legacyValueTemplate(format string, raw []byte, path string) (*credentialVal
 // adds 'ssh <system>' around it for a remote target at print time (see
 // printVerification), so this is the command as it runs on the target
 // machine and nothing more.
+//
+// Every legacy field that reaches the command is held to the grammar
+// 'declare' applies to the same value before writing one by hand. The
+// legacy registry shape never constrained these fields, and the new string
+// validator only asks for one non-empty line, so a 'user' of
+// 'root; touch /tmp/x #' would otherwise travel unquoted into a command
+// printed for an operator to paste into a shell. A field outside its
+// grammar is refused, and the operator writes that target's command into
+// the registry by hand.
 func legacyVerifyCommand(target migrateTarget) (string, error) {
-	var verify legacyVerify
-	if err := json.Unmarshal(target.Verify, &verify); err != nil {
-		return "", fmt.Errorf("its 'verify' is not a structured legacy probe object, so there is nothing to translate")
+	verify, err := decodeLegacyVerify(target.Verify)
+	if err != nil {
+		return "", err
+	}
+	// 'user' is command-specific metadata that only forge-token-verify ever
+	// consumed (rotate-token bakes it into 'sudo -u <user>'), and migrate
+	// clears it once it is in the string. On a target of any other type
+	// there is nothing to bake it into, so dropping it would silently lose
+	// registry data this command exists to carry forward.
+	if target.User != "" && verify.Type != "forge-token-verify" {
+		return "", fmt.Errorf("its verify type '%s' has no use for the target's 'user' field, and migrate carries no registry data it cannot put in the command; write this target's command into the registry by hand", verify.Type)
 	}
 	switch verify.Type {
 	case "git-ls-remote":
 		if verify.RepoURL == "" {
 			return "", fmt.Errorf("its git-ls-remote verify carries no repo_url, so no command can be built from it")
 		}
+		if !validLegacyRepoURL(verify.RepoURL) {
+			return "", fmt.Errorf("its git-ls-remote repo_url %q is not an https://<host>/... URL whose host starts with a letter or digit, with no whitespace, control character, quote, backslash, or $; it would become unquoted shell text in the verify command, so write that command into the registry by hand", verify.RepoURL)
+		}
 		return "sudo env HOME=/root GIT_TERMINAL_PROMPT=0 git ls-remote " + verify.RepoURL + " HEAD", nil
 	case "forge-token-verify":
 		if target.DeployedPath == "" {
 			return "", fmt.Errorf("its forge-token-verify target carries no deployed_path, so no command can be built from it")
+		}
+		if !validLegacyDeployedPath(target.DeployedPath) {
+			return "", fmt.Errorf("its deployed_path %q is not an absolute path free of whitespace, control characters, quotes, backslash, and $; it would become unquoted shell text in the verify command, so write that command into the registry by hand", target.DeployedPath)
 		}
 		if target.Kind != "nixos-host" {
 			return "forge token verify < " + target.DeployedPath, nil
 		}
 		if target.User == "" {
 			return "", fmt.Errorf("its forge-token-verify target on a nixos-host carries no user, so no 'sudo -u <user>' command can be built from it")
+		}
+		if !declareIdentifierPattern.MatchString(target.User) {
+			return "", fmt.Errorf("its user %q does not match ^[A-Za-z0-9][A-Za-z0-9_.@-]*$; it would become unquoted shell text in the verify command, so write that command into the registry by hand", target.User)
 		}
 		return "sudo -u " + target.User + " forge token verify < " + target.DeployedPath, nil
 	case "site-check":
@@ -306,6 +393,41 @@ func legacyVerifyCommand(target migrateTarget) (string, error) {
 	default:
 		return "", fmt.Errorf("its verify type '%s' is not one migrate can translate (git-ls-remote, forge-token-verify, site-check, tailscale-status); write the command into the registry by hand", verify.Type)
 	}
+}
+
+// decodeLegacyVerify reads the structured object with unknown fields
+// refused. A field this command does not model is a field it would drop
+// when it replaces the object with a string, and dropping registry data
+// during a migration is what the whole command exists to avoid.
+//
+// 'credential_context' is the one field modelled and then deliberately
+// dropped: rotate-token only ever printed it as a display label in the
+// header above the command, never inside the command, and the new shape has
+// no header of its own to carry it.
+func decodeLegacyVerify(raw json.RawMessage) (legacyVerify, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var verify legacyVerify
+	if err := decoder.Decode(&verify); err != nil {
+		return legacyVerify{}, fmt.Errorf("its 'verify' is not a structured legacy probe object migrate can translate without losing a field: %s", err)
+	}
+	return verify, nil
+}
+
+// legacyRepoHostStart is the former --verify-repo-url grammar's host rule:
+// an 'https://' with nothing that looks like a host after it leaves
+// 'git ls-remote https:// HEAD', a command with no repository in it.
+var legacyRepoHostStart = regexp.MustCompile(`^[A-Za-z0-9]`)
+
+func validLegacyRepoURL(url string) bool {
+	const scheme = "https://"
+	return strings.HasPrefix(url, scheme) &&
+		legacyRepoHostStart.MatchString(strings.TrimPrefix(url, scheme)) &&
+		!declareDeployedPathUnsafe.MatchString(url)
+}
+
+func validLegacyDeployedPath(path string) bool {
+	return strings.HasPrefix(path, "/") && !declareDeployedPathUnsafe.MatchString(path)
 }
 
 // --- The registry edit ---
@@ -410,14 +532,29 @@ func registryEntryIndent(text []byte, start int) string {
 
 // renderRegistryCredential renders the migrated entry at the given
 // indentation. HTML escaping is off: a verify command routinely contains
-// '<' (a redirection), and '<' in the registry would be correct JSON
-// and unreadable text.
+// '<' (a redirection), and an escaped '<' in the registry would be correct
+// JSON and unreadable text.
 func renderRegistryCredential(entry migrateCredential, indent string) ([]byte, error) {
 	var out bytes.Buffer
 	encoder := json.NewEncoder(&out)
 	encoder.SetEscapeHTML(false)
 	encoder.SetIndent(indent, "  ")
 	if err := encoder.Encode(entry); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(out.Bytes(), "\n"), nil
+}
+
+// jsonStringLiteral renders one string as a JSON string with HTML escaping
+// off, for the same reason renderRegistryCredential turns it off: a verify
+// command routinely contains '<' (a redirection), and json.Marshal always
+// writes it escaped — correct JSON, unreadable text, and a diff nobody can
+// review. Only an Encoder can be told not to escape.
+func jsonStringLiteral(value string) ([]byte, error) {
+	var out bytes.Buffer
+	encoder := json.NewEncoder(&out)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
 		return nil, err
 	}
 	return bytes.TrimRight(out.Bytes(), "\n"), nil

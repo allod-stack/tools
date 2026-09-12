@@ -131,33 +131,29 @@ func parseSecretRotateArgs(args []string) (name, checkout string, dryRun bool) {
 // selectRotationGroup finds the one registry group that lists name among its
 // credentials, and returns the whole registry alongside it so the caller
 // can check every other member of that group too (see
-// verifyGroupMembersUnique) without a second evaluation. A credential
-// belongs to exactly one group in a well-formed registry; this refuses both
-// "no group" and "more than one" for the requested name, the way
+// verifyGroupMembersUnique) without a second evaluation. A credential has
+// exactly one entry in exactly one group in a well-formed registry; this
+// counts entries rather than groups, so two entries of the same name inside
+// one group are refused as well as one entry in each of two groups. Either
+// way there is no single answer to which entry the operator meant, and
 // lookupSecret already refuses a credential with more than one agenix
-// consumer, rather than guessing which the operator meant.
+// consumer for the same reason.
 func selectRotationGroup(checkout, name string) (string, tokenGroup, map[string]tokenGroup) {
 	groups, err := secretEvalRegistry(checkout)
 	if err != nil {
 		die(1, "could not evaluate lib.forgejoTokenGroups in %s: %s", checkout, err)
 	}
-	var aliases []string
-	for alias, group := range groups {
-		for _, credential := range group.Credentials {
-			if credential.Credential == name {
-				aliases = append(aliases, alias)
-				break
-			}
-		}
-	}
-	sort.Strings(aliases)
-	switch len(aliases) {
-	case 0:
+	_, aliases := registryCredentialEntries(groups, name)
+	distinct := distinctSorted(aliases)
+	switch {
+	case len(aliases) == 0:
 		die(1, "no rotation registry entry for '%s' in %s/forgejo-token-groups.json; rotate operates on the registry group a credential belongs to", name, checkout)
-	case 1:
+	case len(aliases) == 1:
 		return aliases[0], groups[aliases[0]], groups
+	case len(distinct) > 1:
+		die(1, "credential '%s' is registered in more than one rotation registry group (%s) in %s/forgejo-token-groups.json; fix the registry so each credential belongs to one group", name, strings.Join(distinct, ", "), checkout)
 	default:
-		die(1, "credential '%s' is registered in more than one rotation registry group (%s) in %s/forgejo-token-groups.json; fix the registry so each credential belongs to one group", name, strings.Join(aliases, ", "), checkout)
+		die(1, "credential '%s' is listed %d times in rotation registry group '%s' in %s/forgejo-token-groups.json; rotate acts on one entry per credential, so fix the registry so each credential is listed once", name, len(aliases), distinct[0], checkout)
 	}
 	return "", tokenGroup{}, nil
 }
@@ -166,21 +162,21 @@ func selectRotationGroup(checkout, name string) (string, tokenGroup, map[string]
 // every member of the selected group: a group is not a safe rotation unit
 // if one of its other credentials also sits in a second registry group,
 // since a run here would land that credential's new value without anyone
-// having asked whether the second group's rotation also needed it.
+// having asked whether the second group's rotation also needed it. A member
+// listed twice inside this one group is refused too — two entries for one
+// credential means two declared values for one ciphertext, and rendering
+// the new secret through whichever came first is exactly the guess this
+// command does not make.
 func verifyGroupMembersUnique(group tokenGroup, groups map[string]tokenGroup) {
 	for _, credential := range group.Credentials {
-		var aliases []string
-		for alias, candidate := range groups {
-			for _, member := range candidate.Credentials {
-				if member.Credential == credential.Credential {
-					aliases = append(aliases, alias)
-					break
-				}
-			}
-		}
-		sort.Strings(aliases)
-		if len(aliases) > 1 {
-			die(1, "credential '%s' is registered in more than one rotation registry group (%s); fix the registry so each credential belongs to one group", credential.Credential, strings.Join(aliases, ", "))
+		_, aliases := registryCredentialEntries(groups, credential.Credential)
+		distinct := distinctSorted(aliases)
+		switch {
+		case len(aliases) < 2:
+		case len(distinct) > 1:
+			die(1, "credential '%s' is registered in more than one rotation registry group (%s); fix the registry so each credential belongs to one group", credential.Credential, strings.Join(distinct, ", "))
+		default:
+			die(1, "credential '%s' is listed %d times in rotation registry group '%s'; rotate acts on one entry per credential, so fix the registry so each credential is listed once", credential.Credential, len(aliases), distinct[0])
 		}
 	}
 }
@@ -354,9 +350,9 @@ func secretRotate(args []string) {
 			continue
 		}
 		if credential.Credential == name {
-			die(1, "credential '%s' uses legacy format '%s'; run 'allod secret migrate %s' before rotating it", name, credential.Format, name)
+			die(1, "credential '%s' uses legacy format '%s'; %s", name, credential.Format, legacyRefusalReason(credential, "rotating it"))
 		}
-		die(1, "rotation registry group '%s' also lists legacy credential '%s' (format '%s'); run 'allod secret migrate %s' before rotating this group", alias, credential.Credential, credential.Format, credential.Credential)
+		die(1, "rotation registry group '%s' also lists legacy credential '%s' (format '%s'); %s", alias, credential.Credential, credential.Format, legacyRefusalReason(credential, "rotating this group"))
 	}
 	validateGroupMetadata(alias, group)
 	assertUniformGroupEncoding(alias, group.Credentials)
@@ -449,7 +445,7 @@ func secretRotate(args []string) {
 		var restored []string
 		problems := 0
 		for _, item := range items {
-			if err := writeCiphertextAtomic(item.fullPath, item.original, 0644); err != nil {
+			if err := atomicWrite(item.fullPath, item.original); err != nil {
 				fmt.Fprintf(stderr, "allod: could not restore %s: %s\n", item.target.path, err)
 				problems++
 				continue
@@ -468,7 +464,7 @@ func secretRotate(args []string) {
 		// into place, so a crash mid-write leaves the old ciphertext intact
 		// rather than a truncated one: the file is always either the old
 		// bytes or the new ones, never a partial write of either.
-		if err := writeCiphertextAtomic(item.fullPath, item.ciphertext, 0644); err != nil {
+		if err := atomicWrite(item.fullPath, item.ciphertext); err != nil {
 			die(1, "could not write %s: %s; %s", item.target.path, err, restore())
 		}
 		paths = append(paths, item.target.path)
@@ -510,40 +506,6 @@ func secretRotate(args []string) {
 		fmt.Fprintf(stderr, "allod: committed %s but the push failed:\n%s\n", commit, pushOutput)
 		die(pushStatus, "push the branch yourself once the cause is fixed: git -C %s push origin HEAD", checkout)
 	}
-}
-
-// writeCiphertextAtomic writes data to a temporary file in the same
-// directory as path and renames it into place, so a crash or a killed
-// process leaves the file as either the old bytes or the new ones and never
-// a truncated partial write. The temporary file is removed on any failure
-// before the rename; a failure at or after the rename is vanishingly
-// unlikely (both calls are in the same directory) and is reported as any
-// other write failure, which already triggers the group's restore path.
-func writeCiphertextAtomic(path string, data []byte, perm os.FileMode) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".rotate-"+filepath.Base(path)+"-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	_, writeErr := tmp.Write(data)
-	closeErr := tmp.Close()
-	if writeErr != nil {
-		os.Remove(tmpPath)
-		return writeErr
-	}
-	if closeErr != nil {
-		os.Remove(tmpPath)
-		return closeErr
-	}
-	if err := os.Chmod(tmpPath, perm); err != nil {
-		os.Remove(tmpPath)
-		return err
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath)
-		return err
-	}
-	return nil
 }
 
 // --- Printed steps ---

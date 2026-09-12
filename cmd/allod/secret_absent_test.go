@@ -4,10 +4,11 @@ package main
 
 // The other half of the build-tag proof for the secret namespace.
 // secret_test.go asserts that a build made with -tags secret carries
-// 'declare', 'create', and 'rekey'; this file asserts that a build without
-// the tag carries 'declare' alone — not that 'create' and 'rekey' refuse,
-// but that those two words mean nothing, which is the difference between a
-// machine that cannot land a secret and a machine that lands one badly.
+// 'declare' plus 'create', 'rekey', 'migrate', and 'rotate'; this file
+// asserts that a build without the tag carries 'declare' alone — not that
+// the other four refuse, but that those four words mean nothing, which is
+// the difference between a machine that cannot land a secret and a machine
+// that lands one badly.
 // 'allod secret declare' itself is present in both builds: it writes no
 // ciphertext and reads no identity, so it runs wherever agents run.
 //
@@ -35,11 +36,11 @@ func TestSecretNamespaceExistsWithDeclareOnly(t *testing.T) {
 	}
 }
 
-// TestUntaggedSecretCreateRekeyAreUnknown pins the behaviour an operator
-// sees: 'allod secret create' and 'rekey' on a machine that holds no age
-// identity fail exactly the way a typo does, saying so in the same words
-// 'unknown secret command' always has and then, like any unknown secret
-// command, printing the short usage rather than nothing.
+// TestUntaggedSecretTaggedCommandsAreUnknown pins the behaviour an operator
+// sees: 'create', 'rekey', 'migrate', and 'rotate' on a machine that holds
+// no age identity fail exactly the way a typo does, saying so in the same
+// words 'unknown secret command' always has and then, like any unknown
+// secret command, printing the short usage rather than nothing.
 func TestUntaggedSecretTaggedCommandsAreUnknown(t *testing.T) {
 	for _, command := range []string{"create", "rekey", "migrate", "rotate"} {
 		t.Run(command, func(t *testing.T) {

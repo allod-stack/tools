@@ -64,12 +64,26 @@ const secretCreateDetail = `'create' requires the branch to already carry, for <
 entry in rotation_state "pending" with exactly one agenix consumer in this
 repository, a secrets.nix line for that consumer's path whose recipients
 include this host's identity, a rotation registry entry naming both, and no
-ciphertext yet. It refuses anything else and says what it found. The value
-is read from stdin verbatim (trailing newline included, so multi-line
-formats round-trip), or as one hidden line when stdin is a terminal; an
-empty or whitespace-only value is refused. It then writes the ciphertext,
-sets the state to "active", runs 'nix flake check', restores both files if
-that fails, and otherwise commits and pushes the branch.
+ciphertext yet. It refuses anything else and says what it found.
+
+The value is read from stdin verbatim, or as one hidden line when stdin is
+a terminal; an empty or whitespace-only value is refused. What gets
+encrypted is that value rendered through the credential's declared
+'value.template': the secret goes in at the sole '{secret}' placeholder and
+every other byte of the template survives, trailing newline included. A
+credential that declares no 'value' stores the secret on its own, exactly
+as given. When 'value.encode' names an encoding, it is applied to the
+secret alone before it is substituted, and the encoder it needs must be on
+PATH before the value is asked for. The secret itself is never trimmed or
+inspected: a trailing newline on a piped value is part of it, so use
+printf '%s' "$value" | allod secret create <name> when it should not be.
+
+A credential whose registry entry still carries a legacy 'format' is
+refused, naming what turns it into the declared shape.
+
+It then writes the ciphertext, sets the state to "active", runs
+'nix flake check', restores both files if that fails, and otherwise commits
+and pushes the branch.
 
 'create' works on the secrets checkout, found through the repository
 registry under ~/work unless <checkout> names a worktree, and on whatever
@@ -226,8 +240,9 @@ type localAuthRefreshEntry struct {
 	SourceCredential string `json:"source_credential"`
 }
 
-// secretTarget is everything 'create' and 'rekey' verified about one
-// credential before touching anything.
+// secretTarget is everything a tagged command — 'create', 'rekey',
+// 'rotate', or 'migrate' — verified about one credential before touching
+// anything.
 type secretTarget struct {
 	name       string
 	path       string // repository-relative, e.g. secrets/<name>.age
@@ -483,7 +498,7 @@ func secretCreate(args []string) {
 		die(1, "%s", err)
 	}
 	if isLegacyCredential(registryCredential) {
-		die(1, "credential '%s' uses legacy format '%s'; run 'allod secret migrate %s' before landing a value for it", name, registryCredential.Format, name)
+		die(1, "credential '%s' uses legacy format '%s'; %s", name, registryCredential.Format, legacyRefusalReason(registryCredential, "landing a value for it"))
 	}
 	encodings, err := secretEvalEncodings(checkout)
 	if err != nil {
@@ -491,6 +506,13 @@ func secretCreate(args []string) {
 	}
 	if err := validateCredentialValue(registryCredential.Value, encodings); err != nil {
 		die(1, "credential '%s' has invalid declared value: %s", name, err)
+	}
+	// Checked before the value is ever read, exactly as 'rotate' checks it:
+	// asking the operator to paste a password and then refusing it for a
+	// binary that was missing all along wastes the paste and leaves it in a
+	// scrollback for nothing (see requireRcloneOnPath).
+	if credentialEncoding(registryCredential) == "rclone-obscure" {
+		requireRcloneOnPath()
 	}
 	target.branch = branch
 	if target.state != "pending" {
@@ -528,7 +550,7 @@ func secretCreate(args []string) {
 			fmt.Fprintf(stderr, "allod: could not remove %s: %s\n", file, err)
 			problems++
 		}
-		if err := os.WriteFile(credentialsPath, original, 0644); err != nil {
+		if err := atomicWrite(credentialsPath, original); err != nil {
 			fmt.Fprintf(stderr, "allod: could not restore %s: %s\n", credentialsPath, err)
 			problems++
 		}
@@ -540,10 +562,10 @@ func secretCreate(args []string) {
 	if err := os.MkdirAll(filepath.Dir(file), 0755); err != nil {
 		die(1, "could not create %s", filepath.Dir(file))
 	}
-	if err := os.WriteFile(file, ciphertext, 0644); err != nil {
+	if err := atomicWrite(file, ciphertext); err != nil {
 		die(1, "could not write %s: %s; %s", file, err, restore())
 	}
-	if err := os.WriteFile(credentialsPath, []byte(flipped), 0644); err != nil {
+	if err := atomicWrite(credentialsPath, []byte(flipped)); err != nil {
 		die(1, "could not write %s: %s; %s", credentialsPath, err, restore())
 	}
 	// The textual flip is verified the way every consumer will read it.
@@ -588,13 +610,13 @@ func secretRekey(args []string) {
 	value = nil
 
 	restore := func() string {
-		if err := os.WriteFile(file, original, 0644); err != nil {
+		if err := atomicWrite(file, original); err != nil {
 			fmt.Fprintf(stderr, "allod: could not restore %s: %s\n", file, err)
 			return "the previous ciphertext could NOT be restored; inspect the tree before retrying"
 		}
 		return fmt.Sprintf("restored %s", target.path)
 	}
-	if err := os.WriteFile(file, ciphertext, 0644); err != nil {
+	if err := atomicWrite(file, ciphertext); err != nil {
 		die(1, "could not write %s: %s; %s", file, err, restore())
 	}
 	if status := secretFlakeCheck(checkout); status != 0 {

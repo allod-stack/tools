@@ -8,15 +8,15 @@ package main
 // This mirrors site_common.go's split. secret_declare.go's init() registers
 // the 'secret' namespace itself and adds the 'declare' entry to
 // secretCommands; secret.go, which does carry the 'secret' tag, extends the
-// same namespace with 'create' and 'rekey' rather than registering a second
-// one — registerNamespace panics on a duplicate word, so only one file may
-// call it, and secret_declare.go is that file.
+// same namespace with 'create', 'rekey', 'migrate', and 'rotate' rather
+// than registering a second one — registerNamespace panics on a duplicate
+// word, so only one file may call it, and secret_declare.go is that file.
 //
 // 'declare' writes a credential's non-secret half — the credentials.nix
 // entry, the secrets.nix recipient line, and the rotation registry group —
 // as plain text edits against the secrets checkout. It needs no identity,
 // encrypts nothing, and runs wherever agents run, which is why it carries
-// no tag while 'create' and 'rekey' do.
+// no tag while the four landing commands do.
 
 import (
 	"bytes"
@@ -52,8 +52,9 @@ var secretCommands []secretCommand
 // secretMain dispatches 'allod secret <command>' to whichever entry in
 // secretCommands matches, so a build advertises and runs exactly the
 // commands it carries. On an untagged build that is 'declare' alone:
-// 'create' and 'rekey' fall through to the same "unknown secret command" a
-// typo would, because in that build they are exactly as absent as a typo.
+// 'create', 'rekey', 'migrate', and 'rotate' fall through to the same
+// "unknown secret command" a typo would, because in that build they are
+// exactly as absent as a typo.
 func secretMain(args []string) {
 	if len(args) == 0 {
 		fmt.Fprint(stderr, secretShortUsage())
@@ -242,7 +243,7 @@ func inventoryCheckoutRelative() string {
 // survive flake-reference or Nix-expression quoting; a checkout under a
 // directory with a space in its name evaluates the same as any other. It
 // lives here, untagged, because 'declare' needs it (to read a machine's
-// type from the inventory flake) as much as 'create' and 'rekey' do (to
+// type from the inventory flake) as much as the tagged commands do (to
 // read the secrets flake's credential inventory and rotation registry).
 func nixEvalJSON(checkout, attribute string) ([]byte, error) {
 	var out, errOut bytes.Buffer

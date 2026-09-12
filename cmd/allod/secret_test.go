@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -516,6 +517,9 @@ func TestSecretCreateRefusals(t *testing.T) {
 		{"legacy registry entry", func(_ *testing.T, fx *secretFixture) {
 			fx.registry["dev-a.git"].Credentials[0].Format = "credential-store-url"
 		}, "run 'allod secret migrate new-token' before landing a value for it"},
+		{"plain legacy registry entry", func(_ *testing.T, fx *secretFixture) {
+			fx.registry["dev-a.git"].Credentials[0].Format = "raw-forgejo-token"
+		}, "it is a plain legacy value that 'rotate-token' still rotates"},
 		{"template with no placeholder", func(_ *testing.T, fx *secretFixture) {
 			fx.registry["dev-a.git"].Credentials[0].Value = &credentialValue{Template: "https://user:token@example.test"}
 		}, "value.template must contain exactly one {secret} placeholder"},
@@ -868,4 +872,83 @@ func TestKeyMaterialIgnoresComment(t *testing.T) {
 	if keyMaterial("ssh-ed25519 AAAA") == keyMaterial("ssh-ed25519 BBBB") {
 		t.Error("different keys compare equal")
 	}
+}
+
+// --- The encoder, on create's side ---
+
+// unreadStdin fails the test if anything reads it: 'create' must settle
+// whether it can encode at all before it asks for a value, so a refusal
+// costs the operator nothing and leaves no pasted password in a scrollback.
+type unreadStdin struct{ t *testing.T }
+
+func (r unreadStdin) Read([]byte) (int, error) {
+	r.t.Error("create read the value before proving it could encode it")
+	return 0, io.EOF
+}
+
+// TestSecretCreateRefusesAMissingRcloneBeforeReadingTheValue is the same
+// gate 'rotate' applies, on the command that lands a credential's first
+// value: an encoder that is not installed is a refusal before the prompt,
+// not after it.
+func TestSecretCreateRefusesAMissingRcloneBeforeReadingTheValue(t *testing.T) {
+	fx := newSecretFixture(t)
+	fx.registry["dev-a.git"].Credentials[0].Value = &credentialValue{Template: fixtureRcloneTemplate, Encode: "rclone-obscure"}
+	t.Setenv("PATH", pathWithoutRclone(t))
+	stdin = unreadStdin{t}
+	before := fx.head(t)
+
+	_, errText, code := fx.run(t, "secret", "create", "new-token")
+	if code == 0 {
+		t.Fatal("exit 0, want a refusal")
+	}
+	if want := "rclone not found on PATH"; !strings.Contains(errText, want) {
+		t.Errorf("stderr lacks %q\ngot: %q", want, errText)
+	}
+	fx.assertUntouched(t, before)
+}
+
+// TestSecretCreateNeverPrintsAnEncodersOutput is the create-side half of
+// the rule rotate is held to: an encoder that echoes what it was handed
+// must not have that output quoted into a fatal error the command prints.
+func TestSecretCreateNeverPrintsAnEncodersOutput(t *testing.T) {
+	installEchoingRclone(t)
+	fx := newSecretFixture(t)
+	fx.registry["dev-a.git"].Credentials[0].Value = &credentialValue{Template: fixtureRcloneTemplate, Encode: "rclone-obscure"}
+	const candidate = "correct-horse-fixture"
+	fx.pipe(candidate)
+	before := fx.head(t)
+
+	out, errText, code := fx.run(t, "secret", "create", "new-token")
+	if code == 0 {
+		t.Fatal("exit 0 despite a failing encoder")
+	}
+	if strings.Contains(out, candidate) || strings.Contains(errText, candidate) {
+		t.Errorf("the candidate value reached the output\nstdout: %q\nstderr: %q", out, errText)
+	}
+	if want := "'rclone obscure -' failed (exit status 1)"; !strings.Contains(errText, want) {
+		t.Errorf("stderr lacks %q\ngot: %q", want, errText)
+	}
+	fx.assertUntouched(t, before)
+}
+
+// TestSecretCreateRefusesADuplicateEntryInOneGroup: two entries of the same
+// name in one group are two declared values for one ciphertext, and
+// rendering through whichever came first is a guess this command does not
+// make.
+func TestSecretCreateRefusesADuplicateEntryInOneGroup(t *testing.T) {
+	fx := newSecretFixture(t)
+	group := fx.registry["dev-a.git"]
+	group.Credentials = append(group.Credentials, group.Credentials[0])
+	fx.registry["dev-a.git"] = group
+	fx.pipe("tok-fixture\n")
+	before := fx.head(t)
+
+	_, errText, code := fx.run(t, "secret", "create", "new-token")
+	if code == 0 {
+		t.Fatal("exit 0, want a refusal")
+	}
+	if want := "credential 'new-token' is listed 2 times in rotation registry group 'dev-a.git'"; !strings.Contains(errText, want) {
+		t.Errorf("stderr lacks %q\ngot: %q", want, errText)
+	}
+	fx.assertUntouched(t, before)
 }
