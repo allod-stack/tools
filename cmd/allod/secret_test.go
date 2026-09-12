@@ -387,8 +387,8 @@ func TestSecretNamespaceIsRegistered(t *testing.T) {
 }
 
 // TestSecretTaggedBuildCarriesEveryCommand pins the shape a secret-tagged
-// build carries: 'declare' from the untagged files plus the four secret.go's
-// init() adds, and nothing else.
+// build carries: 'declare' from the untagged files plus the three
+// secret.go's init() adds, and nothing else.
 func TestSecretTaggedBuildCarriesEveryCommand(t *testing.T) {
 	want := []string{"declare", "create", "rekey", "rotate"}
 	if got := len(secretCommands); got != len(want) {
@@ -973,4 +973,37 @@ func TestSecretCreateRefusesADuplicateEntryInOneGroup(t *testing.T) {
 		t.Errorf("stderr lacks %q\ngot: %q", want, errText)
 	}
 	fx.assertUntouched(t, before)
+}
+
+// --- The 'format' refusal at decode time ---
+
+// TestFirstCredentialCarryingFormat pins nixEvalTokenGroups' one witness
+// against a stray legacy 'format': it names the credential and walks
+// aliases in sorted order, not map order, so two groups that both carry one
+// resolve to the earlier alias deterministically rather than whichever the
+// map happened to iterate first.
+func TestFirstCredentialCarryingFormat(t *testing.T) {
+	if name, ok := firstCredentialCarryingFormat(map[string]tokenGroup{
+		"a.rotate": {Credentials: []registryCredential{{Credential: "plain-cred"}}},
+		"b.rotate": {Credentials: []registryCredential{{Credential: "legacy-cred", Format: "raw-forgejo-token"}}},
+	}); !ok || name != "legacy-cred" {
+		t.Errorf("got (%q, %v), want (\"legacy-cred\", true)", name, ok)
+	}
+
+	if _, ok := firstCredentialCarryingFormat(map[string]tokenGroup{
+		"a.rotate": {Credentials: []registryCredential{{Credential: "plain-cred"}}},
+		"b.rotate": {Credentials: []registryCredential{{Credential: "templated-cred", Value: &credentialValue{Template: "{secret}"}}}},
+	}); ok {
+		t.Error("a registry with no 'format' anywhere was reported as carrying one")
+	}
+
+	// Both 'a.rotate' and 'z.rotate' carry a format-bearing credential;
+	// sorted alias order makes 'a.rotate' win regardless of which the map
+	// would have visited first.
+	if name, ok := firstCredentialCarryingFormat(map[string]tokenGroup{
+		"z.rotate": {Credentials: []registryCredential{{Credential: "later-cred", Format: "raw-forgejo-token"}}},
+		"a.rotate": {Credentials: []registryCredential{{Credential: "earlier-cred", Format: "credential-store-url"}}},
+	}); !ok || name != "earlier-cred" {
+		t.Errorf("got (%q, %v), want the earlier alias's credential (\"earlier-cred\", true)", name, ok)
+	}
 }

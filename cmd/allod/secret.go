@@ -109,7 +109,7 @@ an argument.
 `
 
 // init extends the 'secret' namespace secret_declare.go's init() already
-// registered, adding the four commands this build's tag opts it into. It
+// registered, adding the three commands this build's tag opts it into. It
 // appends to secretCommands rather than replacing it, and never calls
 // registerNamespace: that would panic on the duplicate word, and
 // secret_declare.go's init() is the only one allowed to call it.

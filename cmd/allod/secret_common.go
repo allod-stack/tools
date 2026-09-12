@@ -16,7 +16,7 @@ package main
 // entry, the secrets.nix recipient line, and the rotation registry group —
 // as plain text edits against the secrets checkout. It needs no identity,
 // encrypts nothing, and runs wherever agents run, which is why it carries
-// no tag while the four landing commands do.
+// no tag while the three landing commands do.
 
 import (
 	"bytes"

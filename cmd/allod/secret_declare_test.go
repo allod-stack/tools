@@ -61,9 +61,8 @@ const declareFixtureRegistry = `{
       {
         "credential": "existing-token",
         "secret_path": "secrets/existing-token.age",
-        "format": "raw-forgejo-token",
         "targets": [
-          { "system": "dev-a", "kind": "dev-vm", "deployed_path": "/root/.token", "verify": { "type": "git-ls-remote" } }
+          { "system": "dev-a", "kind": "dev-vm", "deployed_path": "/root/.token", "verify": "allod site check" }
         ]
       }
     ]
@@ -371,9 +370,8 @@ const declareExpectedRegistryOneMachine = `{
       {
         "credential": "existing-token",
         "secret_path": "secrets/existing-token.age",
-        "format": "raw-forgejo-token",
         "targets": [
-          { "system": "dev-a", "kind": "dev-vm", "deployed_path": "/root/.token", "verify": { "type": "git-ls-remote" } }
+          { "system": "dev-a", "kind": "dev-vm", "deployed_path": "/root/.token", "verify": "allod site check" }
         ]
       }
     ]
