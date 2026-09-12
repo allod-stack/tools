@@ -22,6 +22,11 @@ import (
 
 const declareFixtureFlake = "{ outputs = _: {}; }\n"
 
+// declareFixtureVerifyCommand is the one command every fixture target
+// carries unless a test means to vary it: the git-ls-remote check
+// rotate-token used to build from a probe type, written out once.
+const declareFixtureVerifyCommand = "sudo env HOME=/root GIT_TERMINAL_PROMPT=0 git ls-remote https://forge.example/allod/example.git HEAD"
+
 const declareFixtureCredentials = `let
   mk = name: { inherit name; };
 in
@@ -71,17 +76,16 @@ const declareFixtureRegistry = `{
       {
         "credential": "shadow-token",
         "secret_path": "secrets/unrelated.age",
-        "format": "raw-forgejo-token",
         "targets": [
-          { "system": "dev-a", "kind": "dev-vm", "deployed_path": "/root/.other", "verify": { "type": "git-ls-remote" } }
+          { "system": "dev-a", "kind": "dev-vm", "deployed_path": "/root/.other", "verify": "allod site check" }
         ]
       },
       {
         "credential": "unrelated-name",
         "secret_path": "secrets/collide-path-token.age",
-        "format": "raw-forgejo-token",
+        "value": { "template": "https://fixture-user:{secret}@example.test" },
         "targets": [
-          { "system": "dev-a", "kind": "dev-vm", "deployed_path": "/root/.other2", "verify": { "type": "git-ls-remote" } }
+          { "system": "dev-a", "kind": "dev-vm", "deployed_path": "/root/.other2", "verify": "allod site check" }
         ]
       }
     ]
@@ -160,6 +164,7 @@ func declareFakeNix(t *testing.T, types map[string]string, evaluatedCredentialNa
 	script := "#!/bin/sh\n" +
 		"if [ \"$1\" != eval ] || [ \"$2\" != --json ]; then echo \"fake nix: unexpected args: $*\" >&2; exit 1; fi\n" +
 		"if [ \"$3\" = 'path:.#lib.credentials' ]; then printf '%s' \"$DECLARE_TEST_CREDENTIALS_JSON\"; exit 0; fi\n" +
+		"if [ \"$3\" = 'path:.#lib.credentialEncodings' ]; then printf '%s' \"$DECLARE_TEST_ENCODINGS_JSON\"; exit 0; fi\n" +
 		"attr=${3#path:.#machines.}\n" +
 		"machine=${attr%.type}\n" +
 		"case \"$machine\" in\n" +
@@ -167,6 +172,7 @@ func declareFakeNix(t *testing.T, types map[string]string, evaluatedCredentialNa
 		"esac\n"
 	declareInstallFakeNix(t, script)
 	t.Setenv("DECLARE_TEST_CREDENTIALS_JSON", declareFakeCredentialsJSON(evaluatedCredentialNames))
+	t.Setenv("DECLARE_TEST_ENCODINGS_JSON", `["rclone-obscure"]`)
 }
 
 // declareFakeNixFailingCredentialsEval is declareFakeNix except 'nix eval
@@ -179,6 +185,7 @@ func declareFakeNixFailingCredentialsEval(t *testing.T, types map[string]string)
 	script := "#!/bin/sh\n" +
 		"if [ \"$1\" != eval ] || [ \"$2\" != --json ]; then echo \"fake nix: unexpected args: $*\" >&2; exit 1; fi\n" +
 		"if [ \"$3\" = 'path:.#lib.credentials' ]; then echo 'error: infinite recursion encountered' >&2; exit 1; fi\n" +
+		"if [ \"$3\" = 'path:.#lib.credentialEncodings' ]; then printf '%s' \"$DECLARE_TEST_ENCODINGS_JSON\"; exit 0; fi\n" +
 		"attr=${3#path:.#machines.}\n" +
 		"machine=${attr%.type}\n" +
 		"case \"$machine\" in\n" +
@@ -202,6 +209,7 @@ func declareFakeNixWithSideEffect(t *testing.T, types map[string]string, evaluat
 		"if [ \"$1\" != eval ] || [ \"$2\" != --json ]; then echo \"fake nix: unexpected args: $*\" >&2; exit 1; fi\n" +
 		"printf '%s' \"$DECLARE_TEST_SIDE_EFFECT_TEXT\" >> \"$DECLARE_TEST_SIDE_EFFECT_PATH\"\n" +
 		"if [ \"$3\" = 'path:.#lib.credentials' ]; then printf '%s' \"$DECLARE_TEST_CREDENTIALS_JSON\"; exit 0; fi\n" +
+		"if [ \"$3\" = 'path:.#lib.credentialEncodings' ]; then printf '%s' \"$DECLARE_TEST_ENCODINGS_JSON\"; exit 0; fi\n" +
 		"attr=${3#path:.#machines.}\n" +
 		"machine=${attr%.type}\n" +
 		"case \"$machine\" in\n" +
@@ -267,6 +275,21 @@ func newDeclareFixtureFiles(t *testing.T, credentials, secrets, registry string)
 func newDeclareFixture(t *testing.T) *declareFixture {
 	t.Helper()
 	return newDeclareFixtureFiles(t, declareFixtureCredentials, declareFixtureSecrets, declareFixtureRegistry)
+}
+
+// newDeclareFixtureWithEncodings is newDeclareFixture with the checkout's
+// lib.credentialEncodings answering exactly this list, so a test can pin
+// what happens when --value-encode names something the checkout does not
+// export.
+func newDeclareFixtureWithEncodings(t *testing.T, encodings []string) *declareFixture {
+	t.Helper()
+	fx := newDeclareFixture(t)
+	encoded, err := json.Marshal(encodings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DECLARE_TEST_ENCODINGS_JSON", string(encoded))
+	return fx
 }
 
 func (fx *declareFixture) run(t *testing.T, args ...string) (string, string, int) {
@@ -363,17 +386,16 @@ const declareExpectedRegistryOneMachine = `{
       {
         "credential": "shadow-token",
         "secret_path": "secrets/unrelated.age",
-        "format": "raw-forgejo-token",
         "targets": [
-          { "system": "dev-a", "kind": "dev-vm", "deployed_path": "/root/.other", "verify": { "type": "git-ls-remote" } }
+          { "system": "dev-a", "kind": "dev-vm", "deployed_path": "/root/.other", "verify": "allod site check" }
         ]
       },
       {
         "credential": "unrelated-name",
         "secret_path": "secrets/collide-path-token.age",
-        "format": "raw-forgejo-token",
+        "value": { "template": "https://fixture-user:{secret}@example.test" },
         "targets": [
-          { "system": "dev-a", "kind": "dev-vm", "deployed_path": "/root/.other2", "verify": { "type": "git-ls-remote" } }
+          { "system": "dev-a", "kind": "dev-vm", "deployed_path": "/root/.other2", "verify": "allod site check" }
         ]
       }
     ]
@@ -386,16 +408,12 @@ const declareExpectedRegistryOneMachine = `{
       {
         "credential": "new-token",
         "secret_path": "secrets/new-token.age",
-        "format": "raw-forgejo-token",
         "targets": [
           {
             "system": "dev-a",
             "kind": "dev-vm",
             "deployed_path": "/root/.token",
-            "verify": {
-              "type": "git-ls-remote",
-              "repo_url": "https://forge.example/allod/example.git"
-            }
+            "verify": "sudo env HOME=/root GIT_TERMINAL_PROMPT=0 git ls-remote https://forge.example/allod/example.git HEAD"
           }
         ]
       }
@@ -408,7 +426,7 @@ func TestSecretDeclareOneMachineServiceNone(t *testing.T) {
 	fx := newDeclareFixture(t)
 	out, errText, code := fx.run(t, "new-token",
 		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
-		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote", "--verify-repo-url", "https://forge.example/allod/example.git")
+		"--deployed-path", "/root/.token", "--verify", declareFixtureVerifyCommand)
 	if code != 0 {
 		t.Fatalf("exit %d, stderr: %s", code, errText)
 	}
@@ -482,27 +500,21 @@ const declareExpectedGroupMultiMachine = `  "multi-token": {
       {
         "credential": "multi-token",
         "secret_path": "secrets/multi-token.age",
-        "format": "credential-store-url",
+        "value": {
+          "template": "https://allod-agent:{secret}@forge.example\n"
+        },
         "targets": [
           {
             "system": "dev-a",
             "kind": "dev-vm",
             "deployed_path": "/root/.git-credentials",
-            "verify": {
-              "type": "git-ls-remote",
-              "repo_url": "https://forge.example/allod/multi.git",
-              "credential_context": "the multi-token repository"
-            }
+            "verify": "forge token verify < /root/.git-credentials"
           },
           {
             "system": "dev-b",
             "kind": "dev-vm",
             "deployed_path": "/root/.git-credentials",
-            "verify": {
-              "type": "git-ls-remote",
-              "repo_url": "https://forge.example/allod/multi.git",
-              "credential_context": "the multi-token repository"
-            }
+            "verify": "forge token verify < /root/.git-credentials"
           }
         ]
       }
@@ -511,12 +523,21 @@ const declareExpectedGroupMultiMachine = `  "multi-token": {
 }
 `
 
+// TestSecretDeclareTwoMachinesServiceForgejo also pins two things the new
+// value shape introduces: a template read from a file lands byte for byte,
+// trailing newline included, and a verify command carrying '<' is written
+// as '<' rather than as the < escape Go's default encoder would
+// produce, so the registry stays readable in review.
 func TestSecretDeclareTwoMachinesServiceForgejo(t *testing.T) {
 	fx := newDeclareFixture(t)
+	templatePath := filepath.Join(t.TempDir(), "template")
+	if err := os.WriteFile(templatePath, []byte("https://allod-agent:{secret}@forge.example\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
 	_, errText, code := fx.run(t, "multi-token",
 		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a,dev-b",
-		"--format", "credential-store-url", "--deployed-path", "/root/.git-credentials", "--verify", "git-ls-remote",
-		"--verify-repo-url", "https://forge.example/allod/multi.git", "--verify-context", "the multi-token repository",
+		"--value-template-file", templatePath,
+		"--deployed-path", "/root/.git-credentials", "--verify", "forge token verify < /root/.git-credentials",
 		"--service", "forgejo", "--account", "allod-agent", "--ui-token-name", "multi-token")
 	if code != 0 {
 		t.Fatalf("exit %d, stderr: %s", code, errText)
@@ -550,7 +571,7 @@ func TestSecretDeclareTargetingNexusReadsHypervisorType(t *testing.T) {
 	fx := newDeclareFixture(t)
 	out, errText, code := fx.run(t, "host-token",
 		"--kind", "service", "--owner", "nexus", "--to", "nexus",
-		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "site-check")
+		"--deployed-path", "/root/.token", "--verify", "allod site check")
 	if code != 0 {
 		t.Fatalf("exit %d, stderr: %s", code, errText)
 	}
@@ -586,7 +607,7 @@ func TestSecretDeclareRefusesGeneratedKinds(t *testing.T) {
 			fx := newDeclareFixture(t)
 			_, errText, code := fx.run(t, "new-token",
 				"--kind", kind, "--owner", "allod-agent", "--to", "dev-a",
-				"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "site-check")
+				"--deployed-path", "/root/.token", "--verify", "allod site check")
 			if code != 1 {
 				t.Errorf("exit code = %d, want 1", code)
 			}
@@ -609,8 +630,7 @@ func TestSecretDeclareRefusesGeneratedKinds(t *testing.T) {
 func TestSecretDeclareCollisions(t *testing.T) {
 	validArgs := []string{
 		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
-		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote",
-		"--verify-repo-url", "https://forge.example/allod/example.git",
+		"--deployed-path", "/root/.token", "--verify", declareFixtureVerifyCommand,
 	}
 	cases := []struct {
 		name string
@@ -650,7 +670,7 @@ func TestSecretDeclareSecretsLineCollisionAlone(t *testing.T) {
 	fx := newDeclareFixtureFiles(t, declareFixtureCredentials, secrets, declareFixtureRegistry)
 	_, errText, code := fx.run(t, "orphan",
 		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
-		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote", "--verify-repo-url", "https://forge.example/allod/example.git")
+		"--deployed-path", "/root/.token", "--verify", declareFixtureVerifyCommand)
 	if code == 0 {
 		t.Fatal("exit 0, want a refusal")
 	}
@@ -671,7 +691,7 @@ func TestSecretDeclareCredentialsCollisionAcrossLines(t *testing.T) {
 	fx := newDeclareFixtureFiles(t, credentials, declareFixtureSecrets, declareFixtureRegistry)
 	_, errText, code := fx.run(t, "existing-token",
 		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
-		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote", "--verify-repo-url", "https://forge.example/allod/example.git")
+		"--deployed-path", "/root/.token", "--verify", declareFixtureVerifyCommand)
 	if code == 0 {
 		t.Fatal("exit 0, want a refusal")
 	}
@@ -692,7 +712,7 @@ func TestSecretDeclareSecretsLineCollisionAcrossLines(t *testing.T) {
 	fx := newDeclareFixtureFiles(t, declareFixtureCredentials, secrets, declareFixtureRegistry)
 	_, errText, code := fx.run(t, "orphan",
 		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
-		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote", "--verify-repo-url", "https://forge.example/allod/example.git")
+		"--deployed-path", "/root/.token", "--verify", declareFixtureVerifyCommand)
 	if code == 0 {
 		t.Fatal("exit 0, want a refusal")
 	}
@@ -713,7 +733,7 @@ func TestSecretDeclareCredentialsCollisionAcrossAComment(t *testing.T) {
 	fx := newDeclareFixtureFiles(t, credentials, declareFixtureSecrets, declareFixtureRegistry)
 	_, errText, code := fx.run(t, "existing-token",
 		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
-		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote", "--verify-repo-url", "https://forge.example/allod/example.git")
+		"--deployed-path", "/root/.token", "--verify", declareFixtureVerifyCommand)
 	if code == 0 {
 		t.Fatal("exit 0, want a refusal")
 	}
@@ -731,7 +751,7 @@ func TestSecretDeclareSecretsLineCollisionAcrossAComment(t *testing.T) {
 	fx := newDeclareFixtureFiles(t, declareFixtureCredentials, secrets, declareFixtureRegistry)
 	_, errText, code := fx.run(t, "orphan",
 		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
-		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote", "--verify-repo-url", "https://forge.example/allod/example.git")
+		"--deployed-path", "/root/.token", "--verify", declareFixtureVerifyCommand)
 	if code == 0 {
 		t.Fatal("exit 0, want a refusal")
 	}
@@ -755,7 +775,7 @@ func TestSecretDeclareRefusesWhenOnlyTheEvaluatedInventoryKnowsTheName(t *testin
 		[]string{"existing-token", "generated-only-token"})
 	_, errText, code := fx.run(t, "generated-only-token",
 		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
-		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote", "--verify-repo-url", "https://forge.example/allod/example.git")
+		"--deployed-path", "/root/.token", "--verify", declareFixtureVerifyCommand)
 	if code == 0 {
 		t.Fatal("exit 0, want a refusal")
 	}
@@ -777,7 +797,7 @@ func TestSecretDeclareRefusesWhenCredentialsEvalFails(t *testing.T) {
 	declareFakeNixFailingCredentialsEval(t, map[string]string{"dev-a": "dev"})
 	_, errText, code := fx.run(t, "new-token",
 		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
-		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote", "--verify-repo-url", "https://forge.example/allod/example.git")
+		"--deployed-path", "/root/.token", "--verify", declareFixtureVerifyCommand)
 	if code == 0 {
 		t.Fatal("exit 0, want a refusal")
 	}
@@ -795,8 +815,7 @@ func TestSecretDeclareRefusesWhenCredentialsEvalFails(t *testing.T) {
 func TestSecretDeclareFlagErrors(t *testing.T) {
 	base := map[string]string{
 		"--kind": "agent", "--owner": "allod-agent", "--to": "dev-a",
-		"--format": "raw-forgejo-token", "--deployed-path": "/root/.token", "--verify": "git-ls-remote",
-		"--verify-repo-url": "https://forge.example/allod/example.git",
+		"--deployed-path": "/root/.token", "--verify": declareFixtureVerifyCommand,
 	}
 	buildArgs := func(overrides map[string]string, omit string) []string {
 		args := []string{"new-token"}
@@ -820,21 +839,12 @@ func TestSecretDeclareFlagErrors(t *testing.T) {
 		{"missing --kind", buildArgs(nil, "--kind"), "--kind is required"},
 		{"missing --owner", buildArgs(nil, "--owner"), "--owner is required"},
 		{"missing --to", buildArgs(nil, "--to"), "--to is required"},
-		{"missing --format", buildArgs(nil, "--format"), "--format is required"},
 		{"missing --deployed-path", buildArgs(nil, "--deployed-path"), "--deployed-path is required"},
 		{"missing --verify", buildArgs(nil, "--verify"), "--verify is required"},
-		{"missing --verify-repo-url", buildArgs(nil, "--verify-repo-url"), "--verify git-ls-remote requires --verify-repo-url"},
-		{"verify-repo-url misuse", buildArgs(map[string]string{"--verify": "site-check"}, ""), "--verify-repo-url and --verify-context apply only to --verify git-ls-remote"},
-		{"verify-user misuse", buildArgs(map[string]string{"--verify-user": "root"}, ""), "--verify-user applies only to --verify forge-token-verify"},
-		{
-			"forge-token-verify needs verify-user",
-			[]string{"new-token", "--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
-				"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "forge-token-verify"},
-			"--verify forge-token-verify requires --verify-user",
-		},
+		{"blank --verify", buildArgs(map[string]string{"--verify": "   "}, ""), "--verify must be one non-empty command line"},
+		{"multi-line --verify", buildArgs(map[string]string{"--verify": "allod site check\nrm -rf /"}, ""), "--verify must be one non-empty command line"},
+		{"--value-encode without a template", buildArgs(map[string]string{"--value-encode": "rclone-obscure"}, ""), "--value-encode requires a value template"},
 		{"invalid --kind", buildArgs(map[string]string{"--kind": "bogus"}, ""), "invalid --kind \"bogus\""},
-		{"invalid --format", buildArgs(map[string]string{"--format": "bogus"}, ""), "invalid --format \"bogus\""},
-		{"invalid --verify", buildArgs(map[string]string{"--verify": "bogus"}, ""), "invalid --verify \"bogus\""},
 		{"invalid --service", buildArgs(map[string]string{"--service": "bogus"}, ""), "invalid --service \"bogus\""},
 		{"invalid --strategy", buildArgs(map[string]string{"--strategy": "bogus"}, ""), "invalid --strategy \"bogus\""},
 		{"forgejo needs account", buildArgs(map[string]string{"--service": "forgejo", "--ui-token-name": "x"}, ""), "--service forgejo requires --account and --ui-token-name"},
@@ -886,13 +896,13 @@ func TestSecretDeclareRequiresAName(t *testing.T) {
 // the secrets.nix recipient line); --kind, --account, and --ui-token-name
 // are held to the same identifier pattern, and --deployed-path to its own
 // absolute-path shape, for the same reason even though they reach only
-// JSON today. --verify-repo-url needs a host as well as the scheme,
-// because rotate-token prints it into 'git ls-remote <repo-url> HEAD'.
+// JSON today. --verify is not held to a shape beyond being one non-empty
+// line: it is printed for a human to run, never interpolated into one of
+// this command's own templates.
 func TestSecretDeclareRefusesInjectionThroughStringFlags(t *testing.T) {
 	base := map[string]string{
 		"--kind": "agent", "--owner": "allod-agent", "--to": "dev-a",
-		"--format": "raw-forgejo-token", "--deployed-path": "/root/.token", "--verify": "git-ls-remote",
-		"--verify-repo-url": "https://forge.example/allod/example.git",
+		"--deployed-path": "/root/.token", "--verify": declareFixtureVerifyCommand,
 	}
 	buildArgs := func(overrides map[string]string) []string {
 		args := []string{"new-token"}
@@ -965,41 +975,149 @@ func TestSecretDeclareRefusesInjectionThroughStringFlags(t *testing.T) {
 			buildArgs(map[string]string{"--to": "dev-a dev-b"}),
 			"invalid --to",
 		},
-		{
-			"verify-repo-url is not https",
-			buildArgs(map[string]string{"--verify-repo-url": "http://forge.example/allod/example.git"}),
-			"invalid --verify-repo-url",
-		},
-		{
-			"verify-repo-url has no host",
-			buildArgs(map[string]string{"--verify-repo-url": "https://"}),
-			"invalid --verify-repo-url",
-		},
-		{
-			"verify-repo-url host starts with a slash",
-			buildArgs(map[string]string{"--verify-repo-url": "https:///allod/example.git"}),
-			"invalid --verify-repo-url",
-		},
-		{
-			"verify-repo-url host starts with a query",
-			buildArgs(map[string]string{"--verify-repo-url": "https://?query"}),
-			"invalid --verify-repo-url",
-		},
-		{
-			"verify-repo-url carries a dollar sign",
-			buildArgs(map[string]string{"--verify-repo-url": "https://forge.example/$USER/example.git"}),
-			"invalid --verify-repo-url",
-		},
-		{
-			"verify-context carries a control character",
-			buildArgs(map[string]string{"--verify-context": "the example\trepository"}),
-			"invalid --verify-context",
-		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fx := newDeclareFixture(t)
 			_, errText, code := fx.run(t, tc.args...)
+			if code != 1 {
+				t.Errorf("exit code = %d, want 1", code)
+			}
+			if !strings.Contains(errText, tc.want) {
+				t.Errorf("stderr lacks %q\ngot: %q", tc.want, errText)
+			}
+			fx.assertUntouched(t, declareFixtureCredentials, declareFixtureSecrets, declareFixtureRegistry)
+		})
+	}
+}
+
+// --- The declared value ---
+
+// TestSecretDeclareWritesTheValueTemplateShape pins the exact JSON declare
+// writes for each way a value can be given: absent (the secret is the whole
+// plaintext), from a file, from stdin with a trailing newline that must
+// survive, and with an encoding. The registry text is compared literally,
+// because this command's whole job is producing exact file text.
+func TestSecretDeclareWritesTheValueTemplateShape(t *testing.T) {
+	cases := []struct {
+		name  string
+		extra []string
+		stdin string
+		want  string
+	}{
+		{
+			name: "no template",
+			want: `        "credential": "new-token",
+        "secret_path": "secrets/new-token.age",
+        "targets": [`,
+		},
+		{
+			name:  "template from stdin keeps its trailing newline",
+			extra: []string{"--value-template-stdin"},
+			stdin: "https://fixture-user:{secret}@example.test\n",
+			want: `        "value": {
+          "template": "https://fixture-user:{secret}@example.test\n"
+        },`,
+		},
+		{
+			name:  "template from stdin without a trailing newline",
+			extra: []string{"--value-template-stdin"},
+			stdin: "https://fixture-user:{secret}@example.test",
+			want: `        "value": {
+          "template": "https://fixture-user:{secret}@example.test"
+        },`,
+		},
+		{
+			name:  "template with an encoding",
+			extra: []string{"--value-template-stdin", "--value-encode", "rclone-obscure"},
+			stdin: "[shared]\npass = {secret}\n",
+			want: `        "value": {
+          "template": "[shared]\npass = {secret}\n",
+          "encode": "rclone-obscure"
+        },`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newDeclareFixtureWithEncodings(t, []string{"rclone-obscure"})
+			previousStdin := stdin
+			defer func() { stdin = previousStdin }()
+			stdin = strings.NewReader(tc.stdin)
+
+			args := append([]string{"new-token",
+				"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
+				"--deployed-path", "/root/.token", "--verify", declareFixtureVerifyCommand}, tc.extra...)
+			out, errText, code := fx.run(t, args...)
+			if code != 0 {
+				t.Fatalf("exit %d, stderr: %s", code, errText)
+			}
+			if want := "credentials.nix\nsecrets.nix\nforgejo-token-groups.json\n"; out != want {
+				t.Errorf("stdout = %q, want %q", out, want)
+			}
+			registry := fx.file(t, "forgejo-token-groups.json")
+			if !strings.Contains(registry, tc.want) {
+				t.Errorf("forgejo-token-groups.json lacks\n%s\ngot\n%s", tc.want, registry)
+			}
+			if !json.Valid([]byte(registry)) {
+				t.Error("the written registry is not valid JSON")
+			}
+		})
+	}
+}
+
+func TestSecretDeclareValueTemplateRefusals(t *testing.T) {
+	cases := []struct {
+		name      string
+		extra     []string
+		stdin     string
+		encodings []string
+		want      string
+	}{
+		{
+			name:  "both template sources",
+			extra: []string{"--value-template-stdin", "--value-template-file", "/dev/null"},
+			want:  "--value-template-file and --value-template-stdin are mutually exclusive",
+		},
+		{
+			name:  "no placeholder",
+			extra: []string{"--value-template-stdin"},
+			stdin: "https://fixture-user:token@example.test",
+			want:  "value template must contain exactly one {secret} placeholder",
+		},
+		{
+			name:  "two placeholders",
+			extra: []string{"--value-template-stdin"},
+			stdin: "{secret}:{secret}",
+			want:  "value template must contain exactly one {secret} placeholder",
+		},
+		{
+			name:      "unknown encoder",
+			extra:     []string{"--value-template-stdin", "--value-encode", "rot13"},
+			stdin:     "{secret}",
+			encodings: []string{"rclone-obscure"},
+			want:      `--value-encode "rot13" is not exported by lib.credentialEncodings`,
+		},
+		{
+			name:  "encoder without a template",
+			extra: []string{"--value-encode", "rclone-obscure"},
+			want:  "--value-encode requires a value template",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			encodings := tc.encodings
+			if encodings == nil {
+				encodings = []string{"rclone-obscure"}
+			}
+			fx := newDeclareFixtureWithEncodings(t, encodings)
+			previousStdin := stdin
+			defer func() { stdin = previousStdin }()
+			stdin = strings.NewReader(tc.stdin)
+
+			args := append([]string{"new-token",
+				"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
+				"--deployed-path", "/root/.token", "--verify", declareFixtureVerifyCommand}, tc.extra...)
+			_, errText, code := fx.run(t, args...)
 			if code != 1 {
 				t.Errorf("exit code = %d, want 1", code)
 			}
@@ -1017,7 +1135,7 @@ func TestSecretDeclareRefusesUnknownMachine(t *testing.T) {
 	fx := newDeclareFixture(t)
 	_, errText, code := fx.run(t, "new-token",
 		"--kind", "agent", "--owner", "allod-agent", "--to", "ghost-vm",
-		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote", "--verify-repo-url", "https://forge.example/allod/example.git")
+		"--deployed-path", "/root/.token", "--verify", declareFixtureVerifyCommand)
 	if code == 0 {
 		t.Fatal("exit 0, want a refusal")
 	}
@@ -1038,7 +1156,7 @@ func TestSecretDeclareRefusesUnexpectedMachineType(t *testing.T) {
 	declareFakeNix(t, map[string]string{"dev-a": "dev", "weird-vm": "laptop"}, declareFixtureEvaluatedCredentialNames)
 	_, errText, code := fx.run(t, "new-token",
 		"--kind", "agent", "--owner", "allod-agent", "--to", "weird-vm",
-		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote", "--verify-repo-url", "https://forge.example/allod/example.git")
+		"--deployed-path", "/root/.token", "--verify", declareFixtureVerifyCommand)
 	if code == 0 {
 		t.Fatal("exit 0, want a refusal")
 	}
@@ -1074,7 +1192,7 @@ func TestDeclareInsertRegistryGroupReparseGuard(t *testing.T) {
 	group := declareGroup{
 		Service: "none", RegistryAlias: "new-token", RotationStrategy: "overlap",
 		Credentials: []declareCredentialEntry{{
-			Credential: "new-token", SecretPath: "secrets/new-token.age", Format: "raw-forgejo-token",
+			Credential: "new-token", SecretPath: "secrets/new-token.age",
 		}},
 	}
 	got, err := declareInsertRegistryGroup(declareSabotageRegistry, "new-token", group)
@@ -1096,7 +1214,7 @@ func TestSecretDeclareRefusesWhenRegistryDoesNotParse(t *testing.T) {
 	fx := newDeclareFixtureFiles(t, declareFixtureCredentials, declareFixtureSecrets, declareSabotageRegistry)
 	_, errText, code := fx.run(t, "new-token",
 		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
-		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote", "--verify-repo-url", "https://forge.example/allod/example.git")
+		"--deployed-path", "/root/.token", "--verify", declareFixtureVerifyCommand)
 	if code == 0 {
 		t.Fatal("exit 0, want a refusal")
 	}
@@ -1112,7 +1230,7 @@ func TestSecretDeclareRefusesWhenCredentialsWouldNotBalance(t *testing.T) {
 	fx := newDeclareFixtureFiles(t, declareSabotageCredentials, declareFixtureSecrets, declareFixtureRegistry)
 	_, errText, code := fx.run(t, "new-token",
 		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
-		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote", "--verify-repo-url", "https://forge.example/allod/example.git")
+		"--deployed-path", "/root/.token", "--verify", declareFixtureVerifyCommand)
 	if code == 0 {
 		t.Fatal("exit 0, want a refusal")
 	}
@@ -1189,7 +1307,7 @@ func TestSecretDeclareRefusesAndRestoresWhenAFileChangesUnderneath(t *testing.T)
 
 	_, errText, code := fx.run(t, "new-token",
 		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
-		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote", "--verify-repo-url", "https://forge.example/allod/example.git")
+		"--deployed-path", "/root/.token", "--verify", declareFixtureVerifyCommand)
 	if code == 0 {
 		t.Fatal("exit 0, want a refusal")
 	}
@@ -1231,7 +1349,7 @@ func TestSecretDeclareRefusesALeadingDigitName(t *testing.T) {
 	fx := newDeclareFixture(t)
 	_, errText, code := fx.run(t, "1token",
 		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
-		"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote", "--verify-repo-url", "https://forge.example/allod/example.git")
+		"--deployed-path", "/root/.token", "--verify", declareFixtureVerifyCommand)
 	if code != 1 {
 		t.Errorf("exit code = %d, want 1", code)
 	}
@@ -1255,7 +1373,7 @@ func TestSecretDeclareRefusesNixKeywordNames(t *testing.T) {
 			fx := newDeclareFixture(t)
 			_, errText, code := fx.run(t, keyword,
 				"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
-				"--format", "raw-forgejo-token", "--deployed-path", "/root/.token", "--verify", "git-ls-remote", "--verify-repo-url", "https://forge.example/allod/example.git")
+				"--deployed-path", "/root/.token", "--verify", declareFixtureVerifyCommand)
 			if code != 1 {
 				t.Errorf("exit code = %d, want 1", code)
 			}

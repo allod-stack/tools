@@ -6,70 +6,77 @@ package main
 // landing 'create' and 'rekey' do, applied to the third case — a value that
 // already has a ciphertext and whose recipients are not changing. It ports
 // the group-rotation half of nexus's rotate-token (about 1450 lines of
-// bash): group resolution, the three plaintext formats, dry run, and the
-// printed deploy/verify/revocation steps. Out of the port: rotate-token's
+// bash): group resolution, dry run, and the printed deploy, verify, and
+// revocation steps. Out of the port: rotate-token's
 // --group/--forgejo-token/--allow-single-secret selectors (a credential name
 // is the only selector here, and it always names its whole registry group,
 // the way '--group' rotates a shared token today), and refresh-local-auth
 // (it installs root-owned files under sudo, a privilege this command does
 // not hold; see printDeploySteps).
 //
+// What this does not port is rotate-token's per-format switch. A
+// credential's non-secret text is declared in the registry as a template
+// around one '{secret}' placeholder, so rotation renders that template
+// around the new secret and never decrypts the old one: the parsers that
+// lifted a user and a host out of the old ciphertext are gone, and with
+// them the only reason this command ever had to read an existing value.
+// 'allod secret migrate' does that lift exactly once per legacy container,
+// and a legacy entry is refused here by name.
+//
 // The unit of rotation is the registry group: every credential the group
 // lists is re-encrypted from the one value read on stdin, exactly as
 // rotate-token's '--group' rotates a shared Forgejo token from one prompt.
-// A structured format decrypts its old ciphertext first and carries the
-// non-secret fields forward, the same way rotate-token's prepare_item does;
-// everything stays in memory until every ciphertext is staged, then one
+// Everything stays in memory until every ciphertext is staged, then one
 // nix flake check gates one commit and push, exactly like 'create' and
 // 'rekey' land. No rotation_state change: every entry stays "active".
 //
 // A dry run reads and decrypts nothing: it runs every gate this command
 // applies to the group (branch, clean tree, active state, ciphertext
-// present, recipients, registry shape, uniform format) but not the
-// repository's own nix flake check, which only a real landing runs.
+// present, recipients, registry shape, declared value, declared
+// verification) but not the repository's own nix flake check, which only a
+// real landing runs.
 
 import (
-	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
-	"unicode"
 )
 
 const secretRotateDetail = `'rotate' replaces a value: the rotation registry group that lists <name>
 among its credentials is the whole unit, so every credential in that group
 is re-encrypted from the one value read on stdin, the way 'rotate-token
 --group' rotates a shared Forgejo token today. Every credential in the
-group must already be active with a ciphertext on disk. A structured
-format (credential-store-url, rclone-remote-stanza) decrypts the old
-ciphertext first and carries its non-secret fields forward; a group mixing
-formats that cannot share one prompted value is refused. A structured
-value may not contain whitespace, a control character, or (for
-credential-store-url) '@', '/', ':', '?', '#', or '%' — git
-percent-decodes a credential-store URL's password, so an unrefused '%'
-would let the stored value differ from the one that was typed.
+group must already be active with a ciphertext on disk.
+
+Each credential's plaintext is its declared value.template with the new
+secret substituted at the sole '{secret}' placeholder, or the secret
+verbatim when the credential declares no value; 'value.encode' names an
+encoding applied to the secret alone before substitution. Nothing else in
+the template changes, and no existing ciphertext is decrypted. The value is
+read from stdin verbatim, so a trailing newline is part of the secret — use
+printf '%s' "$value" | allod secret rotate <name> when it should not be. A
+credential still carrying a legacy 'format' is refused, naming 'allod
+secret migrate <name>'; so is a group that has one among its other members.
 
 '--dry-run' runs every gate this command applies to the group — branch,
 clean tree, active state, ciphertext present, recipients, registry shape,
-unique group membership, uniform format — but not the repository's own
-checks, which run only on a real landing; it prints the group, its
-targets, the deploy and verification steps, and the revocation gate,
-describing what a live run would do rather than instructing it, and reads
-no value, decrypts nothing, and writes nothing. rotation_state does not
-change. A group with a local_auth_refresh entry gets one more printed
+unique group membership, declared value and verification — but not the
+repository's own checks, which run only on a real landing; it prints the
+group, its targets, the deploy and verification steps, and the revocation
+gate, describing what a live run would do rather than instructing it, and
+reads no value, decrypts nothing, and writes nothing. rotation_state does
+not change. A group with a local_auth_refresh entry gets one more printed
 step naming 'rotate-token refresh-local-auth --group <alias>' — an
-instruction on a live run, phrased as what a live run would print on a
-dry run — because that part of rotate-token stays a separate host
-script: it installs root-owned files under sudo, a privilege this
-command does not hold. The branch is re-verified immediately before
-writing and again immediately before committing, refusing (with every
-ciphertext already written restored) if the checkout moved in between.
+instruction on a live run, phrased as what a live run would print on a dry
+run — because that part of rotate-token stays a separate host script: it
+installs root-owned files under sudo, a privilege this command does not
+hold. The branch is re-verified immediately before writing and again
+immediately before committing, refusing (with every ciphertext already
+written restored) if the checkout moved in between.
 
 'rotate' works on the secrets checkout, found through the repository
 registry under ~/work unless <checkout> names a worktree, and on whatever
@@ -80,6 +87,11 @@ The identity is $AGE_IDENTITY, or ~/.ssh/host; its .pub must be among the
 recipients. The plaintext is never written to disk, printed, or passed as
 an argument.
 `
+
+// secretHostName is the seam printVerification compares a target's system
+// against: a target on this machine prints its command bare, every other
+// one prints it behind 'ssh'.
+var secretHostName = os.Hostname
 
 // --- Argument parsing ---
 
@@ -176,15 +188,46 @@ func verifyGroupMembersUnique(group tokenGroup, groups map[string]tokenGroup) {
 var (
 	validRegistryService    = map[string]bool{"forgejo": true, "none": true}
 	validRotationStrategy   = map[string]bool{"overlap": true, "in-place": true}
-	validCredentialFormat   = map[string]bool{"raw-forgejo-token": true, "credential-store-url": true, "rclone-remote-stanza": true}
 	validRegistryTargetKind = map[string]bool{"nixos-host": true, "dev-vm": true, "privacy-vm": true, "service-vm": true}
-	validRegistryVerifyType = map[string]bool{"forge-token-verify": true, "git-ls-remote": true, "site-check": true}
 )
 
+// credentialStoreURLTemplate is the one template shape the local auth
+// refresh contract can consume: a single netrc-consumable
+// 'https://<user>:{secret}@<host>' line. It mirrors the archetypes check's
+// own predicate character for character rather than applying a separate URL
+// grammar, so a source credential this command accepts is one that check
+// accepts too.
+var credentialStoreURLTemplate = regexp.MustCompile(`^https://[^:[:space:]][^:[:space:]]*:\{secret\}@[^/[:space:]][^/[:space:]]*$`)
+
+// isCredentialStoreURLSource reports whether a credential can be a
+// local_auth_refresh source: legacy credential-store-url, or a new-shape
+// template that renders exactly one credential-store line. Blank lines are
+// dropped first, matching the runtime netrc parser.
+func isCredentialStoreURLSource(credential registryCredential) bool {
+	if credential.Format == "credential-store-url" {
+		return true
+	}
+	if credential.Value == nil || credential.Value.Encode != "" {
+		return false
+	}
+	template := credential.Value.Template
+	if strings.Count(template, credentialSecretPlaceholder) != 1 {
+		return false
+	}
+	var nonEmpty []string
+	for _, line := range strings.Split(template, "\n") {
+		if strings.TrimSpace(line) != "" {
+			nonEmpty = append(nonEmpty, line)
+		}
+	}
+	return len(nonEmpty) == 1 && credentialStoreURLTemplate.MatchString(nonEmpty[0])
+}
+
 // validateGroupMetadata checks the registry shape rotate-token's
-// validate_group_metadata checks, so a group missing a field this command
-// needs is refused with what is wrong rather than a blank line in the
-// printed steps or a decrypt attempt against the wrong target.
+// validate_group_metadata checks, minus the two vocabularies this contract
+// retired: a credential's format and a target's verify type. A group
+// missing a field this command needs is refused with what is wrong rather
+// than a blank line in the printed steps.
 func validateGroupMetadata(alias string, group tokenGroup) {
 	fail := func(reason string) {
 		die(1, "rotation registry group '%s' has unsupported metadata: %s", alias, reason)
@@ -208,9 +251,6 @@ func validateGroupMetadata(alias string, group tokenGroup) {
 		if credential.Credential == "" || credential.SecretPath == "" {
 			fail("a credential entry is missing its credential name or secret_path")
 		}
-		if !validCredentialFormat[credential.Format] {
-			fail(fmt.Sprintf("credential '%s' has unsupported format '%s'", credential.Credential, credential.Format))
-		}
 		if len(credential.Targets) == 0 {
 			fail(fmt.Sprintf("credential '%s' has no targets", credential.Credential))
 		}
@@ -220,9 +260,6 @@ func validateGroupMetadata(alias string, group tokenGroup) {
 			}
 			if !validRegistryTargetKind[target.Kind] {
 				fail(fmt.Sprintf("a target of credential '%s' has unsupported kind '%s'", credential.Credential, target.Kind))
-			}
-			if !validRegistryVerifyType[target.Verify.Type] {
-				fail(fmt.Sprintf("a target of credential '%s' has unsupported verify type '%s'", credential.Credential, target.Verify.Type))
 			}
 		}
 	}
@@ -235,7 +272,7 @@ func validateGroupMetadata(alias string, group tokenGroup) {
 		}
 		matches := 0
 		for _, credential := range group.Credentials {
-			if credential.Credential != refresh.SourceCredential || credential.Format != "credential-store-url" {
+			if credential.Credential != refresh.SourceCredential || !isCredentialStoreURLSource(credential) {
 				continue
 			}
 			for _, target := range credential.Targets {
@@ -245,28 +282,36 @@ func validateGroupMetadata(alias string, group tokenGroup) {
 			}
 		}
 		if matches != 1 {
-			fail(fmt.Sprintf("local_auth_refresh source_credential '%s' does not name exactly one credential-store-url target at %s:/root/.git-credentials", refresh.SourceCredential, refresh.System))
+			fail(fmt.Sprintf("local_auth_refresh source_credential '%s' does not name exactly one credential-store URL target at %s:/root/.git-credentials", refresh.SourceCredential, refresh.System))
 		}
 	}
 }
 
-// assertUniformPromptedFormat refuses a group whose formats cannot share one
-// prompted value: rclone-remote-stanza treats the prompted value as a
-// password to obscure, every other format treats it as a token to store or
-// splice into a URL, and feeding one prompted value to both meanings would
-// silently obscure a token or store a password verbatim. Ported from
-// rotate-token's assert_uniform_prompted_format.
-func assertUniformPromptedFormat(alias string, credentials []registryCredential) {
-	hasStanza, hasOther := false, false
+// assertUniformGroupEncoding refuses a group whose credentials disagree on
+// 'value.encode'. One prompted value feeds the whole group, and an encoding
+// changes what that one value means — a password to obscure rather than a
+// token to store — so a mixed group would silently obscure a token or store
+// a password unobscured. The secrets flake's own credential-registry check
+// refuses the same shape; this is that rule applied before any write.
+func assertUniformGroupEncoding(alias string, credentials []registryCredential) {
+	var encodings []string
 	for _, credential := range credentials {
-		if credential.Format == "rclone-remote-stanza" {
-			hasStanza = true
-		} else {
-			hasOther = true
+		encoding := credentialEncoding(credential)
+		if !stringInList(encoding, encodings) {
+			encodings = append(encodings, encoding)
 		}
 	}
-	if hasStanza && hasOther {
-		die(1, "rotation registry group '%s' mixes rclone-remote-stanza with a token format; one prompted value cannot rotate both a password and a token", alias)
+	if len(encodings) > 1 {
+		named := make([]string, 0, len(encodings))
+		for _, encoding := range encodings {
+			if encoding == "" {
+				named = append(named, "none")
+				continue
+			}
+			named = append(named, encoding)
+		}
+		sort.Strings(named)
+		die(1, "rotation registry group '%s' mixes value encodings (%s); one prompted value cannot rotate credentials that encode it differently", alias, strings.Join(named, ", "))
 	}
 }
 
@@ -277,199 +322,16 @@ func groupCommitSubject(alias string, group tokenGroup) string {
 	return fmt.Sprintf("rotate %s", alias)
 }
 
-// --- The value, per format ---
-
-// credentialStoreURLPattern matches exactly what rotate-token's
-// parse_credential_store_plaintext accepts: one https://user:token@host line.
-var credentialStoreURLPattern = regexp.MustCompile(`^https://([^:\s][^:\s]*):([^@\s][^@\s]*)@([^/\s][^/\s]*)$`)
-
-// parseCredentialStorePlaintext ports rotate-token's
-// parse_credential_store_plaintext: the decrypted secret must be exactly one
-// non-empty line shaped https://<user>:<token>@<host>. Only user and host
-// are returned; the old token is discarded unread.
-func parseCredentialStorePlaintext(plaintext []byte, path string) (user, host string, err error) {
-	var first string
-	nonEmpty := 0
-	for _, line := range strings.Split(string(plaintext), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		nonEmpty++
-		if nonEmpty == 1 {
-			first = line
-		}
-	}
-	if nonEmpty != 1 {
-		return "", "", fmt.Errorf("credential-store secret '%s' must contain exactly one non-empty line", path)
-	}
-	match := credentialStoreURLPattern.FindStringSubmatch(first)
-	if match == nil {
-		return "", "", fmt.Errorf("credential-store secret '%s' is not a supported https://user:token@host URL", path)
-	}
-	return match[1], match[3], nil
-}
-
-// rcloneStanzaPattern matches the exact stanza remoteStanza (site_config.go,
-// behind the 'site' tag) writes: one '[shared]' section with type, host,
-// user, pass, and explicit_tls, in that order, nothing else. Ported from
-// rotate-token's parse_rclone_remote_stanza. secret_rotate.go cannot import
-// remoteStanza across build tags (a -tags secret build carries no 'site'
-// code), so this file ports the small builder below instead of sharing it;
-// both are one line, and 'shared' is site_config.go's siteRemoteName.
-var rcloneStanzaPattern = regexp.MustCompile(`^\[shared\]\ntype = ftp\nhost = ([^[:cntrl:]]+)\nuser = ([^[:cntrl:]]+)\npass = [^[:cntrl:]]+\nexplicit_tls = true$`)
-
-// parseRcloneRemoteStanza returns the host and user a decrypted stanza
-// carries forward; the old obscured password is discarded unread. Trailing
-// newlines are trimmed first, matching what rotate-token's
-// existing=$(age -d ...) leaves after bash's command substitution strips
-// them.
-func parseRcloneRemoteStanza(plaintext []byte, path string) (host, user string, err error) {
-	trimmed := strings.TrimRight(string(plaintext), "\n")
-	match := rcloneStanzaPattern.FindStringSubmatch(trimmed)
-	if match == nil {
-		return "", "", fmt.Errorf("rclone-remote-stanza secret '%s' is not exactly one [shared] section with type, host, user, pass, and explicit_tls", path)
-	}
-	return match[1], match[2], nil
-}
-
-// buildRcloneRemoteStanza renders the stanza in the exact byte shape
-// remoteStanza (site_config.go) writes, so the ciphertext rclone reads is
-// unchanged by anything but pass. Ported rather than shared; see
-// rcloneStanzaPattern's comment.
-func buildRcloneRemoteStanza(host, user, obscured string) string {
-	return fmt.Sprintf("[shared]\ntype = ftp\nhost = %s\nuser = %s\npass = %s\nexplicit_tls = true\n", host, user, obscured)
-}
-
-var base64URLToken = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
-
-// obscureRclonePassword runs 'rclone obscure -' with the password on stdin,
-// never on argv: arguments are world-readable in /proc/<pid>/cmdline for as
-// long as the process lives. The obscured form is reversible by anyone with
-// rclone, so it is exactly as sensitive as the password and is never printed
-// or logged, same as the password itself. This is a real subprocess, not a
-// test seam, the way landCommit's git is: a test fakes 'rclone' on PATH.
-// secretRotate checks 'rclone' is on PATH before it ever reads the value
-// (see requireRcloneOnPath); the exec.ErrNotFound branch here is a second,
-// harmless line of defense against a PATH that changed in between.
-func obscureRclonePassword(password string) (string, error) {
-	var out, errOut bytes.Buffer
-	cmd := exec.Command("rclone", "obscure", "-")
-	cmd.Stdin = strings.NewReader(password)
-	cmd.Stdout = &out
-	cmd.Stderr = &errOut
-	if err := cmd.Run(); err != nil {
-		if errors.Is(err, exec.ErrNotFound) {
-			return "", errors.New("rclone not found on PATH; the rclone-remote-stanza format needs it to obscure the new password")
-		}
-		return "", fmt.Errorf("failed to obscure the new password: %s", strings.TrimSpace(errOut.String()))
-	}
-	obscured := strings.TrimRight(out.String(), "\r\n")
-	if !base64URLToken.MatchString(obscured) {
-		return "", errors.New("'rclone obscure -' printed something other than one base64url token")
-	}
-	return obscured, nil
-}
-
-// requireRcloneOnPath is checked before the value is ever read from stdin,
-// not after: asking the operator to paste a password only to refuse it for
-// a missing binary wastes the paste and, worse, leaves it sitting in shell
-// history or a terminal scrollback for no reason.
-func requireRcloneOnPath() {
-	if _, err := exec.LookPath("rclone"); err != nil {
-		die(1, "rclone not found on PATH; the rclone-remote-stanza format needs it to obscure the new password")
-	}
-}
-
-// trimOnePromptedLine strips one trailing line ending, the way rotate-token's
-// 'read -r' always does. The structured formats splice the prompted value
-// into one line of a URL or feed it to 'rclone obscure -' as a password, so
-// a trailing newline left over from an ordinary 'echo token | ...' pipe
-// would otherwise land inside the credential. raw-forgejo-token keeps the
-// verbatim value instead (see secretRotate), matching create's documented
-// "trailing newline included" contract.
-func trimOnePromptedLine(value []byte) []byte {
-	text := strings.TrimSuffix(string(value), "\n")
-	text = strings.TrimSuffix(text, "\r")
-	return []byte(text)
-}
-
-// validateStructuredValue refuses a prompted value that could corrupt a
-// structured format once trimOnePromptedLine has removed the one line
-// ending an ordinary pipe leaves. rclone-remote-stanza treats the value as
-// a password fed to 'rclone obscure -'; credential-store-url splices it
-// directly into a URL. Either way, an embedded control character or any
-// other whitespace (a second line, a tab, a stray space) does not belong in
-// one token, and credential-store-url additionally cannot tolerate a
-// character its own URL syntax reserves — without this check, a value with
-// an embedded newline or an '@' would silently produce a malformed URL that
-// still gets encrypted, checked, committed, and pushed. '%' is refused for
-// the same reason even though it is not a URL delimiter itself: git
-// percent-decodes a credential-store URL's password, so a value containing
-// 'tok%40x' would be stored verbatim but later supplied to git as 'tok@x' —
-// a different value than the one that was encrypted.
-func validateStructuredValue(value []byte, format, path string) error {
-	reserved := ""
-	if format == "credential-store-url" {
-		reserved = "@/:?#%"
-	}
-	for _, r := range string(value) {
-		switch {
-		case unicode.IsControl(r):
-			return fmt.Errorf("the new value for %s contains a control character; %s needs one plain token with nothing else in it", path, format)
-		case unicode.IsSpace(r):
-			return fmt.Errorf("the new value for %s contains whitespace; %s needs one plain token with no embedded whitespace", path, format)
-		case strings.ContainsRune(reserved, r):
-			return fmt.Errorf("the new value for %s contains %q, which credential-store-url reserves for its URL syntax", path, string(r))
-		}
-	}
-	return nil
-}
-
-// writeCiphertextAtomic writes data to a temporary file in the same
-// directory as path and renames it into place, so a crash or a killed
-// process leaves the file as either the old bytes or the new ones and never
-// a truncated partial write. The temporary file is removed on any failure
-// before the rename; a failure at or after the rename is vanishingly
-// unlikely (both calls are in the same directory) and is reported as any
-// other write failure, which already triggers the group's restore path.
-func writeCiphertextAtomic(path string, data []byte, perm os.FileMode) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".rotate-"+filepath.Base(path)+"-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	_, writeErr := tmp.Write(data)
-	closeErr := tmp.Close()
-	if writeErr != nil {
-		os.Remove(tmpPath)
-		return writeErr
-	}
-	if closeErr != nil {
-		os.Remove(tmpPath)
-		return closeErr
-	}
-	if err := os.Chmod(tmpPath, perm); err != nil {
-		os.Remove(tmpPath)
-		return err
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath)
-		return err
-	}
-	return nil
-}
-
 // --- The command ---
 
-// rotationItem is everything rotate has verified and decrypted about one
-// credential in the selected group before it prompts for the new value.
+// rotationItem is everything rotate has verified about one credential in
+// the selected group before it prompts for the new value. Nothing here is
+// decrypted: the non-secret half is declared, not recovered.
 type rotationItem struct {
 	credential string
-	format     string
+	value      *credentialValue
 	target     secretTarget
 	fullPath   string
-	username   string // credential-store-url, rclone-remote-stanza
-	host       string // credential-store-url, rclone-remote-stanza
 	original   []byte
 	ciphertext []byte
 }
@@ -484,12 +346,37 @@ func secretRotate(args []string) {
 	branch := requireLandingBranch(checkout)
 
 	alias, group, groups := selectRotationGroup(checkout, name)
+	for _, credential := range group.Credentials {
+		if err := credentialShapeError(credential); err != nil {
+			die(1, "%s", err)
+		}
+		if !isLegacyCredential(credential) {
+			continue
+		}
+		if credential.Credential == name {
+			die(1, "credential '%s' uses legacy format '%s'; run 'allod secret migrate %s' before rotating it", name, credential.Format, name)
+		}
+		die(1, "rotation registry group '%s' also lists legacy credential '%s' (format '%s'); run 'allod secret migrate %s' before rotating this group", alias, credential.Credential, credential.Format, credential.Credential)
+	}
 	validateGroupMetadata(alias, group)
-	assertUniformPromptedFormat(alias, group.Credentials)
+	assertUniformGroupEncoding(alias, group.Credentials)
 	verifyGroupMembersUnique(group, groups)
+
+	encodings, err := secretEvalEncodings(checkout)
+	if err != nil {
+		die(1, "could not evaluate lib.credentialEncodings in %s: %s", checkout, err)
+	}
 
 	items := make([]rotationItem, len(group.Credentials))
 	for i, credential := range group.Credentials {
+		if err := validateCredentialValue(credential.Value, encodings); err != nil {
+			die(1, "credential '%s' has an unusable declared value: %s", credential.Credential, err)
+		}
+		for _, target := range credential.Targets {
+			if _, err := verifyCommand(target.Verify); err != nil {
+				die(1, "credential '%s' target '%s' %s; run 'allod secret migrate %s' to convert it", credential.Credential, target.System, err, credential.Credential)
+			}
+		}
 		target := lookupSecret(checkout, credential.Credential)
 		target.branch = branch
 		if target.state != "active" {
@@ -502,41 +389,10 @@ func secretRotate(args []string) {
 		}
 		items[i] = rotationItem{
 			credential: credential.Credential,
-			format:     credential.Format,
+			value:      credential.Value,
 			target:     target,
 			fullPath:   full,
 			original:   original,
-		}
-		// A dry run reads and decrypts nothing: the printed steps below
-		// never use the decrypted user or host, only the registry's own
-		// fields, so decrypting here would violate the "no prompt, decrypt,
-		// or encrypt" promise the banner makes for no benefit.
-		if dryRun {
-			continue
-		}
-		switch credential.Format {
-		case "credential-store-url":
-			identity := ageIdentityPath()
-			plaintext, err := secretDecrypt(identity, full)
-			if err != nil {
-				die(1, "could not decrypt %s with %s: %s", target.path, identity, err)
-			}
-			user, host, parseErr := parseCredentialStorePlaintext(plaintext, target.path)
-			if parseErr != nil {
-				die(1, "%s", parseErr)
-			}
-			items[i].username, items[i].host = user, host
-		case "rclone-remote-stanza":
-			identity := ageIdentityPath()
-			plaintext, err := secretDecrypt(identity, full)
-			if err != nil {
-				die(1, "could not decrypt %s with %s: %s", target.path, identity, err)
-			}
-			host, user, parseErr := parseRcloneRemoteStanza(plaintext, target.path)
-			if parseErr != nil {
-				die(1, "%s", parseErr)
-			}
-			items[i].username, items[i].host = user, host
 		}
 	}
 
@@ -551,43 +407,28 @@ func secretRotate(args []string) {
 		return
 	}
 
-	needsRclone := false
-	for _, item := range items {
-		if item.format == "rclone-remote-stanza" {
-			needsRclone = true
+	// Checked before the value is ever read, so a missing encoder costs the
+	// operator a refusal rather than a wasted paste (see requireRcloneOnPath).
+	for _, credential := range group.Credentials {
+		if credentialEncoding(credential) == "rclone-obscure" {
+			requireRcloneOnPath()
 			break
 		}
 	}
-	if needsRclone {
-		requireRcloneOnPath()
-	}
 
-	raw := readSecretValue(alias)
-	value := trimOnePromptedLine(raw)
+	secret := readSecretValue(alias)
 	for i := range items {
 		item := &items[i]
-		var plaintext []byte
-		switch item.format {
-		case "raw-forgejo-token":
-			plaintext = raw
-		case "credential-store-url":
-			if err := validateStructuredValue(value, item.format, item.target.path); err != nil {
-				die(1, "%s", err)
-			}
-			plaintext = []byte(fmt.Sprintf("https://%s:%s@%s", item.username, value, item.host))
-		case "rclone-remote-stanza":
-			if err := validateStructuredValue(value, item.format, item.target.path); err != nil {
-				die(1, "%s", err)
-			}
-			obscured, err := obscureRclonePassword(string(value))
-			if err != nil {
-				die(1, "%s for %s", err, item.target.path)
-			}
-			plaintext = []byte(buildRcloneRemoteStanza(item.host, item.username, obscured))
+		plaintext, err := renderCredentialValue(item.value, secret, encodings)
+		if err != nil {
+			die(1, "could not render the new value for %s: %s", item.target.path, err)
 		}
 		item.ciphertext = encryptOrDie(item.target, plaintext)
 	}
-	raw, value = nil, nil
+	// The candidate is dropped as soon as every ciphertext exists: it was
+	// never on disk, in argv, or on either stream, and it is not kept alive
+	// past the last use either.
+	secret = nil
 
 	// The branch was gated once above, before the (potentially long) wait
 	// for the value on stdin or at the terminal. Re-check it now, right
@@ -671,24 +512,63 @@ func secretRotate(args []string) {
 	}
 }
 
+// writeCiphertextAtomic writes data to a temporary file in the same
+// directory as path and renames it into place, so a crash or a killed
+// process leaves the file as either the old bytes or the new ones and never
+// a truncated partial write. The temporary file is removed on any failure
+// before the rename; a failure at or after the rename is vanishingly
+// unlikely (both calls are in the same directory) and is reported as any
+// other write failure, which already triggers the group's restore path.
+func writeCiphertextAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".rotate-"+filepath.Base(path)+"-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	_, writeErr := tmp.Write(data)
+	closeErr := tmp.Close()
+	if writeErr != nil {
+		os.Remove(tmpPath)
+		return writeErr
+	}
+	if closeErr != nil {
+		os.Remove(tmpPath)
+		return closeErr
+	}
+	if err := os.Chmod(tmpPath, perm); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return nil
+}
+
 // --- Printed steps ---
 
-// dashIfEmpty is jq's own idiom in rotate-token's printers ('.user // "-"'):
-// a field the registry leaves out prints as '-' rather than an empty field.
-func dashIfEmpty(value string) string {
-	if value == "" {
-		return "-"
+// credentialValueShape is what printGroupSummary says about a credential's
+// value where rotate-token's summary printed its format: 'plain' for a
+// credential that stores the secret verbatim, 'template' for one with
+// declared surrounding text, and the encoding's name alongside when one
+// applies.
+func credentialValueShape(credential registryCredential) string {
+	if credential.Value == nil {
+		return "plain"
 	}
-	return value
+	if credential.Value.Encode == "" {
+		return "template"
+	}
+	return "template, encode " + credential.Value.Encode
 }
 
 // printGroupSummary ports rotate-token's print_group_summary: the group,
-// its service, strategy, every affected secret and its format, and every
-// target with its verification probe. The local-auth-refresh timing prose
-// bash prints in this function is not ported: the printed deploy step is
-// the whole of what 'rotate' says about refresh-local-auth (see
-// printDeploySteps), by the overseer's decision that it needs "nothing else
-// about it".
+// its service, strategy, every affected secret and its value shape, and
+// every target with the command that verifies it. The local-auth-refresh
+// timing prose bash prints in this function is not ported: the printed
+// deploy step is the whole of what 'rotate' says about refresh-local-auth
+// (see printDeploySteps).
 func printGroupSummary(w io.Writer, alias string, group tokenGroup) {
 	if group.Service == "forgejo" {
 		fmt.Fprintf(w, "Forgejo group: %s\n", alias)
@@ -701,19 +581,17 @@ func printGroupSummary(w io.Writer, alias string, group tokenGroup) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Affected secrets:")
 	for _, credential := range group.Credentials {
-		fmt.Fprintf(w, "  - %s (%s, %s)\n", credential.SecretPath, credential.Credential, credential.Format)
+		fmt.Fprintf(w, "  - %s (%s, %s)\n", credential.SecretPath, credential.Credential, credentialValueShape(credential))
 	}
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Affected targets:")
 	for _, credential := range group.Credentials {
 		for _, target := range credential.Targets {
-			if target.Verify.Type == "git-ls-remote" {
-				fmt.Fprintf(w, "  - %s (%s): %s, verify %s as %s\n",
-					target.System, target.Kind, target.DeployedPath, target.Verify.RepoURL, dashIfEmpty(target.Verify.CredentialContext))
-			} else {
-				fmt.Fprintf(w, "  - %s (%s): %s, verify as %s\n",
-					target.System, target.Kind, target.DeployedPath, dashIfEmpty(target.User))
+			command, err := verifyCommand(target.Verify)
+			if err != nil {
+				die(1, "credential '%s' target '%s' %s; run 'allod secret migrate %s' to convert it", credential.Credential, target.System, err, credential.Credential)
 			}
+			fmt.Fprintf(w, "  - %s (%s): %s, verify: %s\n", target.System, target.Kind, target.DeployedPath, command)
 		}
 	}
 	fmt.Fprintln(w)
@@ -822,43 +700,40 @@ func printDeploySteps(w io.Writer, checkout, alias, branch string, group tokenGr
 	}
 }
 
+// posixShellQuote wraps a value in single quotes for a POSIX shell, ending
+// and restarting the quoted run around every embedded quote. It is
+// deliberately implemented here rather than shelling out: the verification
+// text is printed for a human to run, and it must stay one command whatever
+// the registry holds.
+func posixShellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
+}
+
 // printVerification ports rotate-token's print_group_verification: one
 // verification command per target, in the order the registry lists them.
+// The command itself is the target's declared 'verify' string, printed
+// verbatim on the machine it names and behind 'ssh' everywhere else —
+// rotate-token's four probe types are now four such strings in the
+// registry, and adding a fifth needs no code here.
 func printVerification(w io.Writer, group tokenGroup) {
+	host, err := secretHostName()
+	if err != nil {
+		die(1, "could not read this machine's host name to tell a local target from a remote one: %s", err)
+	}
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "--- Verification ---")
 	for _, credential := range group.Credentials {
 		for _, target := range credential.Targets {
-			switch target.Verify.Type {
-			case "forge-token-verify":
-				user := dashIfEmpty(target.User)
-				fmt.Fprintf(w, "%s (user %s):\n", target.System, user)
-				if target.Kind == "nixos-host" {
-					fmt.Fprintf(w, "   sudo -u %s forge token verify < %s\n", user, target.DeployedPath)
-				} else {
-					fmt.Fprintf(w, "   ssh %s 'forge token verify < %s'\n", target.System, target.DeployedPath)
-				}
-			case "git-ls-remote":
-				fmt.Fprintf(w, "%s (%s):\n", target.System, dashIfEmpty(target.Verify.CredentialContext))
-				if target.Kind == "nixos-host" {
-					fmt.Fprintf(w, "   sudo env HOME=/root GIT_TERMINAL_PROMPT=0 git ls-remote %s HEAD\n", target.Verify.RepoURL)
-				} else {
-					fmt.Fprintf(w, "   ssh %s 'sudo env HOME=/root GIT_TERMINAL_PROMPT=0 git ls-remote %s HEAD'\n", target.System, target.Verify.RepoURL)
-				}
-			case "site-check":
-				// rclone itself rides on the 'allod' wrapper's PATH, not the
-				// operator's, so a raw rclone command here would be "command
-				// not found"; 'allod site check' is the command the
-				// operator has.
-				fmt.Fprintf(w, "%s (%s):\n", target.System, target.Kind)
-				if target.Kind == "nixos-host" {
-					fmt.Fprintln(w, "   allod site check")
-				} else {
-					fmt.Fprintf(w, "   ssh %s 'allod site check'\n", target.System)
-				}
-			default:
-				die(1, "unsupported verification type '%s' for %s", target.Verify.Type, target.System)
+			command, err := verifyCommand(target.Verify)
+			if err != nil {
+				die(1, "credential '%s' target '%s' %s; run 'allod secret migrate %s' to convert it", credential.Credential, target.System, err, credential.Credential)
 			}
+			fmt.Fprintf(w, "%s (%s):\n", target.System, target.Kind)
+			if target.System == host {
+				fmt.Fprintf(w, "   %s\n", command)
+				continue
+			}
+			fmt.Fprintf(w, "   ssh %s %s\n", posixShellQuote(target.System), posixShellQuote(command))
 		}
 	}
 }

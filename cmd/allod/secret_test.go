@@ -87,6 +87,8 @@ type secretFixture struct {
 	decryptResult []byte
 	decryptErr    error
 
+	encodings []string
+
 	checkCalls  int
 	checkStatus int
 
@@ -143,6 +145,7 @@ func newSecretFixture(t *testing.T) *secretFixture {
 			"secrets/old-token.age": {fixtureHostKey, fixtureVMKey, fixtureOtherKey},
 		},
 		decryptResult: []byte("old value\n"),
+		encodings:     []string{"rclone-obscure"},
 	}
 
 	if err := os.WriteFile(fx.identity, []byte("fixture private key\n"), 0600); err != nil {
@@ -165,6 +168,12 @@ func newSecretFixture(t *testing.T) *secretFixture {
 	t.Setenv("GIT_COMMITTER_EMAIL", "fixture@example.com")
 
 	gitRun(t, root, "init", "-q", "--bare", "-b", "master", fx.origin)
+	// git runs 'gc --auto' in the background after a push, and that
+	// background process races t.TempDir's cleanup of the fixture
+	// repositories. Neither repository outlives one test, so there is
+	// nothing for it to collect.
+	gitRun(t, fx.origin, "config", "gc.auto", "0")
+	gitRun(t, fx.origin, "config", "receive.autogc", "false")
 	if err := os.MkdirAll(filepath.Join(fx.checkout, "secrets"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -179,6 +188,7 @@ func newSecretFixture(t *testing.T) *secretFixture {
 			t.Fatal(err)
 		}
 	}
+	gitRun(t, fx.checkout, "config", "gc.auto", "0")
 	gitRun(t, fx.checkout, "add", "-A")
 	gitRun(t, fx.checkout, "commit", "-q", "-m", "fixture")
 	gitRun(t, fx.checkout, "remote", "add", "origin", fx.origin)
@@ -187,10 +197,12 @@ func newSecretFixture(t *testing.T) *secretFixture {
 	gitRun(t, fx.checkout, "switch", "-q", "-c", "agent/landing")
 
 	previousCredentials, previousRegistry, previousRecipients := secretEvalCredentials, secretEvalRegistry, secretEvalRecipients
+	previousEncodings := secretEvalEncodings
 	previousEncrypt, previousDecrypt, previousCheck := secretEncrypt, secretDecrypt, secretFlakeCheck
 	previousTerminal, previousAsk, previousStdin := secretStdinIsTerminal, secretAskOnTerminal, stdin
 	t.Cleanup(func() {
 		secretEvalCredentials, secretEvalRegistry, secretEvalRecipients = previousCredentials, previousRegistry, previousRecipients
+		secretEvalEncodings = previousEncodings
 		secretEncrypt, secretDecrypt, secretFlakeCheck = previousEncrypt, previousDecrypt, previousCheck
 		secretStdinIsTerminal, secretAskOnTerminal, stdin = previousTerminal, previousAsk, previousStdin
 	})
@@ -214,6 +226,7 @@ func newSecretFixture(t *testing.T) *secretFixture {
 		return result, nil
 	}
 	secretEvalRegistry = func(string) (map[string]tokenGroup, error) { return fx.registry, nil }
+	secretEvalEncodings = func(string) ([]string, error) { return fx.encodings, nil }
 	secretEvalRecipients = func(_ string, path string) ([]string, error) {
 		recipients, ok := fx.recipients[path]
 		if !ok {
@@ -344,11 +357,11 @@ func TestSecretNamespaceIsRegistered(t *testing.T) {
 	}
 }
 
-// TestSecretTaggedBuildCarriesEveryCommand pins the shape a
-// secret-tagged build carries: 'declare' from the untagged files plus
-// the three secret.go's init() adds, and nothing else.
+// TestSecretTaggedBuildCarriesEveryCommand pins the shape a secret-tagged
+// build carries: 'declare' from the untagged files plus the four secret.go's
+// init() adds, and nothing else.
 func TestSecretTaggedBuildCarriesEveryCommand(t *testing.T) {
-	want := []string{"declare", "create", "rekey", "rotate"}
+	want := []string{"declare", "create", "rekey", "migrate", "rotate"}
 	if got := len(secretCommands); got != len(want) {
 		t.Fatalf("secretCommands has %d entries in a tagged build, want %d: %+v", got, len(want), secretCommands)
 	}
@@ -432,6 +445,35 @@ func TestSecretCreateReadsOneHiddenLineFromTerminal(t *testing.T) {
 	}
 }
 
+// TestSecretCreateRendersEachDeclaredValueShape drives the shared renderer
+// through 'create' for every value shape the contract has. It runs the same
+// table TestSecretRotateRendersEachDeclaredValueShape drives through
+// 'rotate', so the two commands are pinned to byte-identical output rather
+// than each to its own idea of one.
+func TestSecretCreateRendersEachDeclaredValueShape(t *testing.T) {
+	for _, tc := range credentialRenderCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.needsRclone {
+				installFakeRclone(t)
+			}
+			fx := newSecretFixture(t)
+			fx.registry["dev-a.git"].Credentials[0].Value = tc.value
+			fx.pipe(tc.secret)
+
+			out, errText, code := fx.run(t, "secret", "create", "new-token")
+			if code != 0 {
+				t.Fatalf("exit %d, stderr: %s", code, errText)
+			}
+			if string(fx.lastPlaintext) != tc.want {
+				t.Errorf("plaintext handed to age = %q, want %q", fx.lastPlaintext, tc.want)
+			}
+			if strings.Contains(out+errText, tc.secret) || strings.Contains(out+errText, tc.want) {
+				t.Error("the value or the rendered plaintext was printed")
+			}
+		})
+	}
+}
+
 func TestSecretCreateRefusals(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -471,6 +513,18 @@ func TestSecretCreateRefusals(t *testing.T) {
 			entry.Consumers = append(entry.Consumers, credentialConsumer{Type: "agenix", Repo: "secrets", Secret: "secrets/second.age"})
 			fx.credentials["new-token"] = entry
 		}, "has 2 agenix consumers"},
+		{"legacy registry entry", func(_ *testing.T, fx *secretFixture) {
+			fx.registry["dev-a.git"].Credentials[0].Format = "credential-store-url"
+		}, "run 'allod secret migrate new-token' before landing a value for it"},
+		{"template with no placeholder", func(_ *testing.T, fx *secretFixture) {
+			fx.registry["dev-a.git"].Credentials[0].Value = &credentialValue{Template: "https://user:token@example.test"}
+		}, "value.template must contain exactly one {secret} placeholder"},
+		{"template with two placeholders", func(_ *testing.T, fx *secretFixture) {
+			fx.registry["dev-a.git"].Credentials[0].Value = &credentialValue{Template: "{secret}:{secret}"}
+		}, "value.template must contain exactly one {secret} placeholder"},
+		{"unknown encoder", func(_ *testing.T, fx *secretFixture) {
+			fx.registry["dev-a.git"].Credentials[0].Value = &credentialValue{Template: "{secret}", Encode: "rot13"}
+		}, `value.encode "rot13" is not exported by lib.credentialEncodings`},
 		{"empty value", func(_ *testing.T, fx *secretFixture) { fx.pipe("") }, "the value is empty"},
 		{"whitespace value", func(_ *testing.T, fx *secretFixture) { fx.pipe(" \n\t\n") }, "the value is empty"},
 		{"age fails", func(_ *testing.T, fx *secretFixture) {

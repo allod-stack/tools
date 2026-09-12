@@ -2,22 +2,29 @@
 
 package main
 
-// Tests for 'allod secret rotate'. The pure ports — the format parsers, the
-// registry validator, the format-mix guard, the commit-subject and
-// rebuild-target helpers — are tested directly, the way TestFlipPendingToActive
-// tests flipPendingToActive in secret_test.go. The command itself is driven
+// Tests for 'allod secret rotate'. The pure ports — the registry
+// validator, the encoding-mix guard, the commit-subject and rebuild-target
+// helpers — are tested directly, the way TestFlipPendingToActive tests
+// flipPendingToActive in secret_test.go. The command itself is driven
 // through runAllod against secretFixture's real git checkout, the way
 // secret_test.go drives create and rekey; rotateFixture adds what a
 // registry group needs beyond secretFixture's single credential: a real
-// committed ciphertext per group member (restore-on-failure needs real
-// bytes to put back) and, for the structured formats, the old plaintext
-// each path's fake decrypt returns.
+// committed ciphertext per group member, since restore-on-failure needs
+// real bytes to put back.
+//
+// Nothing here stages an old plaintext, because rotation no longer reads
+// one: a credential's non-secret half is declared in the registry, so the
+// only decrypt left in this namespace belongs to 'rekey' and 'migrate'.
 //
 // The package-level seams these helpers swap are shared mutable state, so no
 // test here calls t.Parallel, matching secret_test.go.
+//
+// Fixture machines, users, and hosts are invented (fixture-host, dev-a,
+// fixture-user, example.test); none of them names a real deployment.
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -28,80 +35,6 @@ import (
 )
 
 // --- Direct unit tests: the pure ports ---
-
-func TestParseCredentialStorePlaintext(t *testing.T) {
-	cases := []struct {
-		name, plaintext, wantUser, wantHost, wantErr string
-	}{
-		{"simple", "https://alice:secret-tok@forge.test", "alice", "forge.test", ""},
-		{"trailing newline", "https://alice:secret-tok@forge.test\n", "alice", "forge.test", ""},
-		{"multiline", "https://alice:secret-tok@forge.test\nsecond line\n", "", "", "must contain exactly one non-empty line"},
-		{"blank lines tolerated", "\n\nhttps://alice:secret-tok@forge.test\n\n", "alice", "forge.test", ""},
-		{"no scheme", "alice:secret-tok@forge.test", "", "", "not a supported https://user:token@host URL"},
-		{"missing colon", "https://alicesecret-tok@forge.test", "", "", "not a supported https://user:token@host URL"},
-		{"missing at", "https://alice:secret-tokforge.test", "", "", "not a supported https://user:token@host URL"},
-		{"empty", "", "", "", "must contain exactly one non-empty line"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			user, host, err := parseCredentialStorePlaintext([]byte(tc.plaintext), "secrets/x.age")
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("err = %v, want it to mention %q", err, tc.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if user != tc.wantUser || host != tc.wantHost {
-				t.Errorf("user=%q host=%q, want user=%q host=%q", user, host, tc.wantUser, tc.wantHost)
-			}
-		})
-	}
-}
-
-func TestParseRcloneRemoteStanza(t *testing.T) {
-	valid := "[shared]\ntype = ftp\nhost = ftp.example.org\nuser = deploy\npass = OLD-OBSCURED\nexplicit_tls = true\n"
-	cases := []struct {
-		name, plaintext, wantHost, wantUser, wantErr string
-	}{
-		{"valid", valid, "ftp.example.org", "deploy", ""},
-		{"missing trailing newline", strings.TrimSuffix(valid, "\n"), "ftp.example.org", "deploy", ""},
-		{"wrong remote name", strings.Replace(valid, "[shared]", "[other]", 1), "", "", "is not exactly one [shared] section"},
-		{"missing explicit_tls", strings.Replace(valid, "explicit_tls = true\n", "", 1), "", "", "is not exactly one [shared] section"},
-		{"extra trailing content", valid + "extra = 1\n", "", "", "is not exactly one [shared] section"},
-		{"reordered fields", "[shared]\ntype = ftp\nuser = deploy\nhost = ftp.example.org\npass = OLD-OBSCURED\nexplicit_tls = true\n", "", "", "is not exactly one [shared] section"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			host, user, err := parseRcloneRemoteStanza([]byte(tc.plaintext), "secrets/x.age")
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("err = %v, want it to mention %q", err, tc.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if host != tc.wantHost || user != tc.wantUser {
-				t.Errorf("host=%q user=%q, want host=%q user=%q", host, user, tc.wantHost, tc.wantUser)
-			}
-		})
-	}
-}
-
-func TestBuildRcloneRemoteStanzaRoundTripsThroughParse(t *testing.T) {
-	stanza := buildRcloneRemoteStanza("ftp.example.org", "deploy", "OBS-newpass")
-	host, user, err := parseRcloneRemoteStanza([]byte(stanza), "secrets/x.age")
-	if err != nil {
-		t.Fatalf("built stanza does not parse: %v\n%s", err, stanza)
-	}
-	if host != "ftp.example.org" || user != "deploy" {
-		t.Errorf("host=%q user=%q", host, user)
-	}
-}
 
 func TestGroupCommitSubject(t *testing.T) {
 	if got := groupCommitSubject("dev-a.git", tokenGroup{Service: "forgejo"}); got != "rotate dev-a.git Forgejo token" {
@@ -114,11 +47,11 @@ func TestGroupCommitSubject(t *testing.T) {
 
 func TestUniqueRebuildTargetsDedupesAndSortsBySystemThenKind(t *testing.T) {
 	group := tokenGroup{Credentials: []registryCredential{
-		{Targets: []registryTarget{{System: "dev-b", Kind: "dev-vm"}, {System: "control-host", Kind: "nixos-host"}}},
+		{Targets: []registryTarget{{System: "dev-b", Kind: "dev-vm"}, {System: "fixture-host", Kind: "nixos-host"}}},
 		{Targets: []registryTarget{{System: "dev-b", Kind: "dev-vm"}, {System: "dev-a", Kind: "dev-vm"}}},
 	}}
 	got := uniqueRebuildTargets(group)
-	want := []rebuildTarget{{"control-host", "nixos-host"}, {"dev-a", "dev-vm"}, {"dev-b", "dev-vm"}}
+	want := []rebuildTarget{{"dev-a", "dev-vm"}, {"dev-b", "dev-vm"}, {"fixture-host", "nixos-host"}}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
@@ -130,9 +63,10 @@ func TestUniqueRebuildTargetsDedupesAndSortsBySystemThenKind(t *testing.T) {
 }
 
 // rotateDies runs f the way run() runs a namespace: it recovers the
-// cliExit panic die() raises, so validateGroupMetadata, selectRotationGroup,
-// and assertUniformPromptedFormat — all written to call die() directly, the
-// way lookupSecret already does — can be tested without a CLI invocation.
+// cliExit panic die() raises, so validateGroupMetadata,
+// selectRotationGroup, and assertUniformGroupEncoding — all written to call
+// die() directly, the way lookupSecret already does — can be tested without
+// a CLI invocation.
 func rotateDies(t *testing.T, f func()) (code int, message string) {
 	t.Helper()
 	var errBuf bytes.Buffer
@@ -153,6 +87,14 @@ func rotateDies(t *testing.T, f func()) (code int, message string) {
 	return 0, errBuf.String()
 }
 
+func fixtureVerify(command string) json.RawMessage {
+	encoded, err := json.Marshal(command)
+	if err != nil {
+		panic(err)
+	}
+	return encoded
+}
+
 func validRotateGroup() tokenGroup {
 	return tokenGroup{
 		RegistryAlias:    "g",
@@ -161,10 +103,10 @@ func validRotateGroup() tokenGroup {
 		UITokenName:      "ui-token",
 		RotationStrategy: "overlap",
 		Credentials: []registryCredential{{
-			Credential: "cred", SecretPath: "secrets/cred.age", Format: "raw-forgejo-token",
+			Credential: "cred", SecretPath: "secrets/cred.age",
 			Targets: []registryTarget{{
-				System: "dev-a", Kind: "dev-vm", DeployedPath: "/home/x/token",
-				Verify: registryVerify{Type: "forge-token-verify"},
+				System: "dev-a", Kind: "dev-vm", DeployedPath: "/home/fixture-user/token",
+				Verify: fixtureVerify("forge token verify < /home/fixture-user/token"),
 			}},
 		}},
 	}
@@ -182,16 +124,29 @@ func TestValidateGroupMetadataRefusals(t *testing.T) {
 		{"forgejo missing account", func(g *tokenGroup) { g.Account = "" }, "needs a non-empty account"},
 		{"bad rotation_strategy", func(g *tokenGroup) { g.RotationStrategy = "immediate" }, "rotation_strategy 'immediate'"},
 		{"no credentials", func(g *tokenGroup) { g.Credentials = nil }, "credentials is empty"},
-		{"bad format", func(g *tokenGroup) { g.Credentials[0].Format = "plaintext" }, "unsupported format 'plaintext'"},
 		{"no targets", func(g *tokenGroup) { g.Credentials[0].Targets = nil }, "has no targets"},
 		{"bad target kind", func(g *tokenGroup) { g.Credentials[0].Targets[0].Kind = "laptop" }, "unsupported kind 'laptop'"},
-		{"bad verify type", func(g *tokenGroup) { g.Credentials[0].Targets[0].Verify.Type = "manual" }, "unsupported verify type 'manual'"},
 		{"local_auth_refresh bad contract", func(g *tokenGroup) {
 			g.LocalAuthRefresh = []localAuthRefreshEntry{{Contract: "run-anything", System: "dev-a", LocalUsername: "u", SourceCredential: "cred"}}
 		}, "unsupported contract 'run-anything'"},
 		{"local_auth_refresh unmatched source", func(g *tokenGroup) {
 			g.LocalAuthRefresh = []localAuthRefreshEntry{{Contract: "nixos-netrc-from-root-git-credentials", System: "dev-a", LocalUsername: "u", SourceCredential: "nope"}}
-		}, "does not name exactly one credential-store-url target"},
+		}, "does not name exactly one credential-store URL target"},
+		{"local_auth_refresh source is not a credential-store template", func(g *tokenGroup) {
+			g.Credentials[0].Value = &credentialValue{Template: "{secret}"}
+			g.Credentials[0].Targets[0].DeployedPath = "/root/.git-credentials"
+			g.LocalAuthRefresh = []localAuthRefreshEntry{{Contract: "nixos-netrc-from-root-git-credentials", System: "dev-a", LocalUsername: "u", SourceCredential: "cred"}}
+		}, "does not name exactly one credential-store URL target"},
+		{"local_auth_refresh legacy source passes", func(g *tokenGroup) {
+			g.Credentials[0].Format = "credential-store-url"
+			g.Credentials[0].Targets[0].DeployedPath = "/root/.git-credentials"
+			g.LocalAuthRefresh = []localAuthRefreshEntry{{Contract: "nixos-netrc-from-root-git-credentials", System: "dev-a", LocalUsername: "u", SourceCredential: "cred"}}
+		}, ""},
+		{"local_auth_refresh template source passes", func(g *tokenGroup) {
+			g.Credentials[0].Value = &credentialValue{Template: "https://fixture-user:{secret}@example.test"}
+			g.Credentials[0].Targets[0].DeployedPath = "/root/.git-credentials"
+			g.LocalAuthRefresh = []localAuthRefreshEntry{{Contract: "nixos-netrc-from-root-git-credentials", System: "dev-a", LocalUsername: "u", SourceCredential: "cred"}}
+		}, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -211,18 +166,24 @@ func TestValidateGroupMetadataRefusals(t *testing.T) {
 	}
 }
 
-func TestAssertUniformPromptedFormat(t *testing.T) {
-	uniform := []registryCredential{{Format: "raw-forgejo-token"}, {Format: "credential-store-url"}}
-	if code, _ := rotateDies(t, func() { assertUniformPromptedFormat("g", uniform) }); code != 0 {
-		t.Error("a group of only non-stanza formats was refused")
+func TestAssertUniformGroupEncoding(t *testing.T) {
+	plain := []registryCredential{{}, {Value: &credentialValue{Template: "{secret}"}}}
+	if code, _ := rotateDies(t, func() { assertUniformGroupEncoding("g", plain) }); code != 0 {
+		t.Error("a group with no encodings was refused")
 	}
-	allStanza := []registryCredential{{Format: "rclone-remote-stanza"}, {Format: "rclone-remote-stanza"}}
-	if code, _ := rotateDies(t, func() { assertUniformPromptedFormat("g", allStanza) }); code != 0 {
-		t.Error("a group of only stanza formats was refused")
+	encoded := []registryCredential{
+		{Value: &credentialValue{Template: "a{secret}", Encode: "rclone-obscure"}},
+		{Value: &credentialValue{Template: "b{secret}", Encode: "rclone-obscure"}},
 	}
-	mixed := []registryCredential{{Format: "rclone-remote-stanza"}, {Format: "raw-forgejo-token"}}
-	code, message := rotateDies(t, func() { assertUniformPromptedFormat("mixed.group", mixed) })
-	if code == 0 || !strings.Contains(message, "mixes rclone-remote-stanza with a token format") {
+	if code, _ := rotateDies(t, func() { assertUniformGroupEncoding("g", encoded) }); code != 0 {
+		t.Error("a group sharing one encoding was refused")
+	}
+	mixed := []registryCredential{
+		{Value: &credentialValue{Template: "a{secret}", Encode: "rclone-obscure"}},
+		{},
+	}
+	code, message := rotateDies(t, func() { assertUniformGroupEncoding("mixed.group", mixed) })
+	if code == 0 || !strings.Contains(message, "mixes value encodings (none, rclone-obscure)") {
 		t.Errorf("code=%d message=%q", code, message)
 	}
 }
@@ -233,39 +194,30 @@ func TestAssertUniformPromptedFormat(t *testing.T) {
 // group: a real committed ciphertext (so restore-on-failure has real bytes
 // to put back) and the registry shape validateGroupMetadata checks.
 type rotateGroupCredential struct {
-	name, format, state                          string // state defaults to "active"
-	system, kind, user, deployedPath, verifyType string
-	repoURL, context                             string
-	plaintext                                    string // old plaintext the fake decrypt returns; only formats that decrypt need it
-	skipCiphertext                               bool
+	name, state                   string // state defaults to "active"
+	system, kind, deployedPath    string
+	verify                        string // the declared verify command
+	rawVerify                     json.RawMessage
+	user                          string // legacy only
+	format                        string // legacy only
+	value                         *credentialValue
+	skipCiphertext, skipRecipient bool
 }
 
-// rotateFixture augments secretFixture with what rotate's tests need beyond
-// a single credential: a per-path old-plaintext lookup for secretDecrypt,
-// which secretFixture's own fake does not have (create and rekey only ever
-// decrypt one path per run).
+// rotateFixture augments secretFixture with a record of every decrypt
+// attempt, so a test can assert that rotation never made one.
 type rotateFixture struct {
 	*secretFixture
-	decrypted    map[string][]byte // checkout-relative path -> old plaintext
 	decryptCalls int
 }
 
 func newRotateFixture(t *testing.T) *rotateFixture {
 	t.Helper()
 	fx := newSecretFixture(t)
-	rf := &rotateFixture{secretFixture: fx, decrypted: map[string][]byte{}}
+	rf := &rotateFixture{secretFixture: fx}
 	secretDecrypt = func(_ string, file string) ([]byte, error) {
 		rf.decryptCalls++
-		rel, err := filepath.Rel(fx.checkout, file)
-		if err != nil {
-			return nil, err
-		}
-		rel = filepath.ToSlash(rel)
-		plaintext, ok := rf.decrypted[rel]
-		if !ok {
-			return nil, fmt.Errorf("fixture: no old plaintext staged for %s", rel)
-		}
-		return plaintext, nil
+		return nil, fmt.Errorf("fixture: rotate must not decrypt %s", file)
 	}
 	return rf
 }
@@ -287,12 +239,17 @@ func (rf *rotateFixture) addGroup(t *testing.T, alias string, group tokenGroup, 
 			Name: c.name, RotationState: state,
 			Consumers: []credentialConsumer{{Type: "agenix", Repo: "secrets", Secret: path}},
 		}
-		rf.recipients[path] = []string{fixtureHostKey, fixtureVMKey}
+		if !c.skipRecipient {
+			rf.recipients[path] = []string{fixtureHostKey, fixtureVMKey}
+		}
+		verify := c.rawVerify
+		if verify == nil && c.verify != "" {
+			verify = fixtureVerify(c.verify)
+		}
 		group.Credentials = append(group.Credentials, registryCredential{
-			Credential: c.name, SecretPath: path, Format: c.format,
+			Credential: c.name, SecretPath: path, Format: c.format, Value: c.value,
 			Targets: []registryTarget{{
-				System: c.system, Kind: c.kind, User: c.user, DeployedPath: c.deployedPath,
-				Verify: registryVerify{Type: c.verifyType, RepoURL: c.repoURL, CredentialContext: c.context},
+				System: c.system, Kind: c.kind, User: c.user, DeployedPath: c.deployedPath, Verify: verify,
 			}},
 		})
 		if state == "active" && !c.skipCiphertext {
@@ -305,9 +262,6 @@ func (rf *rotateFixture) addGroup(t *testing.T, alias string, group tokenGroup, 
 				t.Fatal(err)
 			}
 		}
-		if c.plaintext != "" {
-			rf.decrypted[path] = []byte(c.plaintext)
-		}
 	}
 	rf.registry[alias] = group
 	// A group whose only member is pending or deliberately missing its
@@ -319,11 +273,17 @@ func (rf *rotateFixture) addGroup(t *testing.T, alias string, group tokenGroup, 
 	}
 }
 
+// forgejoGroup is the group shape most fixtures want: a Forgejo service
+// group whose metadata validateGroupMetadata accepts.
+func forgejoGroup(alias string) tokenGroup {
+	return tokenGroup{RegistryAlias: alias, Service: "forgejo", Account: "fixture-user", UITokenName: "fixture-token", RotationStrategy: "overlap"}
+}
+
 // installFakeRclone puts a real, minimal 'rclone' on PATH ahead of whatever
 // is already there, the way rotate-token's own tests fake it: it answers
 // only 'obscure -', reads the password on stdin (never argv), and returns a
 // value deterministic in the input so a test can assert the password
-// crossed on stdin and landed, obscured, in the rebuilt stanza.
+// crossed on stdin and landed, obscured, in the rendered stanza.
 func installFakeRclone(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
@@ -361,32 +321,60 @@ func TestSecretRotateGroupSelectionRefusals(t *testing.T) {
 	}{
 		{"unknown credential", "nope", func(*testing.T, *rotateFixture) {}, "no rotation registry entry for 'nope'"},
 		{"pending entry", "pending-cred", func(t *testing.T, rf *rotateFixture) {
-			rf.addGroup(t, "pending.rotate", tokenGroup{RegistryAlias: "pending.rotate", Service: "forgejo", Account: "a", UITokenName: "u", RotationStrategy: "overlap"},
-				rotateGroupCredential{name: "pending-cred", format: "raw-forgejo-token", state: "pending", system: "dev-a", kind: "dev-vm", user: "u", deployedPath: "/home/u/token", verifyType: "forge-token-verify"})
+			rf.addGroup(t, "pending.rotate", forgejoGroup("pending.rotate"),
+				rotateGroupCredential{name: "pending-cred", state: "pending", system: "dev-a", kind: "dev-vm", deployedPath: "/home/fixture-user/token", verify: "forge token verify < /home/fixture-user/token"})
 		}, "credential 'pending-cred' is 'pending', not 'active'"},
 		{"missing ciphertext", "missing-cred", func(t *testing.T, rf *rotateFixture) {
-			rf.addGroup(t, "missing.rotate", tokenGroup{RegistryAlias: "missing.rotate", Service: "forgejo", Account: "a", UITokenName: "u", RotationStrategy: "overlap"},
-				rotateGroupCredential{name: "missing-cred", format: "raw-forgejo-token", skipCiphertext: true, system: "dev-a", kind: "dev-vm", user: "u", deployedPath: "/home/u/token", verifyType: "forge-token-verify"})
+			rf.addGroup(t, "missing.rotate", forgejoGroup("missing.rotate"),
+				rotateGroupCredential{name: "missing-cred", skipCiphertext: true, system: "dev-a", kind: "dev-vm", deployedPath: "/home/fixture-user/token", verify: "forge token verify < /home/fixture-user/token"})
 		}, "does not exist while 'missing-cred' is 'active'"},
 		{"unsupported metadata", "bogus-cred", func(t *testing.T, rf *rotateFixture) {
-			rf.addGroup(t, "bogus.rotate", tokenGroup{RegistryAlias: "bogus.rotate", Service: "forgejo", Account: "a", UITokenName: "u", RotationStrategy: "sometimes"},
-				rotateGroupCredential{name: "bogus-cred", format: "raw-forgejo-token", system: "dev-a", kind: "dev-vm", user: "u", deployedPath: "/home/u/token", verifyType: "forge-token-verify"})
+			group := forgejoGroup("bogus.rotate")
+			group.RotationStrategy = "sometimes"
+			rf.addGroup(t, "bogus.rotate", group,
+				rotateGroupCredential{name: "bogus-cred", system: "dev-a", kind: "dev-vm", deployedPath: "/home/fixture-user/token", verify: "forge token verify < /home/fixture-user/token"})
 		}, "unsupported metadata"},
-		{"mixed formats", "mixed-stanza", func(t *testing.T, rf *rotateFixture) {
-			rf.addGroup(t, "mixed.rotate", tokenGroup{RegistryAlias: "mixed.rotate", Service: "forgejo", Account: "a", UITokenName: "u", RotationStrategy: "overlap"},
-				rotateGroupCredential{name: "mixed-stanza", format: "rclone-remote-stanza", system: "control-host", kind: "nixos-host", deployedPath: "/root/.config/rclone/rclone.conf", verifyType: "site-check"},
-				rotateGroupCredential{name: "mixed-url", format: "credential-store-url", system: "control-host", kind: "nixos-host", deployedPath: "/root/.git-credentials", verifyType: "git-ls-remote", repoURL: "https://forge.test/x/y.git", context: "root-netrc"})
-		}, "mixes rclone-remote-stanza with a token format"},
+		{"mixed encodings", "mixed-encoded", func(t *testing.T, rf *rotateFixture) {
+			rf.addGroup(t, "mixed.rotate", forgejoGroup("mixed.rotate"),
+				rotateGroupCredential{name: "mixed-encoded", system: "fixture-host", kind: "nixos-host", deployedPath: "/root/.config/rclone/rclone.conf", verify: "allod site check",
+					value: &credentialValue{Template: fixtureRcloneTemplate, Encode: "rclone-obscure"}},
+				rotateGroupCredential{name: "mixed-plain", system: "fixture-host", kind: "nixos-host", deployedPath: "/root/.git-credentials", verify: "sudo env HOME=/root GIT_TERMINAL_PROMPT=0 git ls-remote https://example.test/fixture/repo.git HEAD",
+					value: &credentialValue{Template: "https://fixture-user:{secret}@example.test"}})
+		}, "mixes value encodings (none, rclone-obscure)"},
+		{"missing verify", "no-verify-cred", func(t *testing.T, rf *rotateFixture) {
+			rf.addGroup(t, "noverify.rotate", forgejoGroup("noverify.rotate"),
+				rotateGroupCredential{name: "no-verify-cred", system: "dev-a", kind: "dev-vm", deployedPath: "/home/fixture-user/token"})
+		}, "has no verify command; run 'allod secret migrate no-verify-cred'"},
+		{"structured verify on a new-shape credential", "structured-cred", func(t *testing.T, rf *rotateFixture) {
+			rf.addGroup(t, "structured.rotate", forgejoGroup("structured.rotate"),
+				rotateGroupCredential{name: "structured-cred", system: "dev-a", kind: "dev-vm", deployedPath: "/home/fixture-user/token",
+					rawVerify: json.RawMessage(`{"type":"forge-token-verify"}`)})
+		}, "has structured legacy verify data, not one command string; run 'allod secret migrate structured-cred'"},
+		{"multi-line verify", "multiline-cred", func(t *testing.T, rf *rotateFixture) {
+			rf.addGroup(t, "multiline.rotate", forgejoGroup("multiline.rotate"),
+				rotateGroupCredential{name: "multiline-cred", system: "dev-a", kind: "dev-vm", deployedPath: "/home/fixture-user/token",
+					verify: "allod site check\nrm -rf /"})
+		}, "has a verify command spanning more than one line"},
+		{"template with no placeholder", "bad-template-cred", func(t *testing.T, rf *rotateFixture) {
+			rf.addGroup(t, "badtemplate.rotate", forgejoGroup("badtemplate.rotate"),
+				rotateGroupCredential{name: "bad-template-cred", system: "dev-a", kind: "dev-vm", deployedPath: "/home/fixture-user/token", verify: "allod site check",
+					value: &credentialValue{Template: "https://fixture-user:token@example.test"}})
+		}, "value.template must contain exactly one {secret} placeholder"},
+		{"unknown encoder", "bad-encoder-cred", func(t *testing.T, rf *rotateFixture) {
+			rf.addGroup(t, "badencoder.rotate", forgejoGroup("badencoder.rotate"),
+				rotateGroupCredential{name: "bad-encoder-cred", system: "dev-a", kind: "dev-vm", deployedPath: "/home/fixture-user/token", verify: "allod site check",
+					value: &credentialValue{Template: "{secret}", Encode: "rot13"}})
+		}, `value.encode "rot13" is not exported by lib.credentialEncodings`},
 		{"dirty tree", "dirty-cred", func(t *testing.T, rf *rotateFixture) {
-			rf.addGroup(t, "dirty.rotate", tokenGroup{RegistryAlias: "dirty.rotate", Service: "forgejo", Account: "a", UITokenName: "u", RotationStrategy: "overlap"},
-				rotateGroupCredential{name: "dirty-cred", format: "raw-forgejo-token", system: "dev-a", kind: "dev-vm", user: "u", deployedPath: "/home/u/token", verifyType: "forge-token-verify"})
+			rf.addGroup(t, "dirty.rotate", forgejoGroup("dirty.rotate"),
+				rotateGroupCredential{name: "dirty-cred", system: "dev-a", kind: "dev-vm", deployedPath: "/home/fixture-user/token", verify: "forge token verify < /home/fixture-user/token"})
 			if err := os.WriteFile(filepath.Join(rf.checkout, "secrets", "leftover.age"), []byte("x"), 0644); err != nil {
 				t.Fatal(err)
 			}
 		}, "uncommitted or untracked changes"},
 		{"default branch", "branch-cred", func(t *testing.T, rf *rotateFixture) {
-			rf.addGroup(t, "branch.rotate", tokenGroup{RegistryAlias: "branch.rotate", Service: "forgejo", Account: "a", UITokenName: "u", RotationStrategy: "overlap"},
-				rotateGroupCredential{name: "branch-cred", format: "raw-forgejo-token", system: "dev-a", kind: "dev-vm", user: "u", deployedPath: "/home/u/token", verifyType: "forge-token-verify"})
+			rf.addGroup(t, "branch.rotate", forgejoGroup("branch.rotate"),
+				rotateGroupCredential{name: "branch-cred", system: "dev-a", kind: "dev-vm", deployedPath: "/home/fixture-user/token", verify: "forge token verify < /home/fixture-user/token"})
 			gitRun(t, rf.checkout, "switch", "-q", "master")
 		}, "is on its default branch 'master'"},
 	}
@@ -404,6 +392,9 @@ func TestSecretRotateGroupSelectionRefusals(t *testing.T) {
 			if rf.encryptCalls != 0 {
 				t.Errorf("age was asked to encrypt %d times, want 0", rf.encryptCalls)
 			}
+			if rf.decryptCalls != 0 {
+				t.Errorf("age was asked to decrypt %d times, want 0", rf.decryptCalls)
+			}
 			if tc.name == "dirty tree" {
 				os.Remove(filepath.Join(rf.checkout, "secrets", "leftover.age"))
 			}
@@ -417,42 +408,143 @@ func TestSecretRotateGroupSelectionRefusals(t *testing.T) {
 	}
 }
 
-// --- Format carry-forward ---
+// --- Legacy entries are named, not rotated ---
 
-func TestSecretRotateRawFormatWritesValueAsIs(t *testing.T) {
+func TestSecretRotateNamesMigrateForALegacyCredential(t *testing.T) {
+	cases := []struct {
+		name       string
+		credential string
+		want       string
+	}{
+		{"the selected credential is legacy", "legacy-cred", "credential 'legacy-cred' uses legacy format 'credential-store-url'; run 'allod secret migrate legacy-cred' before rotating it"},
+		{"another group member is legacy", "new-shape-cred", "rotation registry group 'legacy.rotate' also lists legacy credential 'legacy-cred' (format 'credential-store-url'); run 'allod secret migrate legacy-cred' before rotating this group"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rf := newRotateFixture(t)
+			rf.addGroup(t, "legacy.rotate", forgejoGroup("legacy.rotate"),
+				rotateGroupCredential{
+					name: "new-shape-cred", system: "dev-a", kind: "dev-vm", deployedPath: "/home/fixture-user/token",
+					verify: "forge token verify < /home/fixture-user/token",
+					value:  &credentialValue{Template: "https://fixture-user:{secret}@example.test"},
+				},
+				rotateGroupCredential{
+					name: "legacy-cred", format: "credential-store-url", system: "fixture-host", kind: "nixos-host",
+					deployedPath: "/root/.git-credentials", user: "fixture-user",
+					rawVerify: json.RawMessage(`{"type":"git-ls-remote","repo_url":"https://example.test/fixture/repo.git"}`),
+				})
+			before := rf.head(t)
+			rf.pipe("tok-fixture\n")
+
+			_, errText, code := rf.run(t, "secret", "rotate", tc.credential)
+			if code == 0 {
+				t.Fatal("exit 0, want a refusal")
+			}
+			if !strings.Contains(errText, tc.want) {
+				t.Errorf("stderr lacks %q\ngot: %q", tc.want, errText)
+			}
+			if rf.encryptCalls != 0 || rf.decryptCalls != 0 {
+				t.Errorf("encrypt=%d decrypt=%d, want 0 and 0", rf.encryptCalls, rf.decryptCalls)
+			}
+			if got := rf.head(t); got != before {
+				t.Error("a commit was made")
+			}
+		})
+	}
+}
+
+// TestSecretRotateRefusesACredentialCarryingBothShapes covers the
+// coexistence rule from the other side: a registry may hold legacy
+// credentials and migrated ones side by side, but one credential carrying
+// both 'format' and 'value' has not passed the registry's own check, and
+// guessing which half is authoritative would encrypt a value into the wrong
+// text.
+func TestSecretRotateRefusesACredentialCarryingBothShapes(t *testing.T) {
 	rf := newRotateFixture(t)
-	rf.addGroup(t, "raw.rotate", tokenGroup{RegistryAlias: "raw.rotate", Service: "forgejo", Account: "agent", UITokenName: "agent-token", RotationStrategy: "overlap"},
-		rotateGroupCredential{name: "raw-cred", format: "raw-forgejo-token", system: "dev-a", kind: "dev-vm", user: "testuser", deployedPath: "/home/testuser/.config/git/forgejo-token", verifyType: "forge-token-verify"})
-	before := rf.head(t)
-	rf.pipe("new-raw-value\n")
+	rf.addGroup(t, "mixed.rotate", forgejoGroup("mixed.rotate"),
+		rotateGroupCredential{
+			name: "mixed-cred", format: "credential-store-url", system: "dev-a", kind: "dev-vm",
+			deployedPath: "/root/.git-credentials", verify: "allod site check",
+			value: &credentialValue{Template: "https://fixture-user:{secret}@example.test"},
+		})
+	rf.pipe("tok-fixture\n")
 
-	out, errText, code := rf.run(t, "secret", "rotate", "raw-cred")
+	_, errText, code := rf.run(t, "secret", "rotate", "mixed-cred")
+	if code == 0 {
+		t.Fatal("exit 0, want a refusal")
+	}
+	if !strings.Contains(errText, "carries both a legacy 'format' and a declared 'value'") {
+		t.Errorf("stderr = %q", errText)
+	}
+	if rf.encryptCalls != 0 {
+		t.Errorf("age was asked to encrypt %d times, want 0", rf.encryptCalls)
+	}
+}
+
+// TestSecretRotateAcceptsARegistryHoldingBothShapes is the positive half:
+// a registry where one group is still legacy and another has migrated
+// decodes and rotates the migrated one without complaint.
+func TestSecretRotateAcceptsARegistryHoldingBothShapes(t *testing.T) {
+	rf := newRotateFixture(t)
+	rf.addGroup(t, "legacy.rotate", forgejoGroup("legacy.rotate"),
+		rotateGroupCredential{
+			name: "legacy-cred", format: "credential-store-url", system: "fixture-host", kind: "nixos-host",
+			deployedPath: "/root/.git-credentials", user: "fixture-user",
+			rawVerify: json.RawMessage(`{"type":"git-ls-remote","repo_url":"https://example.test/fixture/repo.git"}`),
+		})
+	rf.addGroup(t, "new.rotate", forgejoGroup("new.rotate"),
+		rotateGroupCredential{
+			name: "new-cred", system: "dev-a", kind: "dev-vm", deployedPath: "/home/fixture-user/token",
+			verify: "forge token verify < /home/fixture-user/token",
+			value:  &credentialValue{Template: "https://fixture-user:{secret}@example.test"},
+		})
+	rf.pipe("tok-fixture")
+
+	_, errText, code := rf.run(t, "secret", "rotate", "new-cred")
 	if code != 0 {
 		t.Fatalf("exit %d, stderr: %s", code, errText)
 	}
-	if string(rf.lastPlaintext) != "new-raw-value\n" {
-		t.Errorf("plaintext handed to age = %q, want the stdin bytes verbatim", rf.lastPlaintext)
+	if string(rf.lastPlaintext) != "https://fixture-user:tok-fixture@example.test" {
+		t.Errorf("plaintext = %q", rf.lastPlaintext)
 	}
-	if want := []string{fixtureHostKey, fixtureVMKey}; strings.Join(rf.lastRecipients, "|") != strings.Join(want, "|") {
-		t.Errorf("recipients = %v, want %v", rf.lastRecipients, want)
+	if got := rf.commitFiles(t); got != "secrets/new-cred.age" {
+		t.Errorf("commit files = %q, want only the rotated credential", got)
 	}
-	if got := rf.file(t, "secrets/raw-cred.age"); !strings.HasPrefix(got, "age-encryption.org/v1\n") {
-		t.Errorf("ciphertext file = %q", got)
-	}
-	if got := rf.head(t); got == before {
-		t.Error("no commit was made")
-	}
-	if got, want := gitRun(t, rf.checkout, "log", "-1", "--format=%s"), "rotate raw.rotate Forgejo token"; got != want {
-		t.Errorf("commit subject = %q, want %q", got, want)
-	}
-	if !strings.Contains(out, "Wrote secrets/raw-cred.age, encrypted to 2 recipients from secrets.nix") {
-		t.Errorf("stdout = %q", out)
-	}
-	if got := rf.originHead(t, "agent/landing"); got != rf.head(t) {
-		t.Errorf("origin agent/landing = %q, want the new HEAD %q", got, rf.head(t))
-	}
-	if strings.Contains(out+errText, "new-raw-value") {
-		t.Error("the plaintext was printed")
+}
+
+// --- Rendering ---
+
+// TestSecretRotateRendersEachDeclaredValueShape drives the same table
+// TestSecretCreateRendersEachDeclaredValueShape drives through 'create', so
+// both commands are pinned to the same bytes rather than each to its own.
+func TestSecretRotateRendersEachDeclaredValueShape(t *testing.T) {
+	for _, tc := range credentialRenderCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.needsRclone {
+				installFakeRclone(t)
+			}
+			rf := newRotateFixture(t)
+			rf.addGroup(t, "render.rotate", forgejoGroup("render.rotate"),
+				rotateGroupCredential{
+					name: "render-cred", system: "dev-a", kind: "dev-vm", deployedPath: "/home/fixture-user/token",
+					verify: "forge token verify < /home/fixture-user/token", value: tc.value,
+				})
+			rf.pipe(tc.secret)
+
+			out, errText, code := rf.run(t, "secret", "rotate", "render-cred")
+			if code != 0 {
+				t.Fatalf("exit %d, stderr: %s", code, errText)
+			}
+			if string(rf.lastPlaintext) != tc.want {
+				t.Errorf("plaintext handed to age = %q, want %q", rf.lastPlaintext, tc.want)
+			}
+			if rf.decryptCalls != 0 {
+				t.Errorf("rotate decrypted %d times, want 0", rf.decryptCalls)
+			}
+			if strings.Contains(out+errText, tc.secret) || strings.Contains(out+errText, tc.want) {
+				t.Error("the value or the rendered plaintext was printed")
+			}
+		})
 	}
 }
 
@@ -468,25 +560,25 @@ func encryptRecorder() (calls *[][2]any, restore func()) {
 	return &recorded, func() { secretEncrypt = previous }
 }
 
-func TestSecretRotateCredentialStoreURLCarriesUserAndHostForwardAcrossGroup(t *testing.T) {
+// TestSecretRotateRendersEveryGroupMemberFromOneValue is the group contract:
+// one value on stdin, one rendering per member from that member's own
+// declared template, one commit naming every path.
+func TestSecretRotateRendersEveryGroupMemberFromOneValue(t *testing.T) {
 	rf := newRotateFixture(t)
-	rf.addGroup(t, "shared.rotate", tokenGroup{RegistryAlias: "shared.rotate", Service: "forgejo", Account: "testuser", UITokenName: "shared-token", RotationStrategy: "overlap"},
+	rf.addGroup(t, "shared.rotate", forgejoGroup("shared.rotate"),
 		rotateGroupCredential{
-			name: "cred-a", format: "credential-store-url", system: "control-host", kind: "nixos-host",
-			deployedPath: "/root/.git-credentials", verifyType: "git-ls-remote",
-			repoURL: "https://forge.test/testuser/private.git", context: "root-netrc",
-			plaintext: "https://alice:old-shared@forge.test",
+			name: "cred-a", system: "fixture-host", kind: "nixos-host", deployedPath: "/root/.git-credentials",
+			verify: "sudo env HOME=/root GIT_TERMINAL_PROMPT=0 git ls-remote https://example.test/fixture/repo.git HEAD",
+			value:  &credentialValue{Template: "https://fixture-user:{secret}@example.test"},
 		},
 		rotateGroupCredential{
-			name: "cred-b", format: "credential-store-url", system: "dev-a", kind: "dev-vm",
-			deployedPath: "/root/.git-credentials", verifyType: "git-ls-remote",
-			repoURL: "https://forge.test/testuser/private.git", context: "root-netrc",
-			plaintext: "https://bob:old-shared@forge.test",
+			name: "cred-b", system: "dev-a", kind: "dev-vm", deployedPath: "/home/fixture-user/token",
+			verify: "forge token verify < /home/fixture-user/token",
 		})
 
 	calls, restoreEncrypt := encryptRecorder()
 	defer restoreEncrypt()
-	rf.pipe("new-shared-token\n")
+	rf.pipe("tok-fixture")
 
 	out, errText, code := rf.run(t, "secret", "rotate", "cred-a")
 	if code != 0 {
@@ -495,97 +587,41 @@ func TestSecretRotateCredentialStoreURLCarriesUserAndHostForwardAcrossGroup(t *t
 	if len(*calls) != 2 {
 		t.Fatalf("age was asked to encrypt %d times, want 2", len(*calls))
 	}
-	if got := string((*calls)[0][1].([]byte)); got != "https://alice:new-shared-token@forge.test" {
+	if got := string((*calls)[0][1].([]byte)); got != "https://fixture-user:tok-fixture@example.test" {
 		t.Errorf("cred-a plaintext = %q", got)
 	}
-	if got := string((*calls)[1][1].([]byte)); got != "https://bob:new-shared-token@forge.test" {
-		t.Errorf("cred-b plaintext = %q", got)
+	if got := string((*calls)[1][1].([]byte)); got != "tok-fixture" {
+		t.Errorf("cred-b plaintext = %q, want the value verbatim", got)
 	}
 	if got, want := gitRun(t, rf.checkout, "show", "--name-only", "--format=", "HEAD"), "secrets/cred-a.age\nsecrets/cred-b.age"; got != want {
 		t.Errorf("commit files = %q, want %q", got, want)
+	}
+	if got, want := gitRun(t, rf.checkout, "log", "-1", "--format=%s"), "rotate shared.rotate Forgejo token"; got != want {
+		t.Errorf("commit subject = %q, want %q", got, want)
 	}
 	for _, want := range []string{"Wrote secrets/cred-a.age, encrypted to 2 recipients", "Wrote secrets/cred-b.age, encrypted to 2 recipients"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("stdout lacks %q\ngot: %q", want, out)
 		}
 	}
-	if strings.Contains(out+errText, "new-shared-token") || strings.Contains(out+errText, "old-shared") {
-		t.Error("a token value was printed")
+	if got := rf.originHead(t, "agent/landing"); got != rf.head(t) {
+		t.Errorf("origin agent/landing = %q, want the new HEAD %q", got, rf.head(t))
 	}
-}
-
-func TestSecretRotateRcloneStanzaObscuresPasswordOnly(t *testing.T) {
-	installFakeRclone(t)
-	rf := newRotateFixture(t)
-	rf.addGroup(t, "site.rotate", tokenGroup{RegistryAlias: "site.rotate", Service: "forgejo", Account: "site", UITokenName: "site-token", RotationStrategy: "overlap"},
-		rotateGroupCredential{
-			name: "site-cred", format: "rclone-remote-stanza", system: "control-host", kind: "nixos-host",
-			deployedPath: "/root/.config/rclone/rclone.conf", verifyType: "site-check",
-			plaintext: "[shared]\ntype = ftp\nhost = ftp.example.org\nuser = deploy\npass = OLD-OBSCURED\nexplicit_tls = true\n",
-		})
-
-	calls, restoreEncrypt := encryptRecorder()
-	defer restoreEncrypt()
-	rf.pipe("new-site-password\n")
-
-	out, errText, code := rf.run(t, "secret", "rotate", "site-cred")
-	if code != 0 {
-		t.Fatalf("exit %d, stderr: %s", code, errText)
-	}
-	if len(*calls) != 1 {
-		t.Fatalf("age was asked to encrypt %d times, want 1", len(*calls))
-	}
-	want := "[shared]\ntype = ftp\nhost = ftp.example.org\nuser = deploy\npass = OBS-new-site-password\nexplicit_tls = true\n"
-	if got := string((*calls)[0][1].([]byte)); got != want {
-		t.Errorf("plaintext = %q, want %q", got, want)
-	}
-	if !strings.Contains(out, "Wrote secrets/site-cred.age") {
-		t.Errorf("stdout = %q", out)
-	}
-	if strings.Contains(out+errText, "new-site-password") || strings.Contains(out+errText, "OBS-new-site-password") || strings.Contains(out+errText, "OLD-OBSCURED") {
-		t.Error("a password or its obscured form was printed")
-	}
-}
-
-func TestSecretRotateMalformedOldPlaintextRefusesBeforeEncrypt(t *testing.T) {
-	rf := newRotateFixture(t)
-	rf.addGroup(t, "malformed.rotate", tokenGroup{RegistryAlias: "malformed.rotate", Service: "forgejo", Account: "a", UITokenName: "u", RotationStrategy: "overlap"},
-		rotateGroupCredential{
-			name: "malformed-cred", format: "credential-store-url", system: "control-host", kind: "nixos-host",
-			deployedPath: "/root/.git-credentials", verifyType: "git-ls-remote", repoURL: "https://forge.test/x/y.git", context: "root-netrc",
-			plaintext: "not a url at all",
-		})
-	before := rf.head(t)
-	rf.pipe("value\n")
-
-	_, errText, code := rf.run(t, "secret", "rotate", "malformed-cred")
-	if code == 0 {
-		t.Fatal("exit 0, want a refusal")
-	}
-	if !strings.Contains(errText, "is not a supported https://user:token@host URL") {
-		t.Errorf("stderr = %q", errText)
-	}
-	if rf.encryptCalls != 0 {
-		t.Errorf("age was asked to encrypt %d times, want 0", rf.encryptCalls)
-	}
-	if got := rf.head(t); got != before {
-		t.Error("a commit was made")
-	}
-	if got := rf.status(t); got != "" {
-		t.Errorf("tree is not clean:\n%s", got)
+	if strings.Contains(out+errText, "tok-fixture") {
+		t.Error("the value was printed")
 	}
 }
 
 func TestSecretRotateMissingRcloneIsClearFailure(t *testing.T) {
 	rf := newRotateFixture(t)
-	rf.addGroup(t, "site.rotate", tokenGroup{RegistryAlias: "site.rotate", Service: "forgejo", Account: "site", UITokenName: "site-token", RotationStrategy: "overlap"},
+	rf.addGroup(t, "site.rotate", forgejoGroup("site.rotate"),
 		rotateGroupCredential{
-			name: "site-cred", format: "rclone-remote-stanza", system: "control-host", kind: "nixos-host",
-			deployedPath: "/root/.config/rclone/rclone.conf", verifyType: "site-check",
-			plaintext: "[shared]\ntype = ftp\nhost = ftp.example.org\nuser = deploy\npass = OLD-OBSCURED\nexplicit_tls = true\n",
+			name: "site-cred", system: "fixture-host", kind: "nixos-host",
+			deployedPath: "/root/.config/rclone/rclone.conf", verify: "allod site check",
+			value: &credentialValue{Template: fixtureRcloneTemplate, Encode: "rclone-obscure"},
 		})
 	before := rf.file(t, "secrets/site-cred.age")
-	rf.pipe("new-site-password\n")
+	rf.pipe("pw-fixture\n")
 	t.Setenv("PATH", pathWithoutRclone(t))
 
 	_, errText, code := rf.run(t, "secret", "rotate", "site-cred")
@@ -595,7 +631,7 @@ func TestSecretRotateMissingRcloneIsClearFailure(t *testing.T) {
 	if !strings.Contains(errText, "rclone not found on PATH") {
 		t.Errorf("stderr = %q", errText)
 	}
-	if strings.Contains(errText, "new-site-password") {
+	if strings.Contains(errText, "pw-fixture") {
 		t.Error("the password was printed")
 	}
 	if got := rf.file(t, "secrets/site-cred.age"); got != before {
@@ -607,20 +643,19 @@ func TestSecretRotateMissingRcloneIsClearFailure(t *testing.T) {
 
 func TestSecretRotateDryRunPrintsStepsWithoutWriting(t *testing.T) {
 	rf := newRotateFixture(t)
-	rf.addGroup(t, "shared.rotate", tokenGroup{RegistryAlias: "shared.rotate", Service: "forgejo", Account: "testuser", UITokenName: "shared-token", RotationStrategy: "overlap"},
+	rf.addGroup(t, "shared.rotate", forgejoGroup("shared.rotate"),
 		rotateGroupCredential{
-			name: "cred-a", format: "credential-store-url", system: "control-host", kind: "nixos-host",
-			deployedPath: "/root/.git-credentials", verifyType: "git-ls-remote",
-			repoURL: "https://forge.test/testuser/private.git", context: "root-netrc",
-			plaintext: "https://alice:old-shared@forge.test",
+			name: "cred-a", system: "fixture-host", kind: "nixos-host", deployedPath: "/root/.git-credentials",
+			verify: "sudo env HOME=/root GIT_TERMINAL_PROMPT=0 git ls-remote https://example.test/fixture/repo.git HEAD",
+			value:  &credentialValue{Template: "https://fixture-user:{secret}@example.test"},
 		},
 		rotateGroupCredential{
-			name: "cred-b", format: "credential-store-url", system: "dev-a", kind: "dev-vm",
-			deployedPath: "/root/.git-credentials", verifyType: "git-ls-remote",
-			repoURL: "https://forge.test/testuser/private.git", context: "root-netrc",
-			plaintext: "https://bob:old-shared@forge.test",
+			name: "cred-b", system: "dev-a", kind: "dev-vm", deployedPath: "/root/.git-credentials",
+			verify: "sudo env HOME=/root GIT_TERMINAL_PROMPT=0 git ls-remote https://example.test/fixture/repo.git HEAD",
+			value:  &credentialValue{Template: "https://fixture-user:{secret}@example.test"},
 		})
 	before := rf.head(t)
+	stdin = failIfReadFrom{t}
 
 	out, errText, code := rf.run(t, "secret", "rotate", "cred-a", "--dry-run")
 	if code != 0 {
@@ -649,14 +684,14 @@ func TestSecretRotateDryRunPrintsStepsWithoutWriting(t *testing.T) {
 		"Forgejo group: shared.rotate",
 		"secrets/cred-a.age",
 		"secrets/cred-b.age",
-		"control-host (nixos-host)",
+		"fixture-host (nixos-host)",
 		"dev-a (dev-vm)",
 		`A live run commits secrets/cred-a.age secrets/cred-b.age`,
 		`as "rotate shared.rotate Forgejo token" and pushes agent/landing to origin; merging stays your act.`,
 		"nix flake update secrets",
-		"sudo nixos-rebuild switch --flake ~/work/allod/deploy#control-host",
+		"sudo nixos-rebuild switch --flake ~/work/allod/deploy#fixture-host",
 		"rebuild-vm-from-host dev-a",
-		"GIT_TERMINAL_PROMPT=0 git ls-remote https://forge.test/testuser/private.git HEAD",
+		"GIT_TERMINAL_PROMPT=0 git ls-remote https://example.test/fixture/repo.git HEAD",
 		"Revocation gate",
 	} {
 		if !strings.Contains(errText, want) {
@@ -676,8 +711,8 @@ func TestSecretRotateDryRunPrintsStepsWithoutWriting(t *testing.T) {
 
 func TestSecretRotateDryRunStillRefusesADirtyTree(t *testing.T) {
 	rf := newRotateFixture(t)
-	rf.addGroup(t, "raw.rotate", tokenGroup{RegistryAlias: "raw.rotate", Service: "forgejo", Account: "agent", UITokenName: "agent-token", RotationStrategy: "overlap"},
-		rotateGroupCredential{name: "raw-cred", format: "raw-forgejo-token", system: "dev-a", kind: "dev-vm", user: "testuser", deployedPath: "/home/testuser/.config/git/forgejo-token", verifyType: "forge-token-verify"})
+	rf.addGroup(t, "raw.rotate", forgejoGroup("raw.rotate"),
+		rotateGroupCredential{name: "raw-cred", system: "dev-a", kind: "dev-vm", deployedPath: "/home/fixture-user/token", verify: "forge token verify < /home/fixture-user/token"})
 	if err := os.WriteFile(filepath.Join(rf.checkout, "secrets", "leftover.age"), []byte("x"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -691,33 +726,40 @@ func TestSecretRotateDryRunStillRefusesADirtyTree(t *testing.T) {
 	}
 }
 
-// --- Printed steps: service wording and the refresh-local-auth line ---
+// --- Printed steps: value shape, service wording, refresh-local-auth ---
 
 func TestSecretRotatePrintedStepsVaryByServiceAndLocalAuthRefresh(t *testing.T) {
+	installFakeRclone(t)
 	rf := newRotateFixture(t)
-	rf.addGroup(t, "raw.rotate", tokenGroup{RegistryAlias: "raw.rotate", Service: "forgejo", Account: "agent", UITokenName: "agent-token", RotationStrategy: "overlap"},
-		rotateGroupCredential{name: "raw-cred", format: "raw-forgejo-token", system: "dev-a", kind: "dev-vm", user: "testuser", deployedPath: "/home/testuser/.config/git/forgejo-token", verifyType: "forge-token-verify"})
-	rf.addGroup(t, "none.rotate", tokenGroup{RegistryAlias: "none.rotate", Service: "none", RotationStrategy: "overlap"},
-		rotateGroupCredential{name: "none-cred", format: "raw-forgejo-token", system: "dev-b", kind: "dev-vm", user: "testuser", deployedPath: "/home/testuser/.config/git/other-token", verifyType: "forge-token-verify"})
-	rf.addGroup(t, "refresh.rotate", tokenGroup{
-		RegistryAlias: "refresh.rotate", Service: "forgejo", Account: "testuser", UITokenName: "refresh-token", RotationStrategy: "in-place",
-		LocalAuthRefresh: []localAuthRefreshEntry{{
-			Contract: "nixos-netrc-from-root-git-credentials", System: "control-host", LocalUsername: "testuser", SourceCredential: "refresh-cred",
-		}},
-	}, rotateGroupCredential{
-		name: "refresh-cred", format: "credential-store-url", system: "control-host", kind: "nixos-host",
-		deployedPath: "/root/.git-credentials", verifyType: "git-ls-remote", repoURL: "https://forge.test/testuser/private.git", context: "root-netrc",
-		plaintext: "https://dave:old@forge.test",
+	rf.addGroup(t, "raw.rotate", forgejoGroup("raw.rotate"),
+		rotateGroupCredential{name: "raw-cred", system: "dev-a", kind: "dev-vm", deployedPath: "/home/fixture-user/token", verify: "forge token verify < /home/fixture-user/token"})
+	noneGroup := forgejoGroup("none.rotate")
+	noneGroup.Service, noneGroup.Account, noneGroup.UITokenName = "none", "", ""
+	rf.addGroup(t, "none.rotate", noneGroup,
+		rotateGroupCredential{name: "none-cred", system: "dev-b", kind: "dev-vm", deployedPath: "/home/fixture-user/other-token", verify: "allod site check",
+			value: &credentialValue{Template: fixtureRcloneTemplate, Encode: "rclone-obscure"}})
+	refreshGroup := forgejoGroup("refresh.rotate")
+	refreshGroup.RotationStrategy = "in-place"
+	refreshGroup.LocalAuthRefresh = []localAuthRefreshEntry{{
+		Contract: "nixos-netrc-from-root-git-credentials", System: "fixture-host", LocalUsername: "fixture-user", SourceCredential: "refresh-cred",
+	}}
+	rf.addGroup(t, "refresh.rotate", refreshGroup, rotateGroupCredential{
+		name: "refresh-cred", system: "fixture-host", kind: "nixos-host", deployedPath: "/root/.git-credentials",
+		verify: "sudo env HOME=/root GIT_TERMINAL_PROMPT=0 git ls-remote https://example.test/fixture/repo.git HEAD",
+		value:  &credentialValue{Template: "https://fixture-user:{secret}@example.test"},
 	})
 
 	_, forgejoOut, code := rf.run(t, "secret", "rotate", "raw-cred", "--dry-run")
 	if code != 0 {
-		t.Fatalf("raw.rotate dry run: exit %d", code)
+		t.Fatalf("raw.rotate dry run: exit %d\n%s", code, forgejoOut)
 	}
-	if !strings.Contains(forgejoOut, "Forgejo group: raw.rotate") || !strings.Contains(forgejoOut, "Forgejo token: agent/agent-token") {
+	if !strings.Contains(forgejoOut, "Forgejo group: raw.rotate") || !strings.Contains(forgejoOut, "Forgejo token: fixture-user/fixture-token") {
 		t.Errorf("forgejo header missing:\n%s", forgejoOut)
 	}
-	if !strings.Contains(forgejoOut, "Forgejo UI token 'agent-token' while logged in as 'agent'") {
+	if !strings.Contains(forgejoOut, "  - secrets/raw-cred.age (raw-cred, plain)") {
+		t.Errorf("a credential with no declared value did not print as plain:\n%s", forgejoOut)
+	}
+	if !strings.Contains(forgejoOut, "Forgejo UI token 'fixture-token' while logged in as 'fixture-user'") {
 		t.Errorf("forgejo revocation wording missing:\n%s", forgejoOut)
 	}
 	if strings.Contains(forgejoOut, "refresh-local-auth") {
@@ -726,10 +768,13 @@ func TestSecretRotatePrintedStepsVaryByServiceAndLocalAuthRefresh(t *testing.T) 
 
 	_, noneOut, code := rf.run(t, "secret", "rotate", "none-cred", "--dry-run")
 	if code != 0 {
-		t.Fatalf("none.rotate dry run: exit %d", code)
+		t.Fatalf("none.rotate dry run: exit %d\n%s", code, noneOut)
 	}
 	if !strings.Contains(noneOut, "Registry group: none.rotate") || !strings.Contains(noneOut, "Service: none (not a Forgejo token)") {
 		t.Errorf("none header missing:\n%s", noneOut)
+	}
+	if !strings.Contains(noneOut, "  - secrets/none-cred.age (none-cred, template, encode rclone-obscure)") {
+		t.Errorf("an encoded template did not print its encoding:\n%s", noneOut)
 	}
 	for _, notWanted := range []string{"Forgejo group:", "Forgejo token:", "Forgejo UI token"} {
 		if strings.Contains(noneOut, notWanted) {
@@ -742,7 +787,10 @@ func TestSecretRotatePrintedStepsVaryByServiceAndLocalAuthRefresh(t *testing.T) 
 
 	_, refreshOut, code := rf.run(t, "secret", "rotate", "refresh-cred", "--dry-run")
 	if code != 0 {
-		t.Fatalf("refresh.rotate dry run: exit %d", code)
+		t.Fatalf("refresh.rotate dry run: exit %d\n%s", code, refreshOut)
+	}
+	if !strings.Contains(refreshOut, "  - secrets/refresh-cred.age (refresh-cred, template)") {
+		t.Errorf("a template with no encoding did not print as template:\n%s", refreshOut)
 	}
 	if !strings.Contains(refreshOut, "rotate-token refresh-local-auth --group refresh.rotate") {
 		t.Errorf("refresh-local-auth step missing:\n%s", refreshOut)
@@ -764,7 +812,7 @@ func TestSecretRotatePrintedStepsVaryByServiceAndLocalAuthRefresh(t *testing.T) 
 
 	// A live run, by contrast, has actually rotated the secret by the time
 	// it prints, so the same step is a real instruction to run now.
-	rf.pipe("new-value\n")
+	rf.pipe("tok-fixture\n")
 	_, liveErrText, code := rf.run(t, "secret", "rotate", "refresh-cred")
 	if code != 0 {
 		t.Fatalf("refresh.rotate live run: exit %d, stderr: %s", code, liveErrText)
@@ -777,25 +825,79 @@ func TestSecretRotatePrintedStepsVaryByServiceAndLocalAuthRefresh(t *testing.T) 
 	}
 }
 
+// --- Verification ---
+
+// TestPrintVerificationQuotesRemoteCommandsAndDetectsTheLocalHost pins the
+// exact printed text for both halves of the local/remote rule, with a
+// single quote embedded in the command and in the system name so the POSIX
+// quoting is exercised rather than assumed.
+func TestPrintVerificationQuotesRemoteCommandsAndDetectsTheLocalHost(t *testing.T) {
+	previous := secretHostName
+	defer func() { secretHostName = previous }()
+	secretHostName = func() (string, error) { return "fixture-host", nil }
+
+	group := tokenGroup{Credentials: []registryCredential{{
+		Credential: "cred",
+		Targets: []registryTarget{
+			{System: "fixture-host", Kind: "nixos-host", Verify: fixtureVerify("allod site check")},
+			{System: "dev-a", Kind: "dev-vm", Verify: fixtureVerify("forge token verify < /home/fixture-user/token")},
+			{System: "dev-b", Kind: "dev-vm", Verify: fixtureVerify(`allod site check --note 'it'`)},
+			{System: `dev'c`, Kind: "dev-vm", Verify: fixtureVerify("tailscale status --peers=false")},
+		},
+	}}}
+	var out bytes.Buffer
+	printVerification(&out, group)
+	want := "\n--- Verification ---\n" +
+		"fixture-host (nixos-host):\n" +
+		"   allod site check\n" +
+		"dev-a (dev-vm):\n" +
+		"   ssh 'dev-a' 'forge token verify < /home/fixture-user/token'\n" +
+		"dev-b (dev-vm):\n" +
+		`   ssh 'dev-b' 'allod site check --note '\''it'\'''` + "\n" +
+		`dev'c (dev-vm):` + "\n" +
+		`   ssh 'dev'\''c' 'tailscale status --peers=false'` + "\n"
+	if got := out.String(); got != want {
+		t.Errorf("printVerification wrote\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestSecretRotatePrintsVerificationThroughTheHostNameSeam drives the same
+// rule through the command, so the seam is the one the command consults.
+func TestSecretRotatePrintsVerificationThroughTheHostNameSeam(t *testing.T) {
+	previous := secretHostName
+	defer func() { secretHostName = previous }()
+	secretHostName = func() (string, error) { return "dev-a", nil }
+
+	rf := newRotateFixture(t)
+	rf.addGroup(t, "verify.rotate", forgejoGroup("verify.rotate"),
+		rotateGroupCredential{name: "local-cred", system: "dev-a", kind: "dev-vm", deployedPath: "/home/fixture-user/token", verify: "forge token verify < /home/fixture-user/token"},
+		rotateGroupCredential{name: "remote-cred", system: "dev-b", kind: "dev-vm", deployedPath: "/home/fixture-user/token", verify: "forge token verify < /home/fixture-user/token"})
+
+	_, errText, code := rf.run(t, "secret", "rotate", "local-cred", "--dry-run")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, errText)
+	}
+	if !strings.Contains(errText, "dev-a (dev-vm):\n   forge token verify < /home/fixture-user/token\n") {
+		t.Errorf("a target on this machine was not printed bare:\n%s", errText)
+	}
+	if !strings.Contains(errText, "dev-b (dev-vm):\n   ssh 'dev-b' 'forge token verify < /home/fixture-user/token'\n") {
+		t.Errorf("a remote target was not ssh-wrapped:\n%s", errText)
+	}
+}
+
 // --- Landing ---
 
 func TestSecretRotateRestoresAllCiphertextsWhenChecksFail(t *testing.T) {
 	rf := newRotateFixture(t)
-	rf.addGroup(t, "shared.rotate", tokenGroup{RegistryAlias: "shared.rotate", Service: "forgejo", Account: "testuser", UITokenName: "shared-token", RotationStrategy: "overlap"},
-		rotateGroupCredential{
-			name: "cred-a", format: "credential-store-url", system: "control-host", kind: "nixos-host",
-			deployedPath: "/root/.git-credentials", verifyType: "git-ls-remote", repoURL: "https://forge.test/x/y.git", context: "root-netrc",
-			plaintext: "https://alice:old@forge.test",
-		},
-		rotateGroupCredential{
-			name: "cred-b", format: "credential-store-url", system: "dev-a", kind: "dev-vm",
-			deployedPath: "/root/.git-credentials", verifyType: "git-ls-remote", repoURL: "https://forge.test/x/y.git", context: "root-netrc",
-			plaintext: "https://bob:old@forge.test",
-		})
+	rf.addGroup(t, "shared.rotate", forgejoGroup("shared.rotate"),
+		rotateGroupCredential{name: "cred-a", system: "fixture-host", kind: "nixos-host", deployedPath: "/root/.git-credentials", verify: "allod site check",
+			value: &credentialValue{Template: "https://fixture-user:{secret}@example.test"}},
+		rotateGroupCredential{name: "cred-b", system: "dev-a", kind: "dev-vm", deployedPath: "/root/.git-credentials", verify: "allod site check",
+			value: &credentialValue{Template: "https://fixture-user:{secret}@example.test"}})
 	beforeA, beforeB := rf.file(t, "secrets/cred-a.age"), rf.file(t, "secrets/cred-b.age")
 	before := rf.head(t)
 	rf.checkStatus = 3
-	rf.pipe("new-token\n")
+	rf.pipe("tok-fixture")
 
 	_, errText, code := rf.run(t, "secret", "rotate", "cred-a")
 	if code != 3 {
@@ -843,10 +945,10 @@ func TestSecretRotateRestoresAllCiphertextsWhenChecksFail(t *testing.T) {
 // catches it with no window left afterward.
 func TestSecretRotateRefusesWhenTheBranchChangedDuringTheFlakeCheck(t *testing.T) {
 	rf := newRotateFixture(t)
-	rf.addGroup(t, "raw.rotate", tokenGroup{RegistryAlias: "raw.rotate", Service: "forgejo", Account: "agent", UITokenName: "agent-token", RotationStrategy: "overlap"},
-		rotateGroupCredential{name: "raw-cred", format: "raw-forgejo-token", system: "dev-a", kind: "dev-vm", user: "testuser", deployedPath: "/home/testuser/.config/git/forgejo-token", verifyType: "forge-token-verify"})
+	rf.addGroup(t, "raw.rotate", forgejoGroup("raw.rotate"),
+		rotateGroupCredential{name: "raw-cred", system: "dev-a", kind: "dev-vm", deployedPath: "/home/fixture-user/token", verify: "forge token verify < /home/fixture-user/token"})
 	before := rf.file(t, "secrets/raw-cred.age")
-	rf.pipe("new-value\n")
+	rf.pipe("tok-fixture\n")
 	secretFlakeCheck = func(checkout string) int {
 		rf.checkCalls++
 		gitRun(t, checkout, "switch", "-q", "-c", "agent/hijacked-during-check")
@@ -873,20 +975,14 @@ func TestSecretRotateRefusesWhenTheBranchChangedDuringTheFlakeCheck(t *testing.T
 
 func TestSecretRotateRestoresCiphertextsWhenCommitFails(t *testing.T) {
 	rf := newRotateFixture(t)
-	rf.addGroup(t, "shared.rotate", tokenGroup{RegistryAlias: "shared.rotate", Service: "forgejo", Account: "testuser", UITokenName: "shared-token", RotationStrategy: "overlap"},
-		rotateGroupCredential{
-			name: "cred-a", format: "credential-store-url", system: "control-host", kind: "nixos-host",
-			deployedPath: "/root/.git-credentials", verifyType: "git-ls-remote", repoURL: "https://forge.test/x/y.git", context: "root-netrc",
-			plaintext: "https://alice:old@forge.test",
-		},
-		rotateGroupCredential{
-			name: "cred-b", format: "credential-store-url", system: "dev-a", kind: "dev-vm",
-			deployedPath: "/root/.git-credentials", verifyType: "git-ls-remote", repoURL: "https://forge.test/x/y.git", context: "root-netrc",
-			plaintext: "https://bob:old@forge.test",
-		})
+	rf.addGroup(t, "shared.rotate", forgejoGroup("shared.rotate"),
+		rotateGroupCredential{name: "cred-a", system: "fixture-host", kind: "nixos-host", deployedPath: "/root/.git-credentials", verify: "allod site check",
+			value: &credentialValue{Template: "https://fixture-user:{secret}@example.test"}},
+		rotateGroupCredential{name: "cred-b", system: "dev-a", kind: "dev-vm", deployedPath: "/root/.git-credentials", verify: "allod site check",
+			value: &credentialValue{Template: "https://fixture-user:{secret}@example.test"}})
 	beforeA, beforeB := rf.file(t, "secrets/cred-a.age"), rf.file(t, "secrets/cred-b.age")
 	installFailingPreCommit(t, rf.secretFixture)
-	rf.pipe("new-token\n")
+	rf.pipe("tok-fixture")
 
 	_, errText, code := rf.run(t, "secret", "rotate", "cred-a")
 	if code == 0 {
@@ -917,10 +1013,10 @@ func TestSecretRotateRestoresCiphertextsWhenCommitFails(t *testing.T) {
 // be skipped because of it.
 func TestSecretRotateReportsPushFailureAndKeepsCommit(t *testing.T) {
 	rf := newRotateFixture(t)
-	rf.addGroup(t, "raw.rotate", tokenGroup{RegistryAlias: "raw.rotate", Service: "forgejo", Account: "agent", UITokenName: "agent-token", RotationStrategy: "overlap"},
-		rotateGroupCredential{name: "raw-cred", format: "raw-forgejo-token", system: "dev-a", kind: "dev-vm", user: "testuser", deployedPath: "/home/testuser/.config/git/forgejo-token", verifyType: "forge-token-verify"})
+	rf.addGroup(t, "raw.rotate", forgejoGroup("raw.rotate"),
+		rotateGroupCredential{name: "raw-cred", system: "dev-a", kind: "dev-vm", deployedPath: "/home/fixture-user/token", verify: "forge token verify < /home/fixture-user/token"})
 	before := rf.head(t)
-	rf.pipe("value\n")
+	rf.pipe("tok-fixture\n")
 	gitRun(t, rf.checkout, "remote", "set-url", "--push", "origin", filepath.Join(t.TempDir(), "gone.git"))
 
 	_, errText, code := rf.run(t, "secret", "rotate", "raw-cred")
@@ -998,9 +1094,9 @@ func TestWriteCiphertextAtomicReplacesFileWhollyOrNotAtAll(t *testing.T) {
 
 func TestSecretRotateLeavesNoTemporaryFilesBehind(t *testing.T) {
 	rf := newRotateFixture(t)
-	rf.addGroup(t, "raw.rotate", tokenGroup{RegistryAlias: "raw.rotate", Service: "forgejo", Account: "agent", UITokenName: "agent-token", RotationStrategy: "overlap"},
-		rotateGroupCredential{name: "raw-cred", format: "raw-forgejo-token", system: "dev-a", kind: "dev-vm", user: "testuser", deployedPath: "/home/testuser/.config/git/forgejo-token", verifyType: "forge-token-verify"})
-	rf.pipe("new-value\n")
+	rf.addGroup(t, "raw.rotate", forgejoGroup("raw.rotate"),
+		rotateGroupCredential{name: "raw-cred", system: "dev-a", kind: "dev-vm", deployedPath: "/home/fixture-user/token", verify: "forge token verify < /home/fixture-user/token"})
+	rf.pipe("tok-fixture\n")
 
 	if _, errText, code := rf.run(t, "secret", "rotate", "raw-cred"); code != 0 {
 		t.Fatalf("exit %d, stderr: %s", code, errText)
@@ -1016,75 +1112,15 @@ func TestSecretRotateLeavesNoTemporaryFilesBehind(t *testing.T) {
 	}
 }
 
-// --- Structured value validation ---
-
-func TestSecretRotateRefusesAStructuredValueWithEmbeddedWhitespaceOrReservedCharacters(t *testing.T) {
-	cases := []struct {
-		name, format, value, want string
-	}{
-		{"credential-store-url embedded newline", "credential-store-url", "token\nextra\n", "control character"},
-		{"credential-store-url embedded space", "credential-store-url", "tok en\n", "whitespace"},
-		{"credential-store-url embedded at-sign", "credential-store-url", "tok@en\n", "\"@\""},
-		{"credential-store-url embedded slash", "credential-store-url", "tok/en\n", "\"/\""},
-		// git percent-decodes a credential-store URL's password, so
-		// 'tok%40x' would be stored as typed but later supplied to git as
-		// 'tok@x' — a different value than the one that was encrypted.
-		{"credential-store-url embedded percent", "credential-store-url", "tok%40x\n", "\"%\""},
-		{"rclone-remote-stanza embedded newline", "rclone-remote-stanza", "pass\nextra\n", "control character"},
-		{"rclone-remote-stanza embedded space", "rclone-remote-stanza", "pass word\n", "whitespace"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			rf := newRotateFixture(t)
-			switch tc.format {
-			case "credential-store-url":
-				rf.addGroup(t, "cred.rotate", tokenGroup{RegistryAlias: "cred.rotate", Service: "forgejo", Account: "a", UITokenName: "u", RotationStrategy: "overlap"},
-					rotateGroupCredential{
-						name: "struct-cred", format: "credential-store-url", system: "control-host", kind: "nixos-host",
-						deployedPath: "/root/.git-credentials", verifyType: "git-ls-remote", repoURL: "https://forge.test/x/y.git", context: "root-netrc",
-						plaintext: "https://alice:old@forge.test",
-					})
-			case "rclone-remote-stanza":
-				installFakeRclone(t)
-				rf.addGroup(t, "cred.rotate", tokenGroup{RegistryAlias: "cred.rotate", Service: "forgejo", Account: "a", UITokenName: "u", RotationStrategy: "overlap"},
-					rotateGroupCredential{
-						name: "struct-cred", format: "rclone-remote-stanza", system: "control-host", kind: "nixos-host",
-						deployedPath: "/root/.config/rclone/rclone.conf", verifyType: "site-check",
-						plaintext: "[shared]\ntype = ftp\nhost = ftp.example.org\nuser = deploy\npass = OLD\nexplicit_tls = true\n",
-					})
-			}
-			before := rf.file(t, "secrets/struct-cred.age")
-			rf.pipe(tc.value)
-
-			_, errText, code := rf.run(t, "secret", "rotate", "struct-cred")
-			if code == 0 {
-				t.Fatal("exit 0, want a refusal")
-			}
-			if !strings.Contains(errText, tc.want) {
-				t.Errorf("stderr lacks %q\ngot: %q", tc.want, errText)
-			}
-			if strings.Contains(errText, tc.value) {
-				t.Error("the raw value was printed")
-			}
-			if rf.encryptCalls != 0 {
-				t.Errorf("age was asked to encrypt %d times, want 0", rf.encryptCalls)
-			}
-			if got := rf.file(t, "secrets/struct-cred.age"); got != before {
-				t.Error("the ciphertext was rewritten")
-			}
-		})
-	}
-}
-
 // --- rclone checked before the value is read ---
 
 func TestSecretRotateChecksRcloneBeforeReadingTheValue(t *testing.T) {
 	rf := newRotateFixture(t)
-	rf.addGroup(t, "site.rotate", tokenGroup{RegistryAlias: "site.rotate", Service: "forgejo", Account: "site", UITokenName: "site-token", RotationStrategy: "overlap"},
+	rf.addGroup(t, "site.rotate", forgejoGroup("site.rotate"),
 		rotateGroupCredential{
-			name: "site-cred", format: "rclone-remote-stanza", system: "control-host", kind: "nixos-host",
-			deployedPath: "/root/.config/rclone/rclone.conf", verifyType: "site-check",
-			plaintext: "[shared]\ntype = ftp\nhost = ftp.example.org\nuser = deploy\npass = OLD-OBSCURED\nexplicit_tls = true\n",
+			name: "site-cred", system: "fixture-host", kind: "nixos-host",
+			deployedPath: "/root/.config/rclone/rclone.conf", verify: "allod site check",
+			value: &credentialValue{Template: fixtureRcloneTemplate, Encode: "rclone-obscure"},
 		})
 	t.Setenv("PATH", pathWithoutRclone(t))
 	// A reader that fails the test if it is ever read from: proof the
@@ -1105,7 +1141,7 @@ type failIfReadFrom struct{ t *testing.T }
 
 func (f failIfReadFrom) Read([]byte) (int, error) {
 	f.t.Helper()
-	f.t.Fatal("stdin was read before the rclone-on-PATH check ran")
+	f.t.Fatal("stdin was read before the gates that run without it")
 	return 0, io.EOF
 }
 
@@ -1121,12 +1157,12 @@ func (f failIfReadFrom) Read([]byte) (int, error) {
 // command line.
 func TestSecretRotateRefusesWhenAnotherGroupMemberIsAlsoInASecondGroup(t *testing.T) {
 	rf := newRotateFixture(t)
-	rf.addGroup(t, "primary.rotate", tokenGroup{RegistryAlias: "primary.rotate", Service: "forgejo", Account: "a", UITokenName: "u", RotationStrategy: "overlap"},
-		rotateGroupCredential{name: "primary-only", format: "raw-forgejo-token", system: "dev-a", kind: "dev-vm", user: "u", deployedPath: "/home/u/primary-token", verifyType: "forge-token-verify"},
-		rotateGroupCredential{name: "double-booked", format: "raw-forgejo-token", system: "dev-a", kind: "dev-vm", user: "u", deployedPath: "/home/u/double-token", verifyType: "forge-token-verify"},
+	rf.addGroup(t, "primary.rotate", forgejoGroup("primary.rotate"),
+		rotateGroupCredential{name: "primary-only", system: "dev-a", kind: "dev-vm", deployedPath: "/home/fixture-user/primary-token", verify: "forge token verify < /home/fixture-user/primary-token"},
+		rotateGroupCredential{name: "double-booked", system: "dev-a", kind: "dev-vm", deployedPath: "/home/fixture-user/double-token", verify: "forge token verify < /home/fixture-user/double-token"},
 	)
-	rf.addGroup(t, "secondary.rotate", tokenGroup{RegistryAlias: "secondary.rotate", Service: "forgejo", Account: "b", UITokenName: "v", RotationStrategy: "overlap"},
-		rotateGroupCredential{name: "double-booked", format: "raw-forgejo-token", system: "dev-b", kind: "dev-vm", user: "u", deployedPath: "/home/u/double-token-2", verifyType: "forge-token-verify"},
+	rf.addGroup(t, "secondary.rotate", forgejoGroup("secondary.rotate"),
+		rotateGroupCredential{name: "double-booked", system: "dev-b", kind: "dev-vm", deployedPath: "/home/fixture-user/double-token-2", verify: "forge token verify < /home/fixture-user/double-token-2"},
 	)
 
 	_, errText, code := rf.run(t, "secret", "rotate", "primary-only")
@@ -1174,11 +1210,11 @@ func (r *branchSwitchingReader) Read(p []byte) (int, error) {
 
 func TestSecretRotateRefusesWhenTheBranchChangedWhileWaitingForTheValue(t *testing.T) {
 	rf := newRotateFixture(t)
-	rf.addGroup(t, "raw.rotate", tokenGroup{RegistryAlias: "raw.rotate", Service: "forgejo", Account: "agent", UITokenName: "agent-token", RotationStrategy: "overlap"},
-		rotateGroupCredential{name: "raw-cred", format: "raw-forgejo-token", system: "dev-a", kind: "dev-vm", user: "testuser", deployedPath: "/home/testuser/.config/git/forgejo-token", verifyType: "forge-token-verify"})
+	rf.addGroup(t, "raw.rotate", forgejoGroup("raw.rotate"),
+		rotateGroupCredential{name: "raw-cred", system: "dev-a", kind: "dev-vm", deployedPath: "/home/fixture-user/token", verify: "forge token verify < /home/fixture-user/token"})
 	before := rf.file(t, "secrets/raw-cred.age")
 	stdin = &branchSwitchingReader{
-		data: []byte("value\n"),
+		data: []byte("tok-fixture\n"),
 		do:   func() { gitRun(t, rf.checkout, "switch", "-q", "-c", "agent/hijacked") },
 	}
 

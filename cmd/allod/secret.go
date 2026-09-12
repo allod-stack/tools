@@ -2,19 +2,20 @@
 
 package main
 
-// The secret namespace lands an encrypted credential in the secrets
+// 'create' and 'rekey' land an encrypted credential in the secrets
 // repository, at the one machine that holds the age identity.
 //
-// It verifies and encrypts; it does not author. A credential's non-secret
+// They verify and encrypt; they do not author. A credential's non-secret
 // half — the credentials.nix entry in rotation_state "pending", the
 // secrets.nix recipient line, and the rotation registry entry — is written
-// by an agent's PR and reviewed there, and the inventory check has already
-// passed on it before this command is ever run. 'create' then reads the
-// plaintext, encrypts it to exactly the recipients secrets.nix declares,
-// writes the ciphertext, flips the state to "active", runs the repository's
-// checks, and commits and pushes the branch. There are no flags for kind,
-// owner, format, or recipients: the reviewed diff is the only authoring path,
-// so there is one shape to get right, and nothing on a command line can aim
+// by 'allod secret declare' (secret_declare.go, untagged) as an agent's PR
+// and reviewed there, and the inventory check has already passed on it
+// before this command is ever run. 'create' then reads the plaintext,
+// encrypts it to exactly the recipients secrets.nix declares, writes the
+// ciphertext, flips the state to "active", runs the repository's checks,
+// and commits and pushes the branch. There are no flags for kind, owner,
+// format, or recipients: the reviewed diff is the only authoring path, so
+// there is one shape to get right, and nothing on a command line can aim
 // the ciphertext at a machine the registry does not list.
 //
 // The plaintext never touches a filesystem. It arrives on stdin (or one
@@ -25,9 +26,12 @@ package main
 // recipient-only change that agenix silently skips cannot recur here.
 //
 // This file compiles only with -tags secret, which only the host toolchain
-// sets. On every other machine 'allod secret' is an unknown namespace: the
-// capability is absent, not refused, and no prose has to say an agent may
-// not do this. secret_absent_test.go pins that half; secret_test.go the other.
+// sets. On every other machine 'create', 'rekey', 'migrate', and 'rotate'
+// are unknown secret commands: that capability is absent, not refused, and
+// no prose has to say an agent may not do this. 'declare' carries no such
+// tag — see secret_declare.go. secret_absent_test.go pins the untagged half of this
+// contract; secret_test.go, secret_rotate_test.go, and secret_migrate_test.go
+// the tagged one.
 
 import (
 	"bytes"
@@ -39,6 +43,21 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+)
+
+// Test seams. Every effect this namespace has outside the process and git
+// goes through one of these, so the tests can drive the whole command
+// against a real git fixture without nix, age, or a terminal.
+var (
+	secretEvalCredentials = nixEvalCredentials
+	secretEvalRegistry    = nixEvalTokenGroups
+	secretEvalEncodings   = nixEvalCredentialEncodings
+	secretEvalRecipients  = nixEvalRecipients
+	secretEncrypt         = ageEncrypt
+	secretDecrypt         = ageDecrypt
+	secretFlakeCheck      = nixFlakeCheck
+	secretStdinIsTerminal = func() bool { return isTerminal(os.Stdin) }
+	secretAskOnTerminal   = askSecretOnTerminal
 )
 
 const secretCreateDetail = `'create' requires the branch to already carry, for <name>: a credentials.nix
@@ -79,7 +98,7 @@ an argument.
 `
 
 // init extends the 'secret' namespace secret_declare.go's init() already
-// registered, adding the three commands this build's tag opts it into. It
+// registered, adding the four commands this build's tag opts it into. It
 // appends to secretCommands rather than replacing it, and never calls
 // registerNamespace: that would panic on the duplicate word, and
 // secret_declare.go's init() is the only one allowed to call it.
@@ -100,28 +119,21 @@ func init() {
 			run:     secretRekey,
 		},
 		secretCommand{
+			name:    "migrate",
+			summary: "Translate one legacy container declaration to a value template",
+			usage:   []string{"allod secret migrate <name> [<checkout>]"},
+			detail:  secretMigrateDetail,
+			run:     secretMigrate,
+		},
+		secretCommand{
 			name:    "rotate",
-			summary: "Replace a credential's value, and every value its rotation group shares it with",
+			summary: "Replace a declared credential value across its rotation group",
 			usage:   []string{"allod secret rotate <name> [<checkout>] [--dry-run]"},
 			detail:  secretRotateDetail,
 			run:     secretRotate,
 		},
 	)
 }
-
-// Test seams. Every effect this namespace has outside the process and git
-// goes through one of these, so the tests can drive the whole command
-// against a real git fixture without nix, age, or a terminal.
-var (
-	secretEvalCredentials = nixEvalCredentials
-	secretEvalRegistry    = nixEvalTokenGroups
-	secretEvalRecipients  = nixEvalRecipients
-	secretEncrypt         = ageEncrypt
-	secretDecrypt         = ageDecrypt
-	secretFlakeCheck      = nixFlakeCheck
-	secretStdinIsTerminal = func() bool { return isTerminal(os.Stdin) }
-	secretAskOnTerminal   = askSecretOnTerminal
-)
 
 // parseSecretArgs reads the shared '<name> [<checkout>]' shape 'create' and
 // 'rekey' both take. Every option is unknown: the commands take none by
@@ -170,51 +182,48 @@ type credentialEntry struct {
 }
 
 type registryCredential struct {
-	Credential string `json:"credential"`
-	SecretPath string `json:"secret_path"`
-
-	// The remaining fields serve 'rotate' only; 'create' and 'rekey' read
-	// nothing past SecretPath.
-	Format  string           `json:"format"`
+	Credential string           `json:"credential"`
+	SecretPath string           `json:"secret_path"`
+	Value      *credentialValue `json:"value,omitempty"`
+	// Format is retained only while a private registry still has legacy
+	// entries. New commands never select a behavior from it.
+	Format  string           `json:"format,omitempty"`
 	Targets []registryTarget `json:"targets"`
 }
 
-// registryTarget and registryVerify serve 'rotate' only, in secret_rotate.go.
+type credentialValue struct {
+	Template string `json:"template"`
+	Encode   string `json:"encode,omitempty"`
+}
+
+// registryTarget's Verify is raw because the registry carries two shapes
+// during coexistence: one command string on a migrated target, and the
+// legacy structured object 'migrate' translates. User is legacy too — the
+// command-specific metadata a new-shape target carries inside its verify
+// string instead — and only 'migrate' reads it.
 type registryTarget struct {
-	System       string         `json:"system"`
-	Kind         string         `json:"kind"`
-	User         string         `json:"user"`
-	DeployedPath string         `json:"deployed_path"`
-	Verify       registryVerify `json:"verify"`
-}
-
-type registryVerify struct {
-	Type              string `json:"type"`
-	RepoURL           string `json:"repo_url"`
-	CredentialContext string `json:"credential_context"`
-}
-
-// localAuthRefreshEntry mirrors one entry of a group's local_auth_refresh
-// array. 'rotate' reads it only to decide whether to print the operator's
-// next step; installing the bundle stays rotate-token's job (see
-// secret_rotate.go).
-type localAuthRefreshEntry struct {
-	Contract         string `json:"contract"`
-	System           string `json:"system"`
-	LocalUsername    string `json:"local_username"`
-	SourceCredential string `json:"source_credential"`
+	System       string          `json:"system"`
+	Kind         string          `json:"kind"`
+	User         string          `json:"user,omitempty"`
+	DeployedPath string          `json:"deployed_path"`
+	Verify       json.RawMessage `json:"verify"`
 }
 
 type tokenGroup struct {
-	Credentials []registryCredential `json:"credentials"`
-
-	// The remaining fields serve 'rotate' only.
+	Credentials      []registryCredential    `json:"credentials"`
 	RegistryAlias    string                  `json:"registry_alias"`
 	Service          string                  `json:"service"`
 	Account          string                  `json:"account"`
 	UITokenName      string                  `json:"ui_token_name"`
 	RotationStrategy string                  `json:"rotation_strategy"`
 	LocalAuthRefresh []localAuthRefreshEntry `json:"local_auth_refresh"`
+}
+
+type localAuthRefreshEntry struct {
+	Contract         string `json:"contract"`
+	System           string `json:"system"`
+	LocalUsername    string `json:"local_username"`
+	SourceCredential string `json:"source_credential"`
 }
 
 // secretTarget is everything 'create' and 'rekey' verified about one
@@ -462,9 +471,30 @@ func secretCreate(args []string) {
 	checkout := resolveSecretsCheckout(checkoutArg)
 	branch := requireLandingBranch(checkout)
 	target := lookupSecret(checkout, name)
+	groups, err := secretEvalRegistry(checkout)
+	if err != nil {
+		die(1, "could not evaluate lib.forgejoTokenGroups in %s: %s", checkout, err)
+	}
+	registryCredential, _, err := registryCredentialFor(groups, name)
+	if err != nil {
+		die(1, "%s", err)
+	}
+	if err := credentialShapeError(registryCredential); err != nil {
+		die(1, "%s", err)
+	}
+	if isLegacyCredential(registryCredential) {
+		die(1, "credential '%s' uses legacy format '%s'; run 'allod secret migrate %s' before landing a value for it", name, registryCredential.Format, name)
+	}
+	encodings, err := secretEvalEncodings(checkout)
+	if err != nil {
+		die(1, "could not evaluate lib.credentialEncodings in %s: %s", checkout, err)
+	}
+	if err := validateCredentialValue(registryCredential.Value, encodings); err != nil {
+		die(1, "credential '%s' has invalid declared value: %s", name, err)
+	}
 	target.branch = branch
 	if target.state != "pending" {
-		die(1, "credential '%s' is '%s', not 'pending'; create lands only a pending entry. For a recipient change run 'allod secret rekey %s'; for a new value use rotate-token", name, target.state, name)
+		die(1, "credential '%s' is '%s', not 'pending'; create lands only a pending entry. For a recipient change run 'allod secret rekey %s'; for a new value run 'allod secret rotate %s'", name, target.state, name, name)
 	}
 	file := filepath.Join(checkout, target.path)
 	if _, err := os.Lstat(file); err == nil {
@@ -482,8 +512,13 @@ func secretCreate(args []string) {
 	}
 
 	value := readSecretValue(name)
-	ciphertext := encryptOrDie(target, value)
+	plaintext, err := renderCredentialValue(registryCredential.Value, value, encodings)
 	value = nil
+	if err != nil {
+		die(1, "could not render %s: %s", name, err)
+	}
+	ciphertext := encryptOrDie(target, plaintext)
+	plaintext = nil
 
 	// Nothing has been written until here. From here on, a failure restores
 	// both files before reporting, and says so if it could not.
@@ -610,9 +645,9 @@ func currentBranchName(checkout string) string {
 // landCommitOrReportPush stages, commits, and attempts to push exactly like
 // landCommit; unlike landCommit, a push failure is reported to the caller
 // instead of being fatal. landCommit itself wraps this with the die() above,
-// so create and rekey see no change in behavior; 'rotate' calls this
-// directly because it has its deploy/verify/revocation steps still worth
-// printing even when the push failed (see secret_rotate.go).
+// so create, rekey, and migrate see no change in behavior; 'rotate' calls
+// this directly because it has its deploy/verify/revocation steps still
+// worth printing even when the push failed (see secret_rotate.go).
 //
 // branch is re-verified here, immediately before 'git add', because the
 // caller's own gate ran before whatever checks it runs on the written

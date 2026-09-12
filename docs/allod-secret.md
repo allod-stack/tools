@@ -1,10 +1,49 @@
 # allod secret
 
-A credential has a non-secret half and a secret half, with different authors. `allod secret declare <name>` writes the non-secret half — three entries across `credentials.nix`, `secrets.nix`, and `forgejo-token-groups.json` — so an agent generates that PR instead of transcribing it by hand from the secrets template's README. `allod secret create <name>` then lands the secret half: it encrypts the value and flips the entry to `active`. `allod secret rekey <name>` re-encrypts an existing credential after its recipient list changes. `create` and `rekey` run only on the machine that holds the age identity, because the program is built with the `secret` tag only there; everywhere else those two commands are unknown, and `declare` alone is present. The plaintext `create` and `rekey` handle is read from stdin or one hidden terminal line, goes to `age` over a pipe, and is never written to disk, printed, or placed on a command line; `declare` writes no ciphertext and reads no identity at all.
+A credential has a non-secret half and a secret half, with different authors. `allod secret declare <name>` writes the non-secret half — three entries across `credentials.nix`, `secrets.nix`, and `forgejo-token-groups.json` — so an agent generates that PR instead of transcribing it by hand from the secrets template's README. `allod secret create <name>` then lands the secret half: it encrypts the value and flips the entry to `active`. `allod secret rotate <name>` replaces that value later, across every credential its rotation group shares it with. `allod secret rekey <name>` re-encrypts an existing credential after its recipient list changes. `allod secret migrate <name>` is a one-shot bridge for a credential declared before this shape existed. All four run only on the machine that holds the age identity, because the program is built with the `secret` tag only there; everywhere else they are unknown commands, and `declare` alone is present. The plaintext they handle is read from stdin or one hidden terminal line, goes to `age` over a pipe, and is never written to disk, printed, or placed on a command line; `declare` writes no ciphertext and reads no identity at all.
+
+## The value a credential stores
+
+A credential's plaintext is a template with the secret substituted into it. The template is the non-secret half — a user name, a host, the lines around a password — and it lives in the rotation registry, where it is reviewed like any other text:
+
+```json
+{
+  "credential": "forgejo-https-token-allod-dev",
+  "secret_path": "secrets/forgejo-https-token-allod-dev.age",
+  "value": { "template": "https://allod-agent:{secret}@forge.anarch.diy" },
+  "targets": [
+    { "system": "allod-dev", "kind": "dev-vm", "deployed_path": "/root/.git-credentials",
+      "verify": "sudo env HOME=/root GIT_TERMINAL_PROMPT=0 git ls-remote https://forge.anarch.diy/allod/tools.git HEAD" }
+  ]
+}
+```
+
+Three rules govern it:
+
+- **Omit `value` when the plaintext is the secret itself.** Most credentials are a bare token, and a bare token needs no declaration.
+- **A `value.template` contains exactly one `{secret}`.** Rendering replaces that one placeholder and preserves every other byte, including whether the template ends in a newline. Zero placeholders or two is refused.
+- **`value.encode` names a transformation applied to the secret alone**, before substitution, and must be one the secrets checkout exports as `lib.credentialEncodings`. Today that list holds `rclone-obscure`, for the rclone remote stanza whose password is stored obscured. The list lives in the checkout, not in this command, so adding an encoding is a change to the secrets flake; an exported name this build cannot actually perform is refused rather than silently stored unencoded.
+
+**The secret is used verbatim.** Nothing trims it, and a trailing newline on a piped value is part of the value. Use `printf '%s' "$value" | allod secret create <name>` when it should not be. This is the same rule `create` has always documented, now applied to `rotate` as well: the command that encrypts does not guess which byte was meant, and a consumer handed something it cannot use fails at its own boundary where the failure is visible.
+
+Each target carries `verify`: one non-empty command line, printed verbatim by `rotate` for a target on the machine it names, and wrapped as `ssh <system> <command>` for any other. Whatever the command needs — a repository URL, a user, a path — belongs inside the string; there are no separate registry fields for it. The four commands `rotate-token` used to build from a probe type are just four such strings:
+
+```
+sudo env HOME=/root GIT_TERMINAL_PROMPT=0 git ls-remote <url> HEAD
+sudo -u <user> forge token verify < <path>
+allod site check
+tailscale status --peers=false
+```
+
+## Coexistence with the old shape
+
+A credential is wholly new (`value` absent or present, `verify` a string on every target) or wholly legacy (a `format` name plus a structured `verify` object on every target). One credential carrying both is refused by every command here, and by the secrets flake's own `credential-registry` check. A registry may hold some of each while the migration runs.
+
+`rotate` refuses a legacy container credential, and refuses a group with a legacy member, naming `allod secret migrate <name>` in both cases. `rotate-token` keeps rotating legacy entries until it retires.
 
 ## declare
 
-`allod secret declare <name> --kind <kind> --owner <owner> --to <machine>[,<machine>...] --format <format> --deployed-path <path> --verify <probe> [--verify-repo-url <url>] [--verify-context <text>] [--verify-user <user>] [--service none|forgejo] [--account <account>] [--ui-token-name <name>] [--strategy overlap|in-place]` appends the `credentials.nix` entry in `rotation_state = "pending"` (the `agent-pr-token` layout), the `secrets.nix` recipient line (`[ hostKey ] ++ vmKeys "<vm>"` per target machine, or `[ hostKey ]` alone for a target whose derived kind is `nixos-host`), and a `forgejo-token-groups.json` rotation registry group whose `service` is `none` or `forgejo`. Every insertion is one contiguous block, so the diff an agent runs is a small, reviewable one.
+`allod secret declare <name> --kind <kind> --owner <owner> --to <machine>[,<machine>...] --deployed-path <path> --verify <command> [--value-template-file <path>|--value-template-stdin] [--value-encode <name>] [--service none|forgejo] [--account <account>] [--ui-token-name <name>] [--strategy overlap|in-place]` appends the `credentials.nix` entry in `rotation_state = "pending"` (the `agent-pr-token` layout), the `secrets.nix` recipient line (`[ hostKey ] ++ vmKeys "<vm>"` per target machine, or `[ hostKey ]` alone for a target whose derived kind is `nixos-host`), and a `forgejo-token-groups.json` rotation registry group whose `service` is `none` or `forgejo`. Every insertion is one contiguous block, so the diff an agent runs is a small, reviewable one.
 
 An agent runs `declare`, reviews the diff it leaves, and opens the PR; the human then checks out that branch and runs `create` to land the secret half, exactly as described below. `declare` never commits.
 
@@ -12,7 +51,9 @@ An agent runs `declare`, reviews the diff it leaves, and opens the PR; the human
 
 `<name>` must match `^[a-z][a-z0-9-]*$` and must not be a nix keyword (`let`, `in`, `with`, `rec`, `assert`, `if`, `then`, `else`, `inherit`, `or`) — it becomes an unquoted nix attribute key, and none of those parse as one (`1token = { ... }` and `let = { ... }` are both syntax errors). `--owner`, every `--to` machine name, and, when given, `--kind`, `--account`, and `--ui-token-name` must match `^[A-Za-z0-9][A-Za-z0-9_.@-]*$`, and `--deployed-path` must be an absolute path with no whitespace, control character, quote, backslash, or `$`. These are the values that reach generated nix or JSON text; each is checked against its shape before anything is built, not interpolated raw, so a value crafted to break out of its quoting (`--owner 'foo"; kind = "bar'`, say) is refused as a usage error rather than landing in a file.
 
-`--verify` is one of `forge-token-verify`, `git-ls-remote`, `site-check`, and applies to every target. `rotate-token`'s own printed verification (`print_group_verification` in `scripts/rotate-token`, nexus) reads further fields a target does not otherwise carry: for `git-ls-remote` it prints `git ls-remote <repo_url> HEAD` and `<system> (<credential_context>):`, so `--verify-repo-url <https:// url>` is required (refused with any other `--verify`) and `--verify-context <text>` is accepted but optional (refused with any other `--verify`) — an absent `--verify-repo-url` would otherwise print as the literal command `git ls-remote - HEAD`. For `forge-token-verify` on a `nixos-host` target it prints `sudo -u <user> forge token verify`, so `--verify-user <user>` is required (refused with any other `--verify`). `--verify-repo-url` must be an `https://` URL whose host starts with a letter or digit (a bare `https://`, or one followed by `/` or `?`, would print as a `git ls-remote` command with no repository in it) and carries no whitespace, control character, quote, backslash, or `$`; `--verify-context` must be non-empty printable text with no control characters (it is only ever printed, never interpolated into a command); `--verify-user` follows the same identifier shape as `--owner`.
+`--verify` is the one command line every target carries, described under "The value a credential stores" above. It must be non-empty and hold no line break; `declare` checks nothing else about it, because `rotate` prints it for a human to run rather than interpolating it into any text of its own.
+
+The value template is optional and is given as bytes, not as a flag value: `--value-template-file <path>` reads it from a file and `--value-template-stdin` from standard input, and the two are mutually exclusive. The bytes are stored exactly as read, with no trimming, so whether the template ends in a newline is part of the declaration. It must contain exactly one `{secret}`. `--value-encode <name>` requires a template and must name an encoding the checkout exports as `lib.credentialEncodings`; `declare` evaluates that export rather than carrying a list of its own.
 
 `declare` checks the name against four sources before writing anything: an existing `credentials.nix` entry, a `secrets.nix` line for `secrets/<name>.age`, a registry group keyed `<name>` or naming `<name>` among its credentials (all three matched across line breaks and nix line comments, so a declaration split across lines or separated by a comment from its `= {` cannot slip past the check), and the secrets checkout's own evaluated credential inventory (`<checkout>#lib.credentials`). The fourth exists because `credentials.nix` is `hostEntries // activeEntries // stagedEntries // forgeGitEntries // { ...literal entries...; }`: a name one of the generated attrsets already produces is invisible to every textual check, and the literal entry `declare` would append there would silently shadow it (the last `//` operand wins in nix). A failed evaluation refuses outright rather than relying on the textual checks alone. Every match found across all four is listed, and nothing is written.
 
@@ -40,6 +81,8 @@ Every refusal names the file that disagrees and what it holds. The command touch
 - No rotation registry entry names the credential, or the one that does names a different path.
 - The ciphertext already exists.
 - The value is empty or whitespace only.
+- The registry entry still carries a legacy `format`, or carries both a `format` and a `value`. The first names `allod secret migrate <name>`.
+- The declared value is unusable: its template has no `{secret}` or more than one, or its `value.encode` is not exported by the checkout.
 - `age` fails, or produces something that is not an age file.
 - The repository's checks fail after the write. Both files are restored and the check's exit status is returned.
 
@@ -49,11 +92,29 @@ A push failure after the commit is reported with the commit kept; the landing ha
 
 `allod secret rekey <name>` is for a recipient change: a machine added to or removed from a `secrets.nix` line. It decrypts the existing ciphertext with the host identity, re-encrypts to the recipients the file declares now, and always rewrites the file. `agenix -e` skips a re-encryption whose plaintext did not change, which is how a recipient-only edit used to exit 0 and change nothing; this command has no such comparison. It refuses a `pending` entry, a failed decryption, and a value that decrypts to nothing.
 
-Rotating to a new value is `rotate-token`'s job and is not part of this namespace.
+## rotate
+
+`allod secret rotate <name>` replaces a value. The unit is the registry group that lists <name> among its credentials: every credential in that group is re-encrypted from the one value read on stdin, the way `rotate-token --group` rotates a shared Forgejo token today. Each one is rendered from its own declared template, so a group can mix a plain token and a URL around the same secret; a group whose members disagree on `value.encode` is refused, because one value cannot be both a password to obscure and a token to store.
+
+Nothing is decrypted. Every credential in the group must already be `active` with a ciphertext on disk, and each new ciphertext is built in memory, written by temp-file-and-rename so a file is always old or new bytes, and gated by one `nix flake check` before one commit and push. A failed check restores every ciphertext and creates no commit. A push failure keeps the commit, still prints every step, and exits non-zero.
+
+`--dry-run` runs every gate — branch, clean tree, active state, ciphertext present, recipients, registry shape, unique group membership, declared value and verification — reads no value, decrypts nothing, encrypts nothing, runs no checks, and writes nothing. It still refuses a dirty tree. It prints the group, its targets, the deploy and verification steps, and the revocation gate, phrased as what a live run would do.
+
+The printed steps come from the registry: the rebuild command per target kind, the verification command per target, the revocation gate with Forgejo wording only for a `forgejo` group and none at all for an `in-place` strategy, and — when the group carries `local_auth_refresh` entries — `rotate-token refresh-local-auth --group <alias>` as the operator's next step. That part of `rotate-token` stays a separate host script: it installs root-owned files under sudo, a privilege a git-repository command should not hold.
+
+## migrate
+
+`allod secret migrate <name>` is run once per credential that predates the value template, and only by the operator at the host. It rewrites that credential's registry entry: `format` becomes a `value.template`, each target's structured `verify` object becomes its command string, and the legacy `user` field disappears into that string. The ciphertext is not rewritten, so nothing a machine deploys changes; the commit holds `forgejo-token-groups.json` and nothing else, and every other byte of that file is left as it was.
+
+It decrypts once, in memory, and only after every check that does not need the plaintext has passed. The decrypted bytes must match the exact byte shape `rotate-token` writes for that format; substituting the extracted secret into the proposed template must reproduce those bytes exactly; and the extracted bytes must occur nowhere else in the template, so a token that happens to also appear in the host name is refused rather than published. A failed check restores the registry bytes exactly and creates no commit; a failed push keeps the commit and says so.
+
+For an rclone stanza the migrated declaration carries `"encode": "rclone-obscure"` even though the stored value is the already-obscured password: the encoder describes what the next `rotate` does, which is take a raw password and obscure it.
+
+`migrate` refuses a credential that already has a `value`, one in no registry group or in two, one named by a group's `local_auth_refresh` (that consumer still needs the legacy shape until allod/nexus#52 changes it), and any legacy format other than the two containers. A plain legacy entry needs no decryption at all: edit the registry directly, dropping `format` and turning each target's `verify` object into its command string.
 
 ## Where things are found
 
-All three commands resolve the secrets checkout the same way: `~/work/<checkout>` where `<checkout>` is the `allod/secrets` entry of the inventory's repository registry, or `allod/secrets` when the registry does not name one. An optional trailing argument names a checkout or worktree instead. `declare` additionally resolves the inventory checkout to evaluate machine types, the same way when no override is given: `~/work/<checkout>` where `<checkout>` is the `allod/inventory` entry of the repository registry, or `allod/inventory` when the registry does not name one; `$INVENTORY`, when set, always wins. The identity `create` and `rekey` use is `$AGE_IDENTITY`, or `~/.ssh/host`; its `.pub` must be among the recipients. `declare` reads no identity.
+All five commands resolve the secrets checkout the same way: `~/work/<checkout>` where `<checkout>` is the `allod/secrets` entry of the inventory's repository registry, or `allod/secrets` when the registry does not name one. An optional trailing argument names a checkout or worktree instead. `declare` additionally resolves the inventory checkout to evaluate machine types, the same way when no override is given: `~/work/<checkout>` where `<checkout>` is the `allod/inventory` entry of the repository registry, or `allod/inventory` when the registry does not name one; `$INVENTORY`, when set, always wins. The identity `create`, `rekey`, `rotate`, and `migrate` use is `$AGE_IDENTITY`, or `~/.ssh/host`; its `.pub` must be among the recipients. `declare` reads no identity.
 
 ## Build
 
@@ -64,4 +125,4 @@ buildGoModule {
 }
 ```
 
-`declare` needs no `secret` tag and is present in every build; `create` and `rekey` need it, so it is set wherever the age identity lives. The command runs `nix`, `age`, and `git` from the operator's PATH; `declare` needs `nix` (to read machine types and the evaluated credential inventory) and `git` (to resolve the checkout), but never `age`.
+`declare` needs no `secret` tag and is present in every build; `create`, `rekey`, `rotate`, and `migrate` need it, so it is set wherever the age identity lives. The command runs `nix`, `age`, and `git` from the operator's PATH, plus `rclone` when a credential being rotated declares the `rclone-obscure` encoding; `declare` needs `nix` (to read machine types, the evaluated credential inventory, and the exported encodings) and `git` (to resolve the checkout), but never `age`.
