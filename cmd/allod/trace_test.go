@@ -63,3 +63,17 @@ func traceHostname(t *testing.T) string {
 	}
 	return hostname
 }
+
+func TestTraceSafeFileName(t *testing.T) {
+	cases := map[string]string{
+		"01a09035-d058-7083-9686-033b3572b8f4": "01a09035-d058-7083-9686-033b3572b8f4",
+		"../../etc/passwd":                     ".._.._etc_passwd",
+		"bad\nname":                            "bad_name",
+		"":                                     "session",
+	}
+	for in, want := range cases {
+		if got := traceSafeFileName(in); got != want {
+			t.Errorf("traceSafeFileName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

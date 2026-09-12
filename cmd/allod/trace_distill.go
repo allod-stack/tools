@@ -399,9 +399,7 @@ func traceRender(harness string, sess traceSession) string {
 		switch ev.kind {
 		case "message":
 			text := ev.text
-			if ev.role == "user" {
-				text = traceStripSystemReminders(text)
-			}
+			text = traceStripSystemReminders(text)
 			text = traceClampMessage(strings.TrimSpace(text))
 			fmt.Fprintf(&b, "## %s\n\n%s\n\n", ev.role, text)
 		case "tool":
@@ -509,17 +507,17 @@ func traceDistill(args []string) {
 
 			body := traceRedact(traceRender(harnessName, sess))
 			destDir := filepath.Join(out, hostname, harnessName)
-			destPath := filepath.Join(destDir, fmt.Sprintf("%s-%s.md", sess.startedAt.UTC().Format("2006-01-02"), sess.id))
+			destPath := filepath.Join(destDir, fmt.Sprintf("%s-%s.md", sess.startedAt.UTC().Format("2006-01-02"), traceSafeFileName(sess.id)))
 
 			if existing, readErr := os.ReadFile(destPath); readErr == nil && string(existing) == body {
 				unchanged++
 				distilled++
 				continue
 			}
-			if err := os.MkdirAll(destDir, 0755); err != nil {
+			if err := os.MkdirAll(destDir, 0700); err != nil {
 				die(1, "cannot create output directory: %s: %v", destDir, err)
 			}
-			if err := os.WriteFile(destPath, []byte(body), 0644); err != nil {
+			if err := os.WriteFile(destPath, []byte(body), 0600); err != nil {
 				die(1, "cannot write trace: %s: %v", destPath, err)
 			}
 			distilled++
@@ -529,4 +527,25 @@ func traceDistill(args []string) {
 	if !quiet {
 		fmt.Fprintf(stdout, "distilled %d sessions into %s (%d unchanged, %d skipped)\n", distilled, out, unchanged, skipped)
 	}
+}
+
+// traceSafeFileName keeps a session id usable as one path segment. Ids come
+// from the harness's own log and are normally UUIDs, but nothing guarantees
+// that: any byte outside the letters, digits, dot, underscore and hyphen is
+// replaced so a crafted id cannot carry a separator, a control byte or an
+// empty name into the output layout.
+func traceSafeFileName(id string) string {
+	var b strings.Builder
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	if b.Len() == 0 {
+		return "session"
+	}
+	return b.String()
 }
