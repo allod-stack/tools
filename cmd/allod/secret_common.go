@@ -8,9 +8,9 @@ package main
 // This mirrors site_common.go's split. secret_declare.go's init() registers
 // the 'secret' namespace itself and adds the 'declare' entry to
 // secretCommands; secret.go, which does carry the 'secret' tag, extends the
-// same namespace with 'create', 'rekey', 'migrate', and 'rotate' rather
-// than registering a second one — registerNamespace panics on a duplicate
-// word, so only one file may call it, and secret_declare.go is that file.
+// same namespace with 'create', 'rekey', and 'rotate' rather than
+// registering a second one — registerNamespace panics on a duplicate word,
+// so only one file may call it, and secret_declare.go is that file.
 //
 // 'declare' writes a credential's non-secret half — the credentials.nix
 // entry, the secrets.nix recipient line, and the rotation registry group —
@@ -52,9 +52,9 @@ var secretCommands []secretCommand
 // secretMain dispatches 'allod secret <command>' to whichever entry in
 // secretCommands matches, so a build advertises and runs exactly the
 // commands it carries. On an untagged build that is 'declare' alone:
-// 'create', 'rekey', 'migrate', and 'rotate' fall through to the same
-// "unknown secret command" a typo would, because in that build they are
-// exactly as absent as a typo.
+// 'create', 'rekey', and 'rotate' fall through to the same "unknown secret
+// command" a typo would, because in that build they are exactly as absent
+// as a typo.
 func secretMain(args []string) {
 	if len(args) == 0 {
 		fmt.Fprint(stderr, secretShortUsage())

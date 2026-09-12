@@ -4,11 +4,11 @@ package main
 
 // The other half of the build-tag proof for the secret namespace.
 // secret_test.go asserts that a build made with -tags secret carries
-// 'declare' plus 'create', 'rekey', 'migrate', and 'rotate'; this file
-// asserts that a build without the tag carries 'declare' alone — not that
-// the other four refuse, but that those four words mean nothing, which is
-// the difference between a machine that cannot land a secret and a machine
-// that lands one badly.
+// 'declare' plus 'create', 'rekey', and 'rotate'; this file asserts that a
+// build without the tag carries 'declare' alone — not that the other three
+// refuse, but that those three words mean nothing, which is the difference
+// between a machine that cannot land a secret and a machine that lands one
+// badly.
 // 'allod secret declare' itself is present in both builds: it writes no
 // ciphertext and reads no identity, so it runs wherever agents run.
 //
@@ -37,12 +37,12 @@ func TestSecretNamespaceExistsWithDeclareOnly(t *testing.T) {
 }
 
 // TestUntaggedSecretTaggedCommandsAreUnknown pins the behaviour an operator
-// sees: 'create', 'rekey', 'migrate', and 'rotate' on a machine that holds
-// no age identity fail exactly the way a typo does, saying so in the same
-// words 'unknown secret command' always has and then, like any unknown
-// secret command, printing the short usage rather than nothing.
+// sees: 'create', 'rekey', and 'rotate' on a machine that holds no age
+// identity fail exactly the way a typo does, saying so in the same words
+// 'unknown secret command' always has and then, like any unknown secret
+// command, printing the short usage rather than nothing.
 func TestUntaggedSecretTaggedCommandsAreUnknown(t *testing.T) {
-	for _, command := range []string{"create", "rekey", "migrate", "rotate"} {
+	for _, command := range []string{"create", "rekey", "rotate"} {
 		t.Run(command, func(t *testing.T) {
 			out, errText, code := runAllod(t, "secret", command, "new-token")
 			if code != 1 {
@@ -76,7 +76,6 @@ func TestUntaggedSecretUsageListsOnlyDeclare(t *testing.T) {
 			for _, absent := range []string{
 				"allod secret create <name> [<checkout>]",
 				"allod secret rekey <name> [<checkout>]",
-				"allod secret migrate <name> [<checkout>]",
 				"allod secret rotate <name> [<checkout>]",
 				"create   Encrypt a pending credential's value",
 				"rekey    Re-encrypt an existing credential",

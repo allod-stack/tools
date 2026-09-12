@@ -198,7 +198,7 @@ func TestVerifyCommand(t *testing.T) {
 		{name: "one line", raw: `"allod site check"`, want: "allod site check"},
 		{name: "missing", raw: "", wantErr: "has no verify command"},
 		{name: "json null", raw: "null", wantErr: "has an empty verify command"},
-		{name: "legacy object", raw: `{"type":"site-check"}`, wantErr: "structured legacy verify data"},
+		{name: "structured object", raw: `{"type":"site-check"}`, wantErr: "not one command string"},
 		{name: "empty string", raw: `""`, wantErr: "has an empty verify command"},
 		{name: "whitespace only", raw: `"   "`, wantErr: "has an empty verify command"},
 		{name: "two lines", raw: `"allod site check\nrm -rf /"`, wantErr: "more than one line"},
@@ -237,7 +237,6 @@ func TestPOSIXShellQuote(t *testing.T) {
 
 func TestIsCredentialStoreURLSource(t *testing.T) {
 	accepted := []registryCredential{
-		{Format: "credential-store-url"},
 		{Value: &credentialValue{Template: "https://fixture-user:{secret}@example.test"}},
 		{Value: &credentialValue{Template: "\nhttps://fixture-user:{secret}@example.test\n"}},
 	}

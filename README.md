@@ -81,10 +81,10 @@ default is `directadmin`; an unknown or malformed build-time value stops before
 the deploy preflight or build. To roll back `public-html`, remove that `ldflags`
 entry (or set its value to `directadmin`) and rebuild the deployment package.
 
-`allod secret create`, `rekey`, `rotate`, and `migrate` are behind the
+`allod secret create`, `rekey`, and `rotate` are behind the
 `secret` build tag for the same reason: they land an encrypted credential
 in the secrets repository, which only the machine holding the age identity
-can do. Everywhere else those four are unknown secret commands — the
+can do. Everywhere else those three are unknown secret commands — the
 capability is absent, not refused — which is what makes it a boundary
 rather than a rule an agent has to remember. `allod secret declare`, which
 writes a credential's non-secret half and encrypts nothing, needs no tag

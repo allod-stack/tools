@@ -1279,8 +1279,8 @@ func TestSecretDeclareRefusesWhenCredentialsWouldNotBalance(t *testing.T) {
 // beside them, and a call whose temp file cannot be created (the directory
 // does not exist) leaves the original file completely untouched and returns
 // an error, rather than a truncated file and a panic. This is the one
-// atomic writer in the namespace — 'declare', 'create', 'rekey', 'rotate',
-// and 'migrate' all replace files through it.
+// atomic writer in the namespace — 'declare', 'create', 'rekey', and
+// 'rotate' all replace files through it.
 func TestAtomicWriteReplacesInFullOrNotAtAll(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f.txt")

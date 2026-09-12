@@ -98,7 +98,7 @@
         go vet -tags site ./...
         go test -tags site ./...
 
-        # 'allod secret create', 'rekey', 'migrate', and 'rotate' are behind
+        # 'allod secret create', 'rekey', and 'rotate' are behind
         # their own 'secret' tag for the same reason ('declare' is not: it
         # writes no ciphertext and reads no identity, so it runs untagged
         # everywhere), and the host sets both tags. Each is checked alone

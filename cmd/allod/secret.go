@@ -26,12 +26,11 @@ package main
 // recipient-only change that agenix silently skips cannot recur here.
 //
 // This file compiles only with -tags secret, which only the host toolchain
-// sets. On every other machine 'create', 'rekey', 'migrate', and 'rotate'
-// are unknown secret commands: that capability is absent, not refused, and
-// no prose has to say an agent may not do this. 'declare' carries no such
-// tag — see secret_declare.go. secret_absent_test.go pins the untagged half of this
-// contract; secret_test.go, secret_rotate_test.go, and secret_migrate_test.go
-// the tagged one.
+// sets. On every other machine 'create', 'rekey', and 'rotate' are unknown
+// secret commands: that capability is absent, not refused, and no prose has
+// to say an agent may not do this. 'declare' carries no such tag — see
+// secret_declare.go. secret_absent_test.go pins the untagged half of this
+// contract; secret_test.go and secret_rotate_test.go the tagged one.
 
 import (
 	"bytes"
@@ -42,6 +41,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -77,9 +77,6 @@ secret alone before it is substituted, and the encoder it needs must be on
 PATH before the value is asked for. The secret itself is never trimmed or
 inspected: a trailing newline on a piped value is part of it, so use
 printf '%s' "$value" | allod secret create <name> when it should not be.
-
-A credential whose registry entry still carries a legacy 'format' is
-refused, naming what turns it into the declared shape.
 
 It then writes the ciphertext, sets the state to "active", runs
 'nix flake check', restores both files if that fails, and otherwise commits
@@ -131,13 +128,6 @@ func init() {
 			usage:   []string{"allod secret rekey <name> [<checkout>]"},
 			detail:  secretRekeyDetail,
 			run:     secretRekey,
-		},
-		secretCommand{
-			name:    "migrate",
-			summary: "Translate one legacy container declaration to a value template",
-			usage:   []string{"allod secret migrate <name> [<checkout>]"},
-			detail:  secretMigrateDetail,
-			run:     secretMigrate,
 		},
 		secretCommand{
 			name:    "rotate",
@@ -199,10 +189,14 @@ type registryCredential struct {
 	Credential string           `json:"credential"`
 	SecretPath string           `json:"secret_path"`
 	Value      *credentialValue `json:"value,omitempty"`
-	// Format is retained only while a private registry still has legacy
-	// entries. New commands never select a behavior from it.
-	Format  string           `json:"format,omitempty"`
-	Targets []registryTarget `json:"targets"`
+	Targets    []registryTarget `json:"targets"`
+	// Format is decoded for exactly one purpose: nixEvalTokenGroups refuses
+	// a non-empty value immediately, by name, because json.Unmarshal
+	// otherwise ignores a field a struct does not declare and a stray
+	// 'format' entry would vanish rather than being refused. No command
+	// reads this field for behavior; a credential's declared Value is the
+	// only shape the registry holds.
+	Format string `json:"format,omitempty"`
 }
 
 type credentialValue struct {
@@ -210,15 +204,12 @@ type credentialValue struct {
 	Encode   string `json:"encode,omitempty"`
 }
 
-// registryTarget's Verify is raw because the registry carries two shapes
-// during coexistence: one command string on a migrated target, and the
-// legacy structured object 'migrate' translates. User is legacy too — the
-// command-specific metadata a new-shape target carries inside its verify
-// string instead — and only 'migrate' reads it.
+// registryTarget's Verify stays raw JSON so verifyCommand can give its own
+// error for a value that is not one command string, rather than the bare
+// decode failure json.Unmarshal would produce here.
 type registryTarget struct {
 	System       string          `json:"system"`
 	Kind         string          `json:"kind"`
-	User         string          `json:"user,omitempty"`
 	DeployedPath string          `json:"deployed_path"`
 	Verify       json.RawMessage `json:"verify"`
 }
@@ -240,9 +231,8 @@ type localAuthRefreshEntry struct {
 	SourceCredential string `json:"source_credential"`
 }
 
-// secretTarget is everything a tagged command — 'create', 'rekey',
-// 'rotate', or 'migrate' — verified about one credential before touching
-// anything.
+// secretTarget is everything a tagged command — 'create', 'rekey', or
+// 'rotate' — verified about one credential before touching anything.
 type secretTarget struct {
 	name       string
 	path       string // repository-relative, e.g. secrets/<name>.age
@@ -494,12 +484,6 @@ func secretCreate(args []string) {
 	if err != nil {
 		die(1, "%s", err)
 	}
-	if err := credentialShapeError(registryCredential); err != nil {
-		die(1, "%s", err)
-	}
-	if isLegacyCredential(registryCredential) {
-		die(1, "credential '%s' uses legacy format '%s'; %s", name, registryCredential.Format, legacyRefusalReason(registryCredential, "landing a value for it"))
-	}
 	encodings, err := secretEvalEncodings(checkout)
 	if err != nil {
 		die(1, "could not evaluate lib.credentialEncodings in %s: %s", checkout, err)
@@ -667,7 +651,7 @@ func currentBranchName(checkout string) string {
 // landCommitOrReportPush stages, commits, and attempts to push exactly like
 // landCommit; unlike landCommit, a push failure is reported to the caller
 // instead of being fatal. landCommit itself wraps this with the die() above,
-// so create, rekey, and migrate see no change in behavior; 'rotate' calls
+// so create and rekey see no change in behavior; 'rotate' calls
 // this directly because it has its deploy/verify/revocation steps still
 // worth printing even when the push failed (see secret_rotate.go).
 //
@@ -727,7 +711,32 @@ func nixEvalTokenGroups(checkout string) (map[string]tokenGroup, error) {
 	if err := json.Unmarshal(data, &groups); err != nil {
 		return nil, fmt.Errorf("lib.forgejoTokenGroups is not the expected shape: %w", err)
 	}
+	if name, ok := firstCredentialCarryingFormat(groups); ok {
+		return nil, fmt.Errorf("credential '%s' carries 'format', which the registry no longer accepts; it holds value templates only", name)
+	}
 	return groups, nil
+}
+
+// firstCredentialCarryingFormat walks the registry, in sorted alias order,
+// for a credential that still decodes a non-empty 'format'. json.Unmarshal
+// silently ignores a field a struct does not declare, so without this a
+// stray 'format' entry would reach every other command as if it were
+// simply absent; this is the one place that notices it and says so by
+// name instead.
+func firstCredentialCarryingFormat(groups map[string]tokenGroup) (string, bool) {
+	aliases := make([]string, 0, len(groups))
+	for alias := range groups {
+		aliases = append(aliases, alias)
+	}
+	sort.Strings(aliases)
+	for _, alias := range aliases {
+		for _, credential := range groups[alias].Credentials {
+			if credential.Format != "" {
+				return credential.Credential, true
+			}
+		}
+	}
+	return "", false
 }
 
 // nixEvalRecipients reads one path's recipients out of secrets.nix itself,

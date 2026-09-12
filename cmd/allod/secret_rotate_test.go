@@ -14,7 +14,7 @@ package main
 //
 // Nothing here stages an old plaintext, because rotation no longer reads
 // one: a credential's non-secret half is declared in the registry, so the
-// only decrypt left in this namespace belongs to 'rekey' and 'migrate'.
+// only decrypt left in this namespace belongs to 'rekey'.
 //
 // The package-level seams these helpers swap are shared mutable state, so no
 // test here calls t.Parallel, matching secret_test.go.
@@ -137,11 +137,6 @@ func TestValidateGroupMetadataRefusals(t *testing.T) {
 			g.Credentials[0].Targets[0].DeployedPath = "/root/.git-credentials"
 			g.LocalAuthRefresh = []localAuthRefreshEntry{{Contract: "nixos-netrc-from-root-git-credentials", System: "dev-a", LocalUsername: "u", SourceCredential: "cred"}}
 		}, "does not name exactly one credential-store URL target"},
-		{"local_auth_refresh legacy source passes", func(g *tokenGroup) {
-			g.Credentials[0].Format = "credential-store-url"
-			g.Credentials[0].Targets[0].DeployedPath = "/root/.git-credentials"
-			g.LocalAuthRefresh = []localAuthRefreshEntry{{Contract: "nixos-netrc-from-root-git-credentials", System: "dev-a", LocalUsername: "u", SourceCredential: "cred"}}
-		}, ""},
 		{"local_auth_refresh template source passes", func(g *tokenGroup) {
 			g.Credentials[0].Value = &credentialValue{Template: "https://fixture-user:{secret}@example.test"}
 			g.Credentials[0].Targets[0].DeployedPath = "/root/.git-credentials"
@@ -198,8 +193,6 @@ type rotateGroupCredential struct {
 	system, kind, deployedPath    string
 	verify                        string // the declared verify command
 	rawVerify                     json.RawMessage
-	user                          string // legacy only
-	format                        string // legacy only
 	value                         *credentialValue
 	skipCiphertext, skipRecipient bool
 }
@@ -247,9 +240,9 @@ func (rf *rotateFixture) addGroup(t *testing.T, alias string, group tokenGroup, 
 			verify = fixtureVerify(c.verify)
 		}
 		group.Credentials = append(group.Credentials, registryCredential{
-			Credential: c.name, SecretPath: path, Format: c.format, Value: c.value,
+			Credential: c.name, SecretPath: path, Value: c.value,
 			Targets: []registryTarget{{
-				System: c.system, Kind: c.kind, User: c.user, DeployedPath: c.deployedPath, Verify: verify,
+				System: c.system, Kind: c.kind, DeployedPath: c.deployedPath, Verify: verify,
 			}},
 		})
 		if state == "active" && !c.skipCiphertext {
@@ -310,6 +303,36 @@ func pathWithoutRclone(t *testing.T) string {
 	return dir
 }
 
+// installFakeRefreshLocalAuth puts a real, minimal 'refresh-local-auth' on
+// PATH ahead of whatever is already there, so a group carrying a
+// local_auth_refresh entry passes rotate's PATH gate.
+func installFakeRefreshLocalAuth(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "refresh-local-auth"), []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// pathWithoutRefreshLocalAuth builds a PATH that resolves 'git' (rotate's
+// own real subprocess for the landing) but can never resolve
+// 'refresh-local-auth', regardless of what the ambient environment happens
+// to have installed, the way pathWithoutRclone builds one that can never
+// resolve 'rclone'.
+func pathWithoutRefreshLocalAuth(t *testing.T) string {
+	t.Helper()
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.Symlink(git, filepath.Join(dir, "git")); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 // --- Group resolution and gate refusals ---
 
 func TestSecretRotateGroupSelectionRefusals(t *testing.T) {
@@ -344,12 +367,12 @@ func TestSecretRotateGroupSelectionRefusals(t *testing.T) {
 		{"missing verify", "no-verify-cred", func(t *testing.T, rf *rotateFixture) {
 			rf.addGroup(t, "noverify.rotate", forgejoGroup("noverify.rotate"),
 				rotateGroupCredential{name: "no-verify-cred", system: "dev-a", kind: "dev-vm", deployedPath: "/home/fixture-user/token"})
-		}, "has no verify command; run 'allod secret migrate no-verify-cred'"},
+		}, "has no verify command; write that target's command into the registry by hand"},
 		{"structured verify on a new-shape credential", "structured-cred", func(t *testing.T, rf *rotateFixture) {
 			rf.addGroup(t, "structured.rotate", forgejoGroup("structured.rotate"),
 				rotateGroupCredential{name: "structured-cred", system: "dev-a", kind: "dev-vm", deployedPath: "/home/fixture-user/token",
 					rawVerify: json.RawMessage(`{"type":"forge-token-verify"}`)})
-		}, "has structured legacy verify data, not one command string; run 'allod secret migrate structured-cred'"},
+		}, "has a verify value that is not one command string; write that target's command into the registry by hand"},
 		{"multi-line verify", "multiline-cred", func(t *testing.T, rf *rotateFixture) {
 			rf.addGroup(t, "multiline.rotate", forgejoGroup("multiline.rotate"),
 				rotateGroupCredential{name: "multiline-cred", system: "dev-a", kind: "dev-vm", deployedPath: "/home/fixture-user/token",
@@ -405,110 +428,6 @@ func TestSecretRotateGroupSelectionRefusals(t *testing.T) {
 				t.Errorf("tree is not clean after a refusal:\n%s", got)
 			}
 		})
-	}
-}
-
-// --- Legacy entries are named, not rotated ---
-
-func TestSecretRotateNamesMigrateForALegacyCredential(t *testing.T) {
-	cases := []struct {
-		name       string
-		credential string
-		want       string
-	}{
-		{"the selected credential is legacy", "legacy-cred", "credential 'legacy-cred' uses legacy format 'credential-store-url'; run 'allod secret migrate legacy-cred' before rotating it"},
-		{"another group member is legacy", "new-shape-cred", "rotation registry group 'legacy.rotate' also lists legacy credential 'legacy-cred' (format 'credential-store-url'); run 'allod secret migrate legacy-cred' before rotating this group"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			rf := newRotateFixture(t)
-			rf.addGroup(t, "legacy.rotate", forgejoGroup("legacy.rotate"),
-				rotateGroupCredential{
-					name: "new-shape-cred", system: "dev-a", kind: "dev-vm", deployedPath: "/home/fixture-user/token",
-					verify: "forge token verify < /home/fixture-user/token",
-					value:  &credentialValue{Template: "https://fixture-user:{secret}@example.test"},
-				},
-				rotateGroupCredential{
-					name: "legacy-cred", format: "credential-store-url", system: "fixture-host", kind: "nixos-host",
-					deployedPath: "/root/.git-credentials", user: "fixture-user",
-					rawVerify: json.RawMessage(`{"type":"git-ls-remote","repo_url":"https://example.test/fixture/repo.git"}`),
-				})
-			before := rf.head(t)
-			rf.pipe("tok-fixture\n")
-
-			_, errText, code := rf.run(t, "secret", "rotate", tc.credential)
-			if code == 0 {
-				t.Fatal("exit 0, want a refusal")
-			}
-			if !strings.Contains(errText, tc.want) {
-				t.Errorf("stderr lacks %q\ngot: %q", tc.want, errText)
-			}
-			if rf.encryptCalls != 0 || rf.decryptCalls != 0 {
-				t.Errorf("encrypt=%d decrypt=%d, want 0 and 0", rf.encryptCalls, rf.decryptCalls)
-			}
-			if got := rf.head(t); got != before {
-				t.Error("a commit was made")
-			}
-		})
-	}
-}
-
-// TestSecretRotateRefusesACredentialCarryingBothShapes covers the
-// coexistence rule from the other side: a registry may hold legacy
-// credentials and migrated ones side by side, but one credential carrying
-// both 'format' and 'value' has not passed the registry's own check, and
-// guessing which half is authoritative would encrypt a value into the wrong
-// text.
-func TestSecretRotateRefusesACredentialCarryingBothShapes(t *testing.T) {
-	rf := newRotateFixture(t)
-	rf.addGroup(t, "mixed.rotate", forgejoGroup("mixed.rotate"),
-		rotateGroupCredential{
-			name: "mixed-cred", format: "credential-store-url", system: "dev-a", kind: "dev-vm",
-			deployedPath: "/root/.git-credentials", verify: "allod site check",
-			value: &credentialValue{Template: "https://fixture-user:{secret}@example.test"},
-		})
-	rf.pipe("tok-fixture\n")
-
-	_, errText, code := rf.run(t, "secret", "rotate", "mixed-cred")
-	if code == 0 {
-		t.Fatal("exit 0, want a refusal")
-	}
-	if !strings.Contains(errText, "carries both a legacy 'format' and a declared 'value'") {
-		t.Errorf("stderr = %q", errText)
-	}
-	if rf.encryptCalls != 0 {
-		t.Errorf("age was asked to encrypt %d times, want 0", rf.encryptCalls)
-	}
-}
-
-// TestSecretRotateAcceptsARegistryHoldingBothShapes is the positive half:
-// a registry where one group is still legacy and another has migrated
-// decodes and rotates the migrated one without complaint.
-func TestSecretRotateAcceptsARegistryHoldingBothShapes(t *testing.T) {
-	rf := newRotateFixture(t)
-	rf.addGroup(t, "legacy.rotate", forgejoGroup("legacy.rotate"),
-		rotateGroupCredential{
-			name: "legacy-cred", format: "credential-store-url", system: "fixture-host", kind: "nixos-host",
-			deployedPath: "/root/.git-credentials", user: "fixture-user",
-			rawVerify: json.RawMessage(`{"type":"git-ls-remote","repo_url":"https://example.test/fixture/repo.git"}`),
-		})
-	rf.addGroup(t, "new.rotate", forgejoGroup("new.rotate"),
-		rotateGroupCredential{
-			name: "new-cred", system: "dev-a", kind: "dev-vm", deployedPath: "/home/fixture-user/token",
-			verify: "forge token verify < /home/fixture-user/token",
-			value:  &credentialValue{Template: "https://fixture-user:{secret}@example.test"},
-		})
-	rf.pipe("tok-fixture")
-
-	_, errText, code := rf.run(t, "secret", "rotate", "new-cred")
-	if code != 0 {
-		t.Fatalf("exit %d, stderr: %s", code, errText)
-	}
-	if string(rf.lastPlaintext) != "https://fixture-user:tok-fixture@example.test" {
-		t.Errorf("plaintext = %q", rf.lastPlaintext)
-	}
-	if got := rf.commitFiles(t); got != "secrets/new-cred.age" {
-		t.Errorf("commit files = %q, want only the rotated credential", got)
 	}
 }
 
@@ -827,8 +746,8 @@ func TestSecretRotatePrintedStepsVaryByServiceAndLocalAuthRefresh(t *testing.T) 
 }
 
 // TestSecretRotateRefusesALocalAuthRefreshGroupWithoutRefreshLocalAuthOnPATH
-// pins the same PATH gate migrate has: a group with a local_auth_refresh
-// entry is refused, before the value is ever read, when 'refresh-local-auth'
+// pins the PATH gate: a group with a local_auth_refresh entry is refused,
+// before the value is ever read, when 'refresh-local-auth'
 // cannot be found on PATH — on a dry run and on a live run alike, since a
 // live run would otherwise land a rotation the operator could not finish.
 func TestSecretRotateRefusesALocalAuthRefreshGroupWithoutRefreshLocalAuthOnPATH(t *testing.T) {
@@ -1340,53 +1259,5 @@ func TestSecretRotateRefusesADuplicateEntryInOneGroup(t *testing.T) {
 	}
 	if got := rf.status(t); got != "" {
 		t.Errorf("tree is not clean after a refusal:\n%s", got)
-	}
-}
-
-// TestSecretRotateSendsAPlainLegacyEntryToARegistryEdit pins the other half
-// of the legacy refusal: 'migrate' has no container to take apart for a
-// plain legacy value, so naming it would send the operator on a hop that
-// ends in a refusal. The command that refuses says what actually works.
-func TestSecretRotateSendsAPlainLegacyEntryToARegistryEdit(t *testing.T) {
-	cases := []struct {
-		name       string
-		credential string
-		want       string
-	}{
-		{"the selected credential is legacy", "plain-legacy-cred",
-			"credential 'plain-legacy-cred' uses legacy format 'raw-forgejo-token'; it is a plain legacy value with no container to take apart"},
-		{"another group member is legacy", "new-shape-cred",
-			"rotation registry group 'plain.rotate' also lists legacy credential 'plain-legacy-cred' (format 'raw-forgejo-token'); it is a plain legacy value with no container to take apart"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			rf := newRotateFixture(t)
-			rf.addGroup(t, "plain.rotate", forgejoGroup("plain.rotate"),
-				rotateGroupCredential{
-					name: "new-shape-cred", system: "dev-a", kind: "dev-vm", deployedPath: "/home/fixture-user/token",
-					verify: "forge token verify < /home/fixture-user/token",
-					value:  &credentialValue{Template: "https://fixture-user:{secret}@example.test"},
-				},
-				rotateGroupCredential{
-					name: "plain-legacy-cred", format: "raw-forgejo-token", system: "fixture-host", kind: "nixos-host",
-					deployedPath: "/root/.token",
-					rawVerify:    json.RawMessage(`{"type":"forge-token-verify"}`),
-				})
-			rf.pipe("tok-fixture\n")
-
-			_, errText, code := rf.run(t, "secret", "rotate", tc.credential)
-			if code == 0 {
-				t.Fatal("exit 0, want a refusal")
-			}
-			if !strings.Contains(errText, tc.want) {
-				t.Errorf("stderr lacks %q\ngot: %q", tc.want, errText)
-			}
-			if strings.Contains(errText, "allod secret migrate") {
-				t.Errorf("the refusal names migrate for a format migrate refuses\ngot: %q", errText)
-			}
-			if want := "drops its 'format'"; !strings.Contains(errText, want) {
-				t.Errorf("stderr lacks the registry edit it should name\ngot: %q", errText)
-			}
-		})
 	}
 }

@@ -390,7 +390,7 @@ func TestSecretNamespaceIsRegistered(t *testing.T) {
 // build carries: 'declare' from the untagged files plus the four secret.go's
 // init() adds, and nothing else.
 func TestSecretTaggedBuildCarriesEveryCommand(t *testing.T) {
-	want := []string{"declare", "create", "rekey", "migrate", "rotate"}
+	want := []string{"declare", "create", "rekey", "rotate"}
 	if got := len(secretCommands); got != len(want) {
 		t.Fatalf("secretCommands has %d entries in a tagged build, want %d: %+v", got, len(want), secretCommands)
 	}
@@ -542,12 +542,6 @@ func TestSecretCreateRefusals(t *testing.T) {
 			entry.Consumers = append(entry.Consumers, credentialConsumer{Type: "agenix", Repo: "secrets", Secret: "secrets/second.age"})
 			fx.credentials["new-token"] = entry
 		}, "has 2 agenix consumers"},
-		{"legacy registry entry", func(_ *testing.T, fx *secretFixture) {
-			fx.registry["dev-a.git"].Credentials[0].Format = "credential-store-url"
-		}, "run 'allod secret migrate new-token' before landing a value for it"},
-		{"plain legacy registry entry", func(_ *testing.T, fx *secretFixture) {
-			fx.registry["dev-a.git"].Credentials[0].Format = "raw-forgejo-token"
-		}, "it is a plain legacy value with no container to take apart"},
 		{"template with no placeholder", func(_ *testing.T, fx *secretFixture) {
 			fx.registry["dev-a.git"].Credentials[0].Value = &credentialValue{Template: "https://user:token@example.test"}
 		}, "value.template must contain exactly one {secret} placeholder"},

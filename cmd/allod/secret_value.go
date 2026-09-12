@@ -3,7 +3,7 @@
 package main
 
 // The declared shape of a credential's value and of a target's
-// verification, shared by 'create', 'rotate', and 'migrate'.
+// verification, shared by 'create' and 'rotate'.
 //
 // A credential's non-secret text is a template around one '{secret}'
 // placeholder; a credential with no 'value' stores the secret verbatim.
@@ -157,16 +157,15 @@ func requireRcloneOnPath() {
 // --- Verification ---
 
 // verifyCommand reads a target's declared verification: one non-empty
-// command line, printed verbatim. A legacy structured object decodes as
-// something other than a string and is named as such, so the refusal points
-// at 'migrate' rather than at a JSON type.
+// command line, printed verbatim. A 'verify' that does not decode as a
+// string is refused as such, without naming a JSON type.
 func verifyCommand(raw json.RawMessage) (string, error) {
 	if len(raw) == 0 {
 		return "", fmt.Errorf("has no verify command")
 	}
 	var command string
 	if err := json.Unmarshal(raw, &command); err != nil {
-		return "", fmt.Errorf("has structured legacy verify data, not one command string")
+		return "", fmt.Errorf("has a verify value that is not one command string")
 	}
 	if strings.TrimSpace(command) == "" {
 		return "", fmt.Errorf("has an empty verify command")
@@ -182,10 +181,10 @@ func verifyCommand(raw json.RawMessage) (string, error) {
 // registryCredentialFor finds the one registry entry for a credential and
 // the alias of the group holding it. It counts entries, not groups: two
 // entries with the same name inside one group are two entries a command
-// would have to choose between, and 'migrate' rewriting only the first
-// would leave the second behind in the legacy shape, committed and
-// unnoticed. Zero, two in one group, and one in each of two groups are all
-// refused, because rotate and migrate each act on exactly one entry.
+// would have to choose between, and acting on only the first would leave
+// the second behind, committed and unnoticed. Zero, two in one group, and
+// one in each of two groups are all refused, because rotate acts on
+// exactly one entry.
 func registryCredentialFor(groups map[string]tokenGroup, name string) (registryCredential, string, error) {
 	found, aliases := registryCredentialEntries(groups, name)
 	distinct := distinctSorted(aliases)
@@ -230,43 +229,6 @@ func distinctSorted(values []string) []string {
 	}
 	sort.Strings(distinct)
 	return distinct
-}
-
-// isLegacyCredential reports the shape a credential still carries. The
-// secrets flake's own check treats 'format' as the discriminator and
-// refuses a credential carrying both, so this command reads the same one
-// field rather than inventing a second rule.
-func isLegacyCredential(credential registryCredential) bool { return credential.Format != "" }
-
-// legacyCredentialContainers are the two legacy formats whose plaintext is
-// a container with non-secret text around the secret. Those are the two
-// 'migrate' can take apart; every other legacy format stores the secret on
-// its own, so there is nothing to recover and nothing to decrypt.
-var legacyCredentialContainers = []string{"credential-store-url", "rclone-remote-stanza"}
-
-// legacyRefusalReason says how one legacy credential reaches the new shape,
-// which depends on which legacy format it carries. Sending an operator to
-// 'migrate' for a plain entry would be a wasted hop: migrate refuses it and
-// names a registry edit, so the command that refused says so directly.
-// action names what the caller was about to do, e.g. "rotating it".
-func legacyRefusalReason(credential registryCredential, action string) string {
-	if stringInList(credential.Format, legacyCredentialContainers) {
-		return fmt.Sprintf("run 'allod secret migrate %s' before %s", credential.Credential, action)
-	}
-	return "it is a plain legacy value with no container to take apart: it becomes new-shape by a registry edit that drops its 'format' and turns each target's 'verify' object into its command string, which needs no decryption"
-}
-
-// credentialShapeError refuses the one shape the coexistence rule forbids:
-// a credential is wholly legacy or wholly new, never both. The secrets
-// flake's credential-registry check fails closed on the mix too, so a
-// registry that reaches this command carrying both has not been checked,
-// and guessing which half is authoritative is exactly the guess that would
-// encrypt a value into the wrong text.
-func credentialShapeError(credential registryCredential) error {
-	if credential.Format == "" || credential.Value == nil {
-		return nil
-	}
-	return fmt.Errorf("credential '%s' carries both a legacy 'format' and a declared 'value'; a credential is one shape or the other, so fix the registry entry before landing anything for it", credential.Credential)
 }
 
 // encoderExitStatus describes how an encoder process ended without quoting

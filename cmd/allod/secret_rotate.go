@@ -18,10 +18,10 @@ package main
 // credential's non-secret text is declared in the registry as a template
 // around one '{secret}' placeholder, so rotation renders that template
 // around the new secret and never decrypts the old one: the parsers that
-// lifted a user and a host out of the old ciphertext are gone, and with
-// them the only reason this command ever had to read an existing value.
-// 'allod secret migrate' does that lift exactly once per legacy container,
-// and a legacy entry is refused here by name.
+// used to lift a user and a host out of the old ciphertext are gone, and
+// with them the only reason this command ever had to read an existing
+// value. The registry holds a value template for every credential now, so
+// there is nothing left to lift.
 //
 // The unit of rotation is the registry group: every credential the group
 // lists is re-encrypted from the one value read on stdin, exactly as
@@ -60,9 +60,7 @@ verbatim when the credential declares no value; 'value.encode' names an
 encoding applied to the secret alone before substitution. Nothing else in
 the template changes, and no existing ciphertext is decrypted. The value is
 read from stdin verbatim, so a trailing newline is part of the secret — use
-printf '%s' "$value" | allod secret rotate <name> when it should not be. A
-credential still carrying a legacy 'format' is refused, naming 'allod
-secret migrate <name>'; so is a group that has one among its other members.
+printf '%s' "$value" | allod secret rotate <name> when it should not be.
 
 '--dry-run' runs every gate this command applies to the group — branch,
 clean tree, active state, ciphertext present, recipients, registry shape,
@@ -201,13 +199,10 @@ var (
 var credentialStoreURLTemplate = regexp.MustCompile(`^https://[^:[:space:]][^:[:space:]]*:\{secret\}@[^/[:space:]][^/[:space:]]*$`)
 
 // isCredentialStoreURLSource reports whether a credential can be a
-// local_auth_refresh source: legacy credential-store-url, or a new-shape
-// template that renders exactly one credential-store line. Blank lines are
-// dropped first, matching the runtime netrc parser.
+// local_auth_refresh source: a declared value template that renders exactly
+// one credential-store line. Blank lines are dropped first, matching the
+// runtime netrc parser.
 func isCredentialStoreURLSource(credential registryCredential) bool {
-	if credential.Format == "credential-store-url" {
-		return true
-	}
 	if credential.Value == nil || credential.Value.Encode != "" {
 		return false
 	}
@@ -347,18 +342,6 @@ func secretRotate(args []string) {
 	branch := requireLandingBranch(checkout)
 
 	alias, group, groups := selectRotationGroup(checkout, name)
-	for _, credential := range group.Credentials {
-		if err := credentialShapeError(credential); err != nil {
-			die(1, "%s", err)
-		}
-		if !isLegacyCredential(credential) {
-			continue
-		}
-		if credential.Credential == name {
-			die(1, "credential '%s' uses legacy format '%s'; %s", name, credential.Format, legacyRefusalReason(credential, "rotating it"))
-		}
-		die(1, "rotation registry group '%s' also lists legacy credential '%s' (format '%s'); %s", alias, credential.Credential, credential.Format, legacyRefusalReason(credential, "rotating this group"))
-	}
 	validateGroupMetadata(alias, group)
 	assertUniformGroupEncoding(alias, group.Credentials)
 	verifyGroupMembersUnique(group, groups)
@@ -385,7 +368,7 @@ func secretRotate(args []string) {
 		}
 		for _, target := range credential.Targets {
 			if _, err := verifyCommand(target.Verify); err != nil {
-				die(1, "credential '%s' target '%s' %s; run 'allod secret migrate %s' to convert it", credential.Credential, target.System, err, credential.Credential)
+				die(1, "credential '%s' target '%s' %s; write that target's command into the registry by hand", credential.Credential, target.System, err)
 			}
 		}
 		target := lookupSecret(checkout, credential.Credential)
@@ -566,7 +549,7 @@ func printGroupSummary(w io.Writer, alias string, group tokenGroup) {
 		for _, target := range credential.Targets {
 			command, err := verifyCommand(target.Verify)
 			if err != nil {
-				die(1, "credential '%s' target '%s' %s; run 'allod secret migrate %s' to convert it", credential.Credential, target.System, err, credential.Credential)
+				die(1, "credential '%s' target '%s' %s; write that target's command into the registry by hand", credential.Credential, target.System, err)
 			}
 			fmt.Fprintf(w, "  - %s (%s): %s, verify: %s\n", target.System, target.Kind, target.DeployedPath, command)
 		}
@@ -703,7 +686,7 @@ func printVerification(w io.Writer, group tokenGroup) {
 		for _, target := range credential.Targets {
 			command, err := verifyCommand(target.Verify)
 			if err != nil {
-				die(1, "credential '%s' target '%s' %s; run 'allod secret migrate %s' to convert it", credential.Credential, target.System, err, credential.Credential)
+				die(1, "credential '%s' target '%s' %s; write that target's command into the registry by hand", credential.Credential, target.System, err)
 			}
 			fmt.Fprintf(w, "%s (%s):\n", target.System, target.Kind)
 			if target.System == host {
