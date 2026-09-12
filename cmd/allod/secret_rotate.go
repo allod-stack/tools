@@ -606,10 +606,10 @@ func uniqueRebuildTargets(group tokenGroup) []rebuildTarget {
 	return targets
 }
 
-func printRebuildCommand(w io.Writer, system, kind string) {
+func printRebuildCommand(w io.Writer, deployCheckout, system, kind string) {
 	switch kind {
 	case "nixos-host":
-		fmt.Fprintf(w, "   sudo nixos-rebuild switch --flake ~/work/allod/deploy#%s\n", system)
+		fmt.Fprintf(w, "   sudo nixos-rebuild switch --flake ~/work/%s#%s\n", deployCheckout, system)
 	case "dev-vm", "privacy-vm", "service-vm":
 		fmt.Fprintf(w, "   rebuild-vm-from-host %s\n", system)
 	default:
@@ -668,12 +668,13 @@ func printDeploySteps(w io.Writer, checkout, alias, branch string, group tokenGr
 	}
 	step++
 
-	fmt.Fprintf(w, "\n%d. Update the deploy flake lock:\n   cd ~/work/allod/deploy\n   nix flake update secrets\n   git add flake.lock\n   git commit -m \"update secrets input\"\n   git push\n\n", step)
+	deployCheckout := deployCheckoutRelative()
+	fmt.Fprintf(w, "\n%d. Update the deploy flake lock:\n   cd ~/work/%s\n   nix flake update secrets\n   git add flake.lock\n   git commit -m \"update secrets input\"\n   git push\n\n", step, deployCheckout)
 	step++
 
 	fmt.Fprintf(w, "%d. Rebuild affected target(s):\n", step)
 	for _, target := range uniqueRebuildTargets(group) {
-		printRebuildCommand(w, target.system, target.kind)
+		printRebuildCommand(w, deployCheckout, target.system, target.kind)
 	}
 }
 

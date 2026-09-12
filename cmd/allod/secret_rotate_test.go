@@ -709,6 +709,47 @@ func TestSecretRotateDryRunPrintsStepsWithoutWriting(t *testing.T) {
 	}
 }
 
+// TestSecretRotateResolvesDeployCheckoutFromTheRegistry pins that the
+// deploy-flake lines (the flake-lock update and the rebuild command) read
+// the repository registry's 'deploy' entry the same way the secrets
+// checkout does, rather than a hardcoded ~/work/allod/deploy.
+func TestSecretRotateResolvesDeployCheckoutFromTheRegistry(t *testing.T) {
+	rf := newRotateFixture(t)
+	rf.addGroup(t, "shared.rotate", forgejoGroup("shared.rotate"),
+		rotateGroupCredential{
+			name: "cred-a", system: "fixture-host", kind: "nixos-host", deployedPath: "/root/.git-credentials",
+			verify: "sudo env HOME=/root GIT_TERMINAL_PROMPT=0 git ls-remote https://example.test/fixture/repo.git HEAD",
+			value:  &credentialValue{Template: "https://fixture-user:{secret}@example.test"},
+		})
+
+	work := t.TempDir()
+	registryDir := filepath.Join(work, "allod", "inventory", "scripts")
+	if err := os.MkdirAll(registryDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	registry := `{"repositories": {"deploy": {"checkout": "elsewhere/deploy"}}}`
+	if err := os.WriteFile(filepath.Join(registryDir, "repositories.json"), []byte(registry), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WORK_DIR", work)
+
+	_, errText, code := rf.run(t, "secret", "rotate", "cred-a", "--dry-run")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, errText)
+	}
+	for _, want := range []string{
+		"cd ~/work/elsewhere/deploy",
+		"sudo nixos-rebuild switch --flake ~/work/elsewhere/deploy#fixture-host",
+	} {
+		if !strings.Contains(errText, want) {
+			t.Errorf("stderr lacks %q\ngot: %q", want, errText)
+		}
+	}
+	if strings.Contains(errText, "allod/deploy") {
+		t.Errorf("stderr still names the fallback allod/deploy checkout\ngot: %q", errText)
+	}
+}
+
 func TestSecretRotateDryRunStillRefusesADirtyTree(t *testing.T) {
 	rf := newRotateFixture(t)
 	rf.addGroup(t, "raw.rotate", forgejoGroup("raw.rotate"),
