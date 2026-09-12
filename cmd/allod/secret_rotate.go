@@ -33,13 +33,15 @@ package main
 // A dry run reads and decrypts nothing: it runs every gate this command
 // applies to the group (branch, clean tree, active state, ciphertext
 // present, recipients, registry shape, declared value, declared
-// verification) but not the repository's own nix flake check, which only a
-// real landing runs.
+// verification, and — for a group with a local_auth_refresh entry —
+// 'refresh-local-auth' resolving on PATH) but not the repository's own nix
+// flake check, which only a real landing runs.
 
 import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -73,8 +75,11 @@ not change. A group with a local_auth_refresh entry gets one more printed
 step naming 'refresh-local-auth --group <alias>' — an instruction on a live
 run, phrased as what a live run would print on a dry run — because that
 stays a separate host script: it installs root-owned files under sudo, a
-privilege this command does not hold. The branch is re-verified immediately
-before writing and again
+privilege this command does not hold. Such a group also requires
+'refresh-local-auth' to resolve on PATH, checked before the value is read
+and on a dry run too, so a host whose nexus pin predates allod/nexus#52 is
+refused before a live run lands a rotation the operator could not finish.
+The branch is re-verified immediately before writing and again
 immediately before committing, refusing (with every ciphertext already
 written restored) if the checkout moved in between.
 
@@ -357,6 +362,16 @@ func secretRotate(args []string) {
 	validateGroupMetadata(alias, group)
 	assertUniformGroupEncoding(alias, group.Credentials)
 	verifyGroupMembersUnique(group, groups)
+	// Checked before the value is ever read, and on a dry run too: the
+	// printed deploy step below tells the operator to run
+	// 'refresh-local-auth' next, and a live run has already landed the
+	// rotated secret by the time that step would fail, leaving the group
+	// rotated with no way to finish the job.
+	if len(group.LocalAuthRefresh) > 0 {
+		if _, err := exec.LookPath("refresh-local-auth"); err != nil {
+			die(1, "rotation registry group '%s' needs a local auth refresh after rotation, and 'refresh-local-auth' was not found on PATH; this host's nexus pin predates allod/nexus#52", alias)
+		}
+	}
 
 	encodings, err := secretEvalEncodings(checkout)
 	if err != nil {

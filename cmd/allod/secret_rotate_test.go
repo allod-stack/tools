@@ -730,6 +730,7 @@ func TestSecretRotateDryRunStillRefusesADirtyTree(t *testing.T) {
 
 func TestSecretRotatePrintedStepsVaryByServiceAndLocalAuthRefresh(t *testing.T) {
 	installFakeRclone(t)
+	installFakeRefreshLocalAuth(t)
 	rf := newRotateFixture(t)
 	rf.addGroup(t, "raw.rotate", forgejoGroup("raw.rotate"),
 		rotateGroupCredential{name: "raw-cred", system: "dev-a", kind: "dev-vm", deployedPath: "/home/fixture-user/token", verify: "forge token verify < /home/fixture-user/token"})
@@ -822,6 +823,71 @@ func TestSecretRotatePrintedStepsVaryByServiceAndLocalAuthRefresh(t *testing.T) 
 	}
 	if strings.Contains(liveErrText, "After the real run lands") {
 		t.Errorf("a live run used the dry-run phrasing:\n%s", liveErrText)
+	}
+}
+
+// TestSecretRotateRefusesALocalAuthRefreshGroupWithoutRefreshLocalAuthOnPATH
+// pins the same PATH gate migrate has: a group with a local_auth_refresh
+// entry is refused, before the value is ever read, when 'refresh-local-auth'
+// cannot be found on PATH — on a dry run and on a live run alike, since a
+// live run would otherwise land a rotation the operator could not finish.
+func TestSecretRotateRefusesALocalAuthRefreshGroupWithoutRefreshLocalAuthOnPATH(t *testing.T) {
+	rf := newRotateFixture(t)
+	group := forgejoGroup("refresh.rotate")
+	group.LocalAuthRefresh = []localAuthRefreshEntry{{
+		Contract: "nixos-netrc-from-root-git-credentials", System: "fixture-host", LocalUsername: "fixture-user", SourceCredential: "refresh-cred",
+	}}
+	rf.addGroup(t, "refresh.rotate", group, rotateGroupCredential{
+		name: "refresh-cred", system: "fixture-host", kind: "nixos-host", deployedPath: "/root/.git-credentials",
+		verify: "sudo env HOME=/root GIT_TERMINAL_PROMPT=0 git ls-remote https://example.test/fixture/repo.git HEAD",
+		value:  &credentialValue{Template: "https://fixture-user:{secret}@example.test"},
+	})
+	beforeHead := rf.head(t)
+	t.Setenv("PATH", pathWithoutRefreshLocalAuth(t))
+
+	for _, args := range [][]string{
+		{"secret", "rotate", "refresh-cred", "--dry-run"},
+		{"secret", "rotate", "refresh-cred"},
+	} {
+		_, errText, code := rf.run(t, args...)
+		if code == 0 {
+			t.Fatalf("%v: exit 0, want a refusal", args)
+		}
+		if !strings.Contains(errText, "rotation registry group 'refresh.rotate' needs a local auth refresh after rotation") {
+			t.Errorf("%v: stderr = %q", args, errText)
+		}
+		if !strings.Contains(errText, "'refresh-local-auth' was not found on PATH") {
+			t.Errorf("%v: stderr = %q", args, errText)
+		}
+		if !strings.Contains(errText, "this host's nexus pin predates allod/nexus#52") {
+			t.Errorf("%v: stderr = %q", args, errText)
+		}
+		if rf.encryptCalls != 0 || rf.decryptCalls != 0 {
+			t.Errorf("%v: encrypt=%d decrypt=%d, want 0 and 0 — refused before any value was read", args, rf.encryptCalls, rf.decryptCalls)
+		}
+	}
+	if got := rf.head(t); got != beforeHead {
+		t.Error("a commit was made despite the refusal")
+	}
+	if got := rf.status(t); got != "" {
+		t.Errorf("tree is not clean after a refusal:\n%s", got)
+	}
+}
+
+// TestSecretRotateWithoutLocalAuthRefreshIgnoresARefreshLocalAuthGate pins
+// that the new PATH gate is scoped to groups that actually carry a
+// local_auth_refresh entry: an ordinary group still rotates on the exact
+// PATH the previous test shows refuses one that does carry one.
+func TestSecretRotateWithoutLocalAuthRefreshIgnoresARefreshLocalAuthGate(t *testing.T) {
+	rf := newRotateFixture(t)
+	rf.addGroup(t, "plain.rotate", forgejoGroup("plain.rotate"),
+		rotateGroupCredential{name: "plain-cred", system: "dev-a", kind: "dev-vm", deployedPath: "/home/fixture-user/token", verify: "forge token verify < /home/fixture-user/token"})
+	rf.pipe("tok-fixture\n")
+	t.Setenv("PATH", pathWithoutRefreshLocalAuth(t))
+
+	_, errText, code := rf.run(t, "secret", "rotate", "plain-cred")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, errText)
 	}
 }
 
@@ -1288,9 +1354,9 @@ func TestSecretRotateSendsAPlainLegacyEntryToARegistryEdit(t *testing.T) {
 		want       string
 	}{
 		{"the selected credential is legacy", "plain-legacy-cred",
-			"credential 'plain-legacy-cred' uses legacy format 'raw-forgejo-token'; it is a plain legacy value that 'rotate-token' still rotates"},
+			"credential 'plain-legacy-cred' uses legacy format 'raw-forgejo-token'; it is a plain legacy value with no container to take apart"},
 		{"another group member is legacy", "new-shape-cred",
-			"rotation registry group 'plain.rotate' also lists legacy credential 'plain-legacy-cred' (format 'raw-forgejo-token'); it is a plain legacy value that 'rotate-token' still rotates"},
+			"rotation registry group 'plain.rotate' also lists legacy credential 'plain-legacy-cred' (format 'raw-forgejo-token'); it is a plain legacy value with no container to take apart"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

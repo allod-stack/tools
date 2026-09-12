@@ -253,7 +253,7 @@ func legacyRefusalReason(credential registryCredential, action string) string {
 	if stringInList(credential.Format, legacyCredentialContainers) {
 		return fmt.Sprintf("run 'allod secret migrate %s' before %s", credential.Credential, action)
 	}
-	return "it is a plain legacy value that 'rotate-token' still rotates, and migrate has no container to take apart: it becomes new-shape by a registry edit that drops its 'format' and turns each target's 'verify' object into its command string, which needs no decryption"
+	return "it is a plain legacy value with no container to take apart: it becomes new-shape by a registry edit that drops its 'format' and turns each target's 'verify' object into its command string, which needs no decryption"
 }
 
 // credentialShapeError refuses the one shape the coexistence rule forbids:

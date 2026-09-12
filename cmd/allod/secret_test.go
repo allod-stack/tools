@@ -547,7 +547,7 @@ func TestSecretCreateRefusals(t *testing.T) {
 		}, "run 'allod secret migrate new-token' before landing a value for it"},
 		{"plain legacy registry entry", func(_ *testing.T, fx *secretFixture) {
 			fx.registry["dev-a.git"].Credentials[0].Format = "raw-forgejo-token"
-		}, "it is a plain legacy value that 'rotate-token' still rotates"},
+		}, "it is a plain legacy value with no container to take apart"},
 		{"template with no placeholder", func(_ *testing.T, fx *secretFixture) {
 			fx.registry["dev-a.git"].Credentials[0].Value = &credentialValue{Template: "https://user:token@example.test"}
 		}, "value.template must contain exactly one {secret} placeholder"},
