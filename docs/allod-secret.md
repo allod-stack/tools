@@ -40,7 +40,7 @@ tailscale status --peers=false
 
 A credential is wholly new (`value` absent or present, `verify` a string on every target) or wholly legacy (a `format` name plus a structured `verify` object on every target). One credential carrying both is refused by every command here, and by the secrets flake's own `credential-registry` check. A registry may hold some of each while the migration runs.
 
-`rotate` and `create` refuse a legacy credential, and `rotate` refuses a group with a legacy member. What the refusal names depends on the format. A `credential-store-url` or an `rclone-remote-stanza` is a container with non-secret text around the secret, so it names `allod secret migrate <name>`. Any other legacy format stores the secret on its own, so there is no container to take apart: the refusal says the entry is a plain legacy value `rotate-token` still rotates, and that it becomes new-shape by a registry edit that drops its `format` and turns each target's `verify` object into its command string, with nothing decrypted. `rotate-token` keeps rotating legacy entries until it retires.
+`rotate` and `create` refuse a legacy credential, and `rotate` refuses a group with a legacy member. What the refusal names depends on the format. A `credential-store-url` or an `rclone-remote-stanza` is a container with non-secret text around the secret, so it names `allod secret migrate <name>`. Any other legacy format stores the secret on its own, so there is no container to take apart: the refusal says the entry is a plain legacy value that becomes new-shape by a registry edit that drops its `format` and turns each target's `verify` object into its command string, with nothing decrypted. Until that edit lands, `rotate` refuses it outright; there is no fallback that still rotates it.
 
 ## declare
 
@@ -96,13 +96,13 @@ A push failure after the commit is reported with the commit kept; the landing ha
 
 ## rotate
 
-`allod secret rotate <name>` replaces a value. The unit is the registry group that lists <name> among its credentials: every credential in that group is re-encrypted from the one value read on stdin, the way `rotate-token --group` rotates a shared Forgejo token today. Each one is rendered from its own declared template, so a group can mix a plain token and a URL around the same secret; a group whose members disagree on `value.encode` is refused, because one value cannot be both a password to obscure and a token to store.
+`allod secret rotate <name>` replaces a value. The unit is the registry group that lists <name> among its credentials: every credential in that group is re-encrypted from the one value read on stdin, the way `rotate-token --group` used to rotate a shared Forgejo token. Each one is rendered from its own declared template, so a group can mix a plain token and a URL around the same secret; a group whose members disagree on `value.encode` is refused, because one value cannot be both a password to obscure and a token to store.
 
 Nothing is decrypted. Every credential in the group must already be `active` with a ciphertext on disk, and each new ciphertext is built in memory, written by temp-file-and-rename so a file is always old or new bytes, and gated by one `nix flake check` before one commit and push. A failed check restores every ciphertext and creates no commit. A push failure keeps the commit, still prints every step, and exits non-zero.
 
 `--dry-run` runs every gate — branch, clean tree, active state, ciphertext present, recipients, registry shape, unique group membership, declared value and verification — reads no value, decrypts nothing, encrypts nothing, runs no checks, and writes nothing. It still refuses a dirty tree. It prints the group, its targets, the deploy and verification steps, and the revocation gate, phrased as what a live run would do.
 
-The printed steps come from the registry: the rebuild command per target kind, the verification command per target, the revocation gate with Forgejo wording only for a `forgejo` group and none at all for an `in-place` strategy, and — when the group carries `local_auth_refresh` entries — `rotate-token refresh-local-auth --group <alias>` as the operator's next step. That part of `rotate-token` stays a separate host script: it installs root-owned files under sudo, a privilege a git-repository command should not hold.
+The printed steps come from the registry: the rebuild command per target kind, the verification command per target, the revocation gate with Forgejo wording only for a `forgejo` group and none at all for an `in-place` strategy, and — when the group carries `local_auth_refresh` entries — `refresh-local-auth --group <alias>` as the operator's next step. That stays a separate host script, nexus's own `refresh-local-auth`: it installs root-owned files under sudo, a privilege a git-repository command should not hold.
 
 ## migrate
 
@@ -114,7 +114,9 @@ Everything that can be settled from registry text alone is settled before the de
 
 For an rclone stanza the migrated declaration carries `"encode": "rclone-obscure"` even though the stored value is the already-obscured password: the encoder describes what the next `rotate` does, which is take a raw password and obscure it.
 
-`migrate` refuses a credential that already has a `value`, one in no registry group, in two groups, or listed twice inside one group, one named by a group's `local_auth_refresh` (that consumer still needs the legacy shape until allod/nexus#52 changes it), and any legacy format other than the two containers. A plain legacy entry needs no decryption at all: edit the registry directly, dropping `format` and turning each target's `verify` object into its command string.
+`migrate` refuses a credential that already has a `value`, one in no registry group, in two groups, or listed twice inside one group, and any legacy format other than the two containers. A plain legacy entry needs no decryption at all: edit the registry directly, dropping `format` and turning each target's `verify` object into its command string.
+
+A credential that is the `source_credential` of a `local_auth_refresh` entry in any group is refused unless it is a `credential-store-url` container — an `rclone-remote-stanza` can never render a netrc line — and `refresh-local-auth` resolves on PATH. A host whose nexus pin predates allod/nexus#52 has no such script installed, and migrating there would leave the old `rotate-token` refresh refusing the migrated entry.
 
 ## Where things are found
 

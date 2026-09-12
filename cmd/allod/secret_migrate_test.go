@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -655,23 +656,6 @@ func TestSecretMigrateRefusals(t *testing.T) {
 			credential: "store-cred",
 			want:       "A plain legacy entry needs no decryption: edit forgejo-token-groups.json to drop its 'format'",
 		},
-		{
-			name: "a local_auth_refresh source",
-			registry: strings.Replace(migrateStoreRegistry,
-				`"rotation_strategy": "overlap",
-    "credentials": [
-      {
-        "credential": "store-cred",`,
-				`"rotation_strategy": "overlap",
-    "local_auth_refresh": [
-      { "contract": "nixos-netrc-from-root-git-credentials", "system": "fixture-host", "local_username": "fixture-user", "source_credential": "store-cred" }
-    ],
-    "credentials": [
-      {
-        "credential": "store-cred",`, 1),
-			credential: "store-cred",
-			want:       "is the source of a local_auth_refresh entry",
-		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -702,6 +686,216 @@ func TestSecretMigrateRefusals(t *testing.T) {
 				t.Errorf("tree is not clean after a refusal:\n%s", got)
 			}
 		})
+	}
+}
+
+// --- local_auth_refresh sources ---
+
+// migrateStoreLocalAuthRegistry is migrateStoreRegistry with a
+// local_auth_refresh entry naming store-cred as its source_credential, the
+// same insertion point and fields validateGroupMetadata expects (system and
+// deployed_path matching the credential's own credential-store-url
+// target).
+var migrateStoreLocalAuthRegistry = strings.Replace(migrateStoreRegistry,
+	`"rotation_strategy": "overlap",
+    "credentials": [
+      {
+        "credential": "store-cred",`,
+	`"rotation_strategy": "overlap",
+    "local_auth_refresh": [
+      { "contract": "nixos-netrc-from-root-git-credentials", "system": "fixture-host", "local_username": "fixture-user", "source_credential": "store-cred" }
+    ],
+    "credentials": [
+      {
+        "credential": "store-cred",`, 1)
+
+// installFakeRefreshLocalAuth puts an executable file named
+// 'refresh-local-auth' on PATH ahead of whatever is already there. Migrate
+// only asks whether it resolves; it never runs it, so the file's content
+// does not matter.
+func installFakeRefreshLocalAuth(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "refresh-local-auth"), []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// pathWithoutRefreshLocalAuth builds a PATH that resolves 'git' (migrate's
+// own real subprocess for the landing) but can never resolve
+// 'refresh-local-auth', regardless of what the ambient environment happens
+// to have installed, the way secret_rotate_test.go's pathWithoutRclone
+// builds one that can never resolve 'rclone'.
+func pathWithoutRefreshLocalAuth(t *testing.T) string {
+	t.Helper()
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.Symlink(git, filepath.Join(dir, "git")); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// TestSecretMigrateLocalAuthSourceMigratesWithRefreshLocalAuthOnPATH pins
+// that a credential-store-url credential named as a local_auth_refresh
+// source migrates exactly like an ordinary one once 'refresh-local-auth'
+// resolves on PATH: the golden registry bytes, the untouched ciphertext,
+// the landed commit, and that the migrated group still passes
+// validateGroupMetadata.
+func TestSecretMigrateLocalAuthSourceMigratesWithRefreshLocalAuthOnPATH(t *testing.T) {
+	installFakeRefreshLocalAuth(t)
+	mf := newMigrateFixture(t, migrateStoreLocalAuthRegistry)
+	mf.addCredential(t, "store-cred", "https://fixture-user:tok-fixture@example.test")
+	mf.commit(t)
+	beforeCiphertext := mf.file(t, "secrets/store-cred.age")
+	beforeHead := mf.head(t)
+
+	_, errText, code := mf.run(t, "secret", "migrate", "store-cred")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr: %s", code, errText)
+	}
+
+	want := `{
+  "store.rotate": {
+    "service": "forgejo",
+    "account": "fixture-user",
+    "ui_token_name": "fixture-token",
+    "registry_alias": "store.rotate",
+    "rotation_strategy": "overlap",
+    "local_auth_refresh": [
+      { "contract": "nixos-netrc-from-root-git-credentials", "system": "fixture-host", "local_username": "fixture-user", "source_credential": "store-cred" }
+    ],
+    "credentials": [
+      {
+        "credential": "store-cred",
+        "secret_path": "secrets/store-cred.age",
+        "value": {
+          "template": "https://fixture-user:{secret}@example.test"
+        },
+        "targets": [
+          {
+            "system": "fixture-host",
+            "kind": "nixos-host",
+            "deployed_path": "/root/.git-credentials",
+            "verify": "sudo env HOME=/root GIT_TERMINAL_PROMPT=0 git ls-remote https://example.test/fixture/repo.git HEAD"
+          }
+        ]
+      }
+    ]
+  },
+  "other.rotate": {
+    "service": "none",
+    "registry_alias": "other.rotate",
+    "rotation_strategy": "overlap",
+    "credentials": [
+      {
+        "credential": "untouched-cred",
+        "secret_path": "secrets/untouched-cred.age",
+        "value": { "template": "https://fixture-user:{secret}@example.test" },
+        "targets": [
+          { "system": "dev-a", "kind": "dev-vm", "deployed_path": "/root/.git-credentials", "verify": "allod site check" }
+        ]
+      }
+    ]
+  }
+}
+`
+	if got := mf.file(t, "forgejo-token-groups.json"); got != want {
+		t.Errorf("forgejo-token-groups.json =\n%s\nwant\n%s", got, want)
+	}
+	if got := mf.file(t, "secrets/store-cred.age"); got != beforeCiphertext {
+		t.Error("the ciphertext was rewritten; migrate changes registry text only")
+	}
+	if got := mf.head(t); got == beforeHead {
+		t.Error("no commit was made")
+	}
+
+	var groups map[string]tokenGroup
+	if err := json.Unmarshal([]byte(want), &groups); err != nil {
+		t.Fatalf("could not decode the migrated registry: %s", err)
+	}
+	validateGroupMetadata("store.rotate", groups["store.rotate"])
+}
+
+// TestSecretMigrateLocalAuthSourceRefusedWithoutRefreshLocalAuthOnPATH pins
+// that the same credential is refused, before anything is decrypted, when
+// 'refresh-local-auth' cannot be found on PATH, and that the registry is
+// left untouched.
+func TestSecretMigrateLocalAuthSourceRefusedWithoutRefreshLocalAuthOnPATH(t *testing.T) {
+	t.Setenv("PATH", pathWithoutRefreshLocalAuth(t))
+	mf := newMigrateFixture(t, migrateStoreLocalAuthRegistry)
+	mf.addCredential(t, "store-cred", "https://fixture-user:tok-fixture@example.test")
+	mf.commit(t)
+	before := mf.file(t, "forgejo-token-groups.json")
+	beforeHead := mf.head(t)
+
+	_, errText, code := mf.run(t, "secret", "migrate", "store-cred")
+	if code == 0 {
+		t.Fatal("exit 0, want a refusal")
+	}
+	if !strings.Contains(errText, "'refresh-local-auth' was not found on PATH") {
+		t.Errorf("stderr = %q", errText)
+	}
+	if !strings.Contains(errText, "this host's nexus pin predates allod/nexus#52") {
+		t.Errorf("stderr does not explain why: %q", errText)
+	}
+	if len(mf.decryptedFor) != 0 {
+		t.Errorf("decrypted %v; refresh-local-auth's absence is settled from PATH alone", mf.decryptedFor)
+	}
+	if got := mf.file(t, "forgejo-token-groups.json"); got != before {
+		t.Error("the registry was changed despite the refusal")
+	}
+	if got := mf.head(t); got != beforeHead {
+		t.Error("a commit was made")
+	}
+}
+
+// TestSecretMigrateRefusesAnRcloneStanzaAsALocalAuthSource pins that a
+// container format that can never render a netrc line is refused before
+// decrypt, naming the format, regardless of whether refresh-local-auth is
+// on PATH.
+func TestSecretMigrateRefusesAnRcloneStanzaAsALocalAuthSource(t *testing.T) {
+	installFakeRefreshLocalAuth(t)
+	registry := strings.Replace(migrateRcloneRegistry,
+		`"rotation_strategy": "overlap",
+    "credentials": [
+      {
+        "credential": "site-cred",`,
+		`"rotation_strategy": "overlap",
+    "local_auth_refresh": [
+      { "contract": "nixos-netrc-from-root-git-credentials", "system": "fixture-host", "local_username": "fixture-user", "source_credential": "site-cred" }
+    ],
+    "credentials": [
+      {
+        "credential": "site-cred",`, 1)
+	mf := newMigrateFixture(t, registry)
+	mf.addCredential(t, "site-cred", migrateCanonicalStanza)
+	mf.commit(t)
+	before := mf.file(t, "forgejo-token-groups.json")
+	beforeHead := mf.head(t)
+
+	_, errText, code := mf.run(t, "secret", "migrate", "site-cred")
+	if code == 0 {
+		t.Fatal("exit 0, want a refusal")
+	}
+	if !strings.Contains(errText, "only a 'credential-store-url' container can migrate it") {
+		t.Errorf("stderr = %q", errText)
+	}
+	if !strings.Contains(errText, "legacy format 'rclone-remote-stanza'") {
+		t.Errorf("stderr does not name the format: %q", errText)
+	}
+	if len(mf.decryptedFor) != 0 {
+		t.Errorf("decrypted %v before refusing on registry data alone", mf.decryptedFor)
+	}
+	if got := mf.file(t, "forgejo-token-groups.json"); got != before {
+		t.Error("the registry was changed despite the refusal")
+	}
+	if got := mf.head(t); got != beforeHead {
+		t.Error("a commit was made")
 	}
 }
 

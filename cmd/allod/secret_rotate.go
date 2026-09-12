@@ -10,9 +10,9 @@ package main
 // revocation steps. Out of the port: rotate-token's
 // --group/--forgejo-token/--allow-single-secret selectors (a credential name
 // is the only selector here, and it always names its whole registry group,
-// the way '--group' rotates a shared token today), and refresh-local-auth
-// (it installs root-owned files under sudo, a privilege this command does
-// not hold; see printDeploySteps).
+// the way '--group' rotates a shared token today), and refresh-local-auth,
+// now its own host script of that name (it installs root-owned files under
+// sudo, a privilege this command does not hold; see printDeploySteps).
 //
 // What this does not port is rotate-token's per-format switch. A
 // credential's non-secret text is declared in the registry as a template
@@ -70,11 +70,11 @@ group, its targets, the deploy and verification steps, and the revocation
 gate, describing what a live run would do rather than instructing it, and
 reads no value, decrypts nothing, and writes nothing. rotation_state does
 not change. A group with a local_auth_refresh entry gets one more printed
-step naming 'rotate-token refresh-local-auth --group <alias>' — an
-instruction on a live run, phrased as what a live run would print on a dry
-run — because that part of rotate-token stays a separate host script: it
-installs root-owned files under sudo, a privilege this command does not
-hold. The branch is re-verified immediately before writing and again
+step naming 'refresh-local-auth --group <alias>' — an instruction on a live
+run, phrased as what a live run would print on a dry run — because that
+stays a separate host script: it installs root-owned files under sudo, a
+privilege this command does not hold. The branch is re-verified immediately
+before writing and again
 immediately before committing, refusing (with every ciphertext already
 written restored) if the checkout moved in between.
 
@@ -620,8 +620,8 @@ const (
 // time it prints (or, in a dry run, will land it exactly this way on a real
 // run), so the "commit and push" step describes what happened instead of
 // instructing the operator to run git themselves. When the group carries
-// local_auth_refresh entries, step 1 names 'rotate-token refresh-local-auth
-// --group <alias>' as the operator's next step; 'rotate' never runs it (see
+// local_auth_refresh entries, step 1 names 'refresh-local-auth --group
+// <alias>' as the operator's next step; 'rotate' never runs it (see
 // secret_rotate.go's file comment).
 func printDeploySteps(w io.Writer, checkout, alias, branch string, group tokenGroup, commitSubject string, landing deployStepsLandingState) {
 	fmt.Fprintln(w)
@@ -632,9 +632,9 @@ func printDeploySteps(w io.Writer, checkout, alias, branch string, group tokenGr
 			// No ciphertext has been rotated by a dry run, so this cannot
 			// read as something to do now: it describes what the printed
 			// steps will say once a live run actually lands the secret.
-			fmt.Fprintf(w, "%d. After the real run lands the rotated secret, refresh declared local auth before any git push, flake-lock update, or rebuild fetch:\n   rotate-token refresh-local-auth --group %s\n\n", step, alias)
+			fmt.Fprintf(w, "%d. After the real run lands the rotated secret, refresh declared local auth before any git push, flake-lock update, or rebuild fetch:\n   refresh-local-auth --group %s\n\n", step, alias)
 		} else {
-			fmt.Fprintf(w, "%d. Refresh declared local auth from the rotated encrypted secret before any git push, flake-lock update, or rebuild fetch:\n   rotate-token refresh-local-auth --group %s\n\n", step, alias)
+			fmt.Fprintf(w, "%d. Refresh declared local auth from the rotated encrypted secret before any git push, flake-lock update, or rebuild fetch:\n   refresh-local-auth --group %s\n\n", step, alias)
 		}
 		step++
 	}

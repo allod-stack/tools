@@ -792,7 +792,7 @@ func TestSecretRotatePrintedStepsVaryByServiceAndLocalAuthRefresh(t *testing.T) 
 	if !strings.Contains(refreshOut, "  - secrets/refresh-cred.age (refresh-cred, template)") {
 		t.Errorf("a template with no encoding did not print as template:\n%s", refreshOut)
 	}
-	if !strings.Contains(refreshOut, "rotate-token refresh-local-auth --group refresh.rotate") {
+	if !strings.Contains(refreshOut, "refresh-local-auth --group refresh.rotate") {
 		t.Errorf("refresh-local-auth step missing:\n%s", refreshOut)
 	}
 	// No ciphertext was rotated by this dry run, so the step must describe
@@ -817,7 +817,7 @@ func TestSecretRotatePrintedStepsVaryByServiceAndLocalAuthRefresh(t *testing.T) 
 	if code != 0 {
 		t.Fatalf("refresh.rotate live run: exit %d, stderr: %s", code, liveErrText)
 	}
-	if !strings.Contains(liveErrText, "Refresh declared local auth from the rotated encrypted secret before any git push, flake-lock update, or rebuild fetch:\n   rotate-token refresh-local-auth --group refresh.rotate") {
+	if !strings.Contains(liveErrText, "Refresh declared local auth from the rotated encrypted secret before any git push, flake-lock update, or rebuild fetch:\n   refresh-local-auth --group refresh.rotate") {
 		t.Errorf("a live run did not print the refresh step as an instruction:\n%s", liveErrText)
 	}
 	if strings.Contains(liveErrText, "After the real run lands") {

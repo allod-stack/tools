@@ -13,12 +13,14 @@ package main
 //
 // Everything it can check without the plaintext, it checks first: the
 // branch and the clean tree, the registry lookup (exactly one entry, in
-// exactly one group), that the credential is still legacy, that no
-// local_auth_refresh entry names it, that its format is one of the two
-// containers, that every one of its targets' structured verify objects
-// converts to a command whose interpolated fields are inside the grammar
-// 'declare' holds the same fields to, and that the checkout exports the
-// encoder the migrated declaration would name. Only then is the ciphertext
+// exactly one group), that the credential is still legacy, that its format
+// is one of the two containers, that a credential which feeds a
+// local_auth_refresh entry is a 'credential-store-url' container with
+// 'refresh-local-auth' resolving on PATH, that every one of its targets'
+// structured verify objects converts to a command whose interpolated
+// fields are inside the grammar 'declare' holds the same fields to, and
+// that the checkout exports the encoder the migrated declaration would
+// name. Only then is the ciphertext
 // decrypted, into memory and nowhere else, and the template built from it
 // must pass two byte proofs and the registry's own value validation before
 // anything is written: substituting the extracted secret back into the
@@ -37,6 +39,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -70,13 +73,18 @@ names the target and asks for that command to be written into the registry
 by hand.
 
 'migrate' refuses a credential that already has a 'value', one that is in
-no registry group, in two groups, or listed twice inside one group, one
-named by a group's local_auth_refresh (that consumer still needs the legacy
-shape — allod/nexus#52), and any legacy format other than the two
-containers. A plain legacy entry ('raw-forgejo-token' or 'raw') needs no
-decryption at all: migrate it by editing the registry directly, dropping
-'format' and converting each target's 'verify' object to its command
-string.
+no registry group, in two groups, or listed twice inside one group, and any
+legacy format other than the two containers. A plain legacy entry
+('raw-forgejo-token' or 'raw') needs no decryption at all: migrate it by
+editing the registry directly, dropping 'format' and converting each
+target's 'verify' object to its command string.
+
+A credential that is the source_credential of a local_auth_refresh entry
+in any group is refused unless it is a 'credential-store-url' container
+(an rclone stanza can never render a netrc line) and 'refresh-local-auth'
+resolves on PATH; a host whose nexus pin predates allod/nexus#52 has no
+such script, and migrating there would leave the old rotate-token refresh
+refusing the migrated entry.
 
 'migrate' works on the secrets checkout, found through the repository
 registry under ~/work unless <checkout> names a worktree, and on whatever
@@ -148,17 +156,32 @@ func secretMigrate(args []string) {
 	if !isLegacyCredential(credential) {
 		die(1, "credential '%s' already carries a declared value; migrate translates a legacy 'format' entry and there is nothing to translate", name)
 	}
-	for _, group := range groups {
-		for _, refresh := range group.LocalAuthRefresh {
-			if refresh.SourceCredential == name {
-				die(1, "credential '%s' is the source of a local_auth_refresh entry, and that consumer still requires the legacy format and structured verify metadata; migrate it after allod/nexus#52 gives refresh-local-auth a new-shape implementation or retires it", name)
-			}
-		}
-	}
 	switch credential.Format {
 	case "credential-store-url", "rclone-remote-stanza":
 	default:
 		die(1, "credential '%s' has legacy format '%s', which is not one of the two containers migrate translates (credential-store-url, rclone-remote-stanza). A plain legacy entry needs no decryption: edit forgejo-token-groups.json to drop its 'format' and turn each target's 'verify' object into its command string", name, credential.Format)
+	}
+	isLocalAuthSource := false
+	for _, group := range groups {
+		for _, refresh := range group.LocalAuthRefresh {
+			if refresh.SourceCredential == name {
+				isLocalAuthSource = true
+			}
+		}
+	}
+	if isLocalAuthSource {
+		// An rclone stanza is a password-store shape; it can never render
+		// the 'https://<user>:<password>@<host>' netrc line a local auth
+		// refresh consumes, so only the other container can feed one.
+		// validateGroupMetadata already implies this by requiring
+		// isCredentialStoreURLSource of a source_credential; stated here so
+		// this refusal names the format rather than failing silently later.
+		if credential.Format != "credential-store-url" {
+			die(1, "credential '%s' is the source_credential of a local_auth_refresh entry, so only a 'credential-store-url' container can migrate it (an rclone stanza can never render a netrc line); it has legacy format '%s'", name, credential.Format)
+		}
+		if _, err := exec.LookPath("refresh-local-auth"); err != nil {
+			die(1, "credential '%s' feeds a local_auth_refresh entry, and 'refresh-local-auth' was not found on PATH; this host's nexus pin predates allod/nexus#52, so migrating now would leave the old rotate-token refresh refusing the migrated entry", name)
+		}
 	}
 
 	// Everything that can be settled without the plaintext is settled here,
