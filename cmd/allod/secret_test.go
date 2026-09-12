@@ -98,6 +98,31 @@ type secretFixture struct {
 	terminalErr   error
 }
 
+// gitNoMaintenanceEnv switches off git's automatic maintenance for every
+// git the fixtures and the command under test spawn. After 'git commit'
+// (and 'git fetch' and 'receive-pack') git starts a detached 'maintenance
+// run --auto', which takes a lock under .git/objects and may write pack
+// files while t.TempDir is already removing the repository, and the
+// cleanup then fails with 'directory not empty'. Setting gc.auto=0 in the
+// repositories was not enough: it stops the collection, not the detached
+// process that decides there is nothing to collect. maintenance.auto=false
+// stops the process from being started at all, and the same keys are set
+// in the test's own environment so the command's git inherits them.
+var gitNoMaintenanceEnv = []string{
+	"GIT_CONFIG_COUNT=3",
+	"GIT_CONFIG_KEY_0=maintenance.auto", "GIT_CONFIG_VALUE_0=false",
+	"GIT_CONFIG_KEY_1=gc.auto", "GIT_CONFIG_VALUE_1=0",
+	"GIT_CONFIG_KEY_2=gc.autoDetach", "GIT_CONFIG_VALUE_2=false",
+}
+
+func setGitNoMaintenanceEnv(t *testing.T) {
+	t.Helper()
+	for _, pair := range gitNoMaintenanceEnv {
+		key, value, _ := strings.Cut(pair, "=")
+		t.Setenv(key, value)
+	}
+}
+
 func gitRun(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
@@ -110,6 +135,7 @@ func gitRun(t *testing.T, dir string, args ...string) string {
 		"GIT_COMMITTER_NAME=fixture", "GIT_COMMITTER_EMAIL=fixture@example.com",
 		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
 	)
+	cmd.Env = append(cmd.Env, gitNoMaintenanceEnv...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %s in %s: %v\n%s", strings.Join(args, " "), dir, err, out)
@@ -167,12 +193,13 @@ func newSecretFixture(t *testing.T) *secretFixture {
 	t.Setenv("GIT_AUTHOR_EMAIL", "fixture@example.com")
 	t.Setenv("GIT_COMMITTER_NAME", "fixture")
 	t.Setenv("GIT_COMMITTER_EMAIL", "fixture@example.com")
+	setGitNoMaintenanceEnv(t)
 
 	gitRun(t, root, "init", "-q", "--bare", "-b", "master", fx.origin)
-	// git runs 'gc --auto' in the background after a push, and that
-	// background process races t.TempDir's cleanup of the fixture
-	// repositories. Neither repository outlives one test, so there is
-	// nothing for it to collect.
+	// Belt and braces beside gitNoMaintenanceEnv: the repositories say so
+	// themselves, for any git that does not inherit the environment.
+	// Neither repository outlives one test, so there is nothing to collect.
+	gitRun(t, fx.origin, "config", "maintenance.auto", "false")
 	gitRun(t, fx.origin, "config", "gc.auto", "0")
 	gitRun(t, fx.origin, "config", "receive.autogc", "false")
 	if err := os.MkdirAll(filepath.Join(fx.checkout, "secrets"), 0755); err != nil {
@@ -189,6 +216,7 @@ func newSecretFixture(t *testing.T) *secretFixture {
 			t.Fatal(err)
 		}
 	}
+	gitRun(t, fx.checkout, "config", "maintenance.auto", "false")
 	gitRun(t, fx.checkout, "config", "gc.auto", "0")
 	gitRun(t, fx.checkout, "add", "-A")
 	gitRun(t, fx.checkout, "commit", "-q", "-m", "fixture")
