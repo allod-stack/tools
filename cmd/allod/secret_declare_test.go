@@ -221,6 +221,9 @@ var declareFixtureEvaluatedCredentialNames = []string{"existing-token"}
 
 func newDeclareFixtureFilesWithEvaluatedNames(t *testing.T, credentials, secrets, registry string, evaluatedCredentialNames []string) *declareFixture {
 	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
 	dir := t.TempDir()
 	fx := &declareFixture{checkout: dir}
 	for name, content := range map[string]string{

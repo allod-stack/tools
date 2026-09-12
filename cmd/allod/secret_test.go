@@ -97,6 +97,9 @@ type secretFixture struct {
 
 func gitRun(t *testing.T, dir string, args ...string) string {
 	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(),
