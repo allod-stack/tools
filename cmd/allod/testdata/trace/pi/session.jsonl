@@ -1,0 +1,8 @@
+{"type":"session","cwd":"/repo","id":"pi-fixture-1","timestamp":"2026-01-02T03:06:00Z"}
+{"type":"model_change","modelId":"test-model"}
+{"type":"message","message":{"role":"user","content":"List the repo files."}}
+{"type":"message","message":{"role":"assistant","content":[{"type":"thinking","thinking":"internal reasoning, dropped"},{"type":"text","text":"Sure, running ls now."},{"type":"toolCall","id":"call_1","name":"exec_command","arguments":{"cmd":"ls"}}]}}
+{"type":"message","message":{"role":"toolResult","content":"README.md\nmain.go\n","toolCallId":"call_1","toolName":"exec_command","isError":false}}
+{"type":"message","message":{"role":"user","content":"Thanks, show me the README."}}
+{"type":"thinking_level_change","level":"high"}
+{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"Here is the README."}]}}

@@ -1,0 +1,11 @@
+{"type":"session_meta","payload":{"session_id":"codex-fixture-1","cwd":"/repo","timestamp":"2026-01-02T03:05:00Z","originator":"cli_repl","source":"cli"}}
+{"type":"turn_context","payload":{"model":"test-model"}}
+{"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"developer scaffolding, must be dropped"}]}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"List the repo files."}]}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Sure, running ls now."}]}}
+{"type":"response_item","payload":{"type":"custom_tool_call","call_id":"call_1","name":"exec_command","input":"ls"}}
+{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_1","output":[{"type":"input_text","text":"README.md\nmain.go\n"}]}}
+{"type":"event_msg","payload":{"foo":"bar"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Thanks, show me the README."}]}}
+{"type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"internal reasoning"}]}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Here is the README."}]}}

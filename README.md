@@ -10,7 +10,7 @@ host install them through their Nix composition, with no manual installation aft
 ## Layout
 
 ```
-cmd/allod/                Go main CLI (change, patch, pr, site preview; deploy/check/config and secret opt-in)
+cmd/allod/                Go main CLI (change, patch, pr, trace, site preview; deploy/check/config and secret opt-in)
 cmd/flake-update-cascade/ flake input update cascade Go command
 cmd/forge/                Forgejo CLI Go command
 internal/flakelock/       flake.lock graph walking for the cascade
@@ -105,6 +105,7 @@ namespace present, and each untagged run asserts it absent.
 - [Report components](docs/components.md) — semantic visual vocabulary and
   authoring contracts
 - [Git hooks](git-hooks/README.md) — `protected-refs-policy`, `setup-tracked-hooks`
+- [allod trace](docs/allod-trace.md) — distill local Claude, Codex, and Pi session logs into redacted markdown traces
 
 ## Shared Library
 

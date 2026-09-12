@@ -1,0 +1,6 @@
+{"type":"system","sessionId":"claude-fixture-1","cwd":"/repo","timestamp":"2026-01-02T03:04:05Z"}
+{"type":"user","sessionId":"claude-fixture-1","cwd":"/repo","entrypoint":"cli","timestamp":"2026-01-02T03:04:05Z","message":{"role":"user","content":"<system-reminder>ignore this</system-reminder>Please list the files in the repo."}}
+{"type":"assistant","sessionId":"claude-fixture-1","cwd":"/repo","timestamp":"2026-01-02T03:04:06Z","message":{"role":"assistant","content":[{"type":"text","text":"Sure, I will list the files."},{"type":"tool_use","id":"toolu_1","name":"ls","input":{"path":"."}}]}}
+{"type":"user","sessionId":"claude-fixture-1","cwd":"/repo","timestamp":"2026-01-02T03:04:07Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"README.md\nmain.go\n"}]}}
+{"type":"user","sessionId":"claude-fixture-1","cwd":"/repo","entrypoint":"cli","timestamp":"2026-01-02T03:04:08Z","message":{"role":"user","content":"Thanks, now show me the README contents."}}
+{"type":"assistant","sessionId":"claude-fixture-1","cwd":"/repo","timestamp":"2026-01-02T03:04:09Z","message":{"role":"assistant","content":[{"type":"thinking","text":"internal reasoning, should be dropped"},{"type":"text","text":"Here is the README."}]}}
