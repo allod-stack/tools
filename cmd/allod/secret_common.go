@@ -203,6 +203,22 @@ func secretsCheckoutRelative() string {
 	return fallback
 }
 
+// deployCheckoutRelative resolves the deploy-flake checkout the way
+// secretsCheckoutRelative resolves the secrets one: the repository
+// registry's checkout for it under ~/work, or the conventional
+// allod/deploy when the registry does not name one. 'rotate' uses this to
+// print the deploy-flake steps against the operator's real composition
+// root instead of a hardcoded path.
+func deployCheckoutRelative() string {
+	const fallback = "allod/deploy"
+	for _, alias := range []string{"deploy", "allod/deploy"} {
+		if checkout, ok := registryCheckout(alias); ok {
+			return checkout
+		}
+	}
+	return fallback
+}
+
 // inventoryCheckout resolves the inventory checkout the way
 // resolveSecretsCheckout resolves the secrets one when no override is
 // given: the repository registry's checkout for it under ~/work, or the
