@@ -236,9 +236,12 @@ func TestPOSIXShellQuote(t *testing.T) {
 }
 
 func TestIsCredentialStoreURLSource(t *testing.T) {
+	// A blank line here is an empty one or one holding spaces and tabs, the
+	// same class the deployed netrc parser drops. Anything else is a line.
 	accepted := []registryCredential{
 		{Value: &credentialValue{Template: "https://fixture-user:{secret}@example.test"}},
 		{Value: &credentialValue{Template: "\nhttps://fixture-user:{secret}@example.test\n"}},
+		{Value: &credentialValue{Template: "https://fixture-user:{secret}@example.test\n   \n\t\n"}},
 	}
 	for index, credential := range accepted {
 		if !isCredentialStoreURLSource(credential) {
@@ -254,6 +257,11 @@ func TestIsCredentialStoreURLSource(t *testing.T) {
 		{Value: &credentialValue{Template: "http://fixture-user:{secret}@example.test"}},
 		{Value: &credentialValue{Template: "https://:{secret}@example.test"}},
 		{Value: &credentialValue{Template: "https://fixture-user:{secret}@"}},
+		// awk keeps a line holding only a carriage return or a vertical tab,
+		// so the deployed file would have two lines and activation would
+		// refuse it. 'strings.TrimSpace' would drop both and accept these.
+		{Value: &credentialValue{Template: "https://fixture-user:{secret}@example.test\n\r"}},
+		{Value: &credentialValue{Template: "https://fixture-user:{secret}@example.test\n\v"}},
 	}
 	for index, credential := range refused {
 		if isCredentialStoreURLSource(credential) {

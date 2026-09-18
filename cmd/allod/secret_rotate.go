@@ -200,8 +200,17 @@ var credentialStoreURLTemplate = regexp.MustCompile(`^https://[^:[:space:]][^:[:
 
 // isCredentialStoreURLSource reports whether a credential can be a
 // local_auth_refresh source: a declared value template that renders exactly
-// one credential-store line. Blank lines are dropped first, matching the
-// runtime netrc parser.
+// one credential-store line.
+//
+// A line counts as blank only when it is empty or holds spaces and tabs,
+// which is what the deployed netrc parser does: archetypes modules/netrc.nix
+// drops lines with awk's default field splitting, and that separates on
+// space, tab and newline alone, so a line holding only a carriage return
+// survives there. 'strings.TrimSpace' also strips a carriage return, a
+// vertical tab and the unicode spaces, so using it here would accept a
+// template whose deployed file has two lines and fails activation. The
+// archetypes and allod/nexus predicates make the same space-and-tab-only
+// test, and this one must agree with them.
 func isCredentialStoreURLSource(credential registryCredential) bool {
 	if credential.Value == nil || credential.Value.Encode != "" {
 		return false
@@ -212,7 +221,7 @@ func isCredentialStoreURLSource(credential registryCredential) bool {
 	}
 	var nonEmpty []string
 	for _, line := range strings.Split(template, "\n") {
-		if strings.TrimSpace(line) != "" {
+		if strings.Trim(line, " \t") != "" {
 			nonEmpty = append(nonEmpty, line)
 		}
 	}
