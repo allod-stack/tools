@@ -103,29 +103,22 @@ func TestRegistryCheckoutINVENTORYWithNoRegistryFileDoesNotFallBackToWorkDir(t *
 	}
 }
 
-// TestRegistryPathTrimsINVENTORYTrailingSlash pins that a trailing slash on
-// INVENTORY resolves the same registry as without one.
-func TestRegistryPathTrimsINVENTORYTrailingSlash(t *testing.T) {
-	inventory := t.TempDir()
-	writeRegistryFixture(t, inventory, map[string]string{"secrets": "trimmed"})
+// TestINVENTORYTrailingSlashIsTrimmed pins the trimming itself, on a value
+// only trimming produces: filepath.Join would silently absorb an untrimmed
+// trailing slash before it reached a joined path like registryPath's, so
+// this asserts on inventoryCheckout's bare return instead, which is exactly
+// trimmedInventory's output with no INVENTORY-unset fallback in the way.
+func TestINVENTORYTrailingSlashIsTrimmed(t *testing.T) {
+	dir := t.TempDir()
 
-	t.Setenv("INVENTORY", inventory)
-	withoutSlash, ok := registryCheckout("secrets")
-	if !ok {
-		t.Fatalf("registryCheckout without trailing slash: ok = false")
+	t.Setenv("INVENTORY", dir+"/")
+	if got := inventoryCheckout(); got != dir {
+		t.Errorf("inventoryCheckout() with one trailing slash = %q, want %q", got, dir)
 	}
 
-	t.Setenv("INVENTORY", inventory+"/")
-	withSlash, ok := registryCheckout("secrets")
-	if !ok {
-		t.Fatalf("registryCheckout with trailing slash: ok = false")
-	}
-
-	if withSlash != withoutSlash {
-		t.Errorf("registryCheckout with trailing INVENTORY slash = %q, without = %q, want equal", withSlash, withoutSlash)
-	}
-	if withSlash != "trimmed" {
-		t.Errorf(`registryCheckout("secrets") = %q, want %q`, withSlash, "trimmed")
+	t.Setenv("INVENTORY", "///")
+	if got := inventoryCheckout(); got != "/" {
+		t.Errorf(`inventoryCheckout() with INVENTORY="///" = %q, want "/"`, got)
 	}
 }
 
