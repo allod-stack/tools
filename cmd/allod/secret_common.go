@@ -226,18 +226,8 @@ func deployCheckoutRelative() string {
 // INVENTORY environment variable, mirroring nexus's rotate-token script,
 // always wins.
 func inventoryCheckout() string {
-	if value := os.Getenv("INVENTORY"); value != "" {
-		// Trimming trailing slashes turns the root into the empty string,
-		// and the nix command would then run in the process working
-		// directory instead of /, so the root is special-cased back.
-		// Not filepath.Clean: it resolves '..' lexically, so a path
-		// through a symlink ('/base/link/../inventory', link -> /srv/x)
-		// would name a different directory than the one the OS reaches.
-		trimmed := strings.TrimRight(value, "/")
-		if trimmed == "" {
-			return "/"
-		}
-		return trimmed
+	if root, ok := trimmedInventory(); ok {
+		return root
 	}
 	return filepath.Join(workDir(), inventoryCheckoutRelative())
 }

@@ -45,7 +45,7 @@ Runs `fetch` then `apply`. The artifact directory is preserved after both succes
 
 ## Repo arguments
 
-`<destination-repo>` and `apply --repo`'s value each accept either a filesystem path or a repository-registry id such as `allod/memory`: a repo argument that is absolute or begins with `~`, `.`, or `..` is a path, and anything else is looked up in the repository registry (`inventory/scripts/repositories.json`) first and, when no entry matches, treated as a relative path.
+`<destination-repo>` and `apply --repo`'s value each accept either a filesystem path or a repository-registry id such as `allod/memory`: a repo argument that is absolute or begins with `~`, `.`, or `..` is a path, and anything else is looked up in the repository registry — `$INVENTORY/scripts/repositories.json` when `INVENTORY` is set, `~/work/allod/inventory/scripts/repositories.json` otherwise — first and, when no entry matches, treated as a relative path.
 
 `<source-repo>` is stricter, because it names a path on the *source* machine, not the one running `fetch` or `receive`: it accepts an absolute path there, a `~/`-prefixed path there, or a registry id, and nothing else — a path relative to a remote working directory has no meaning over SSH. A source value that is none of those (a bare relative path that is not a registry id, for example) fails with `source repo must be an absolute path or a registry id: <value>`.
 
