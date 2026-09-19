@@ -143,11 +143,12 @@ func TestValidateGroupMetadataRefusals(t *testing.T) {
 			g.LocalAuthRefresh = []localAuthRefreshEntry{{Contract: "nixos-netrc-from-root-git-credentials", System: "dev-a", LocalUsername: "u", SourceCredential: "cred"}}
 		}, ""},
 	}
+	grammar := compileCredentialStoreURLGrammar(t, loadCredentialStoreURLTestdata(t))
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			group := validRotateGroup()
 			tc.mutate(&group)
-			code, message := rotateDies(t, func() { validateGroupMetadata("g", group) })
+			code, message := rotateDies(t, func() { validateGroupMetadata("g", group, grammar) })
 			if tc.wantErr == "" {
 				if code != 0 {
 					t.Fatalf("valid group refused: %s", message)

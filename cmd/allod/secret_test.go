@@ -90,6 +90,8 @@ type secretFixture struct {
 
 	encodings []string
 
+	credentialStoreURL credentialStoreURLGrammar
+
 	checkCalls  int
 	checkStatus int
 
@@ -171,8 +173,9 @@ func newSecretFixture(t *testing.T) *secretFixture {
 			"secrets/new-token.age": {fixtureHostKey, fixtureVMKey},
 			"secrets/old-token.age": {fixtureHostKey, fixtureVMKey, fixtureOtherKey},
 		},
-		decryptResult: []byte("old value\n"),
-		encodings:     []string{"rclone-obscure"},
+		decryptResult:      []byte("old value\n"),
+		encodings:          []string{"rclone-obscure"},
+		credentialStoreURL: compileCredentialStoreURLGrammar(t, loadCredentialStoreURLTestdata(t)),
 	}
 
 	if err := os.WriteFile(fx.identity, []byte("fixture private key\n"), 0600); err != nil {
@@ -227,11 +230,13 @@ func newSecretFixture(t *testing.T) *secretFixture {
 
 	previousCredentials, previousRegistry, previousRecipients := secretEvalCredentials, secretEvalRegistry, secretEvalRecipients
 	previousEncodings := secretEvalEncodings
+	previousCredentialStoreURL := secretEvalCredentialStoreURL
 	previousEncrypt, previousDecrypt, previousCheck := secretEncrypt, secretDecrypt, secretFlakeCheck
 	previousTerminal, previousAsk, previousStdin := secretStdinIsTerminal, secretAskOnTerminal, stdin
 	t.Cleanup(func() {
 		secretEvalCredentials, secretEvalRegistry, secretEvalRecipients = previousCredentials, previousRegistry, previousRecipients
 		secretEvalEncodings = previousEncodings
+		secretEvalCredentialStoreURL = previousCredentialStoreURL
 		secretEncrypt, secretDecrypt, secretFlakeCheck = previousEncrypt, previousDecrypt, previousCheck
 		secretStdinIsTerminal, secretAskOnTerminal, stdin = previousTerminal, previousAsk, previousStdin
 	})
@@ -256,6 +261,7 @@ func newSecretFixture(t *testing.T) *secretFixture {
 	}
 	secretEvalRegistry = func(string) (map[string]tokenGroup, error) { return fx.registry, nil }
 	secretEvalEncodings = func(string) ([]string, error) { return fx.encodings, nil }
+	secretEvalCredentialStoreURL = func(string) (credentialStoreURLGrammar, error) { return fx.credentialStoreURL, nil }
 	secretEvalRecipients = func(_ string, path string) ([]string, error) {
 		recipients, ok := fx.recipients[path]
 		if !ok {

@@ -12,8 +12,10 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -235,38 +237,120 @@ func TestPOSIXShellQuote(t *testing.T) {
 	}
 }
 
+// credentialStoreURLTestdataPath is the byte-for-byte copy of the secrets
+// checkout's credential-store-url.json: the one shared vector table every
+// implementation's own test suite reads, so a divergence between allod/tools
+// and its siblings fails here instead of surviving in a comment. The
+// allod/archetypes 'credential-store-url-parity' check pins this copy to
+// the secrets flake's file.
+const credentialStoreURLTestdataPath = "testdata/credential-store-url.json"
+
+// credentialStoreURLVector is one witness: a candidate credential and
+// whether isCredentialStoreURLSource must accept it. Credential is left as
+// raw JSON so a decode failure names the vector it came from rather than
+// failing the whole file's Unmarshal.
+type credentialStoreURLVector struct {
+	Name       string          `json:"name"`
+	Accept     bool            `json:"accept"`
+	Credential json.RawMessage `json:"credential"`
+}
+
+type credentialStoreURLTestdata struct {
+	Line      string                     `json:"line"`
+	BlankLine string                     `json:"blank_line"`
+	Vectors   []credentialStoreURLVector `json:"vectors"`
+}
+
+func loadCredentialStoreURLTestdata(t testing.TB) credentialStoreURLTestdata {
+	t.Helper()
+	data, err := os.ReadFile(credentialStoreURLTestdataPath)
+	if err != nil {
+		t.Fatalf("reading %s: %s", credentialStoreURLTestdataPath, err)
+	}
+	var fixture credentialStoreURLTestdata
+	if err := json.Unmarshal(data, &fixture); err != nil {
+		t.Fatalf("%s does not decode: %s", credentialStoreURLTestdataPath, err)
+	}
+	return fixture
+}
+
+func compileCredentialStoreURLGrammar(t testing.TB, fixture credentialStoreURLTestdata) credentialStoreURLGrammar {
+	t.Helper()
+	line, err := regexp.Compile(fixture.Line)
+	if err != nil {
+		t.Fatalf("%s: line does not compile: %s", credentialStoreURLTestdataPath, err)
+	}
+	blankLine, err := regexp.Compile(fixture.BlankLine)
+	if err != nil {
+		t.Fatalf("%s: blank_line does not compile: %s", credentialStoreURLTestdataPath, err)
+	}
+	return credentialStoreURLGrammar{line: line, blankLine: blankLine}
+}
+
+// TestIsCredentialStoreURLSource reads the shared vector table and asserts
+// isCredentialStoreURLSource agrees with every vector's declared 'accept'.
+// A vector's credential must decode into registryCredential; a decode
+// failure is a plain test failure, not a skipped vector.
 func TestIsCredentialStoreURLSource(t *testing.T) {
-	// A blank line here is an empty one or one holding spaces and tabs, the
-	// same class the deployed netrc parser drops. Anything else is a line.
-	accepted := []registryCredential{
-		{Value: &credentialValue{Template: "https://fixture-user:{secret}@example.test"}},
-		{Value: &credentialValue{Template: "\nhttps://fixture-user:{secret}@example.test\n"}},
-		{Value: &credentialValue{Template: "https://fixture-user:{secret}@example.test\n   \n\t\n"}},
-	}
-	for index, credential := range accepted {
-		if !isCredentialStoreURLSource(credential) {
-			t.Errorf("case %d: a credential-store source was refused: %+v", index, credential)
+	fixture := loadCredentialStoreURLTestdata(t)
+	grammar := compileCredentialStoreURLGrammar(t, fixture)
+	for _, vector := range fixture.Vectors {
+		var credential registryCredential
+		if err := json.Unmarshal(vector.Credential, &credential); err != nil {
+			t.Fatalf("vector %q: credential does not decode into registryCredential: %s", vector.Name, err)
+		}
+		if got := isCredentialStoreURLSource(credential, grammar); got != vector.Accept {
+			t.Errorf("vector %q: isCredentialStoreURLSource = %v, want %v", vector.Name, got, vector.Accept)
 		}
 	}
-	refused := []registryCredential{
-		{},
-		{Value: &credentialValue{Template: "https://fixture-user:{secret}@example.test", Encode: "rclone-obscure"}},
-		{Value: &credentialValue{Template: "https://fixture-user:{secret}@example.test/path"}},
-		{Value: &credentialValue{Template: "https://fixture:user:{secret}@example.test"}},
-		{Value: &credentialValue{Template: "https://fixture-user:{secret}@example.test\nsecond line"}},
-		{Value: &credentialValue{Template: "http://fixture-user:{secret}@example.test"}},
-		{Value: &credentialValue{Template: "https://:{secret}@example.test"}},
-		{Value: &credentialValue{Template: "https://fixture-user:{secret}@"}},
-		// awk keeps a line holding only a carriage return or a vertical tab,
-		// so the deployed file would have two lines and activation would
-		// refuse it. 'strings.TrimSpace' would drop both and accept these.
-		{Value: &credentialValue{Template: "https://fixture-user:{secret}@example.test\n\r"}},
-		{Value: &credentialValue{Template: "https://fixture-user:{secret}@example.test\n\v"}},
+}
+
+// TestDecodeCredentialStoreURLGrammar drives every branch of the pure half
+// of nixEvalCredentialStoreURL without invoking nix: the exact wording nix
+// prints for a checkout that predates allod/secrets#29, an unrelated eval
+// failure, an empty field, a non-compiling regexp, and a successful decode
+// of the real testdata shape.
+func TestDecodeCredentialStoreURLGrammar(t *testing.T) {
+	missingExport := errors.New("error: flake 'path:/home/allod/work/allod/secrets' does not provide attribute 'packages.x86_64-linux.lib.credentialStoreUrl', 'legacyPackages.x86_64-linux.lib.credentialStoreUrl' or 'lib.credentialStoreUrl'")
+	otherFailure := errors.New("error: some unrelated nix evaluation failure")
+
+	fixture := loadCredentialStoreURLTestdata(t)
+	validJSON, err := json.Marshal(credentialStoreURLGrammarJSON{Line: fixture.Line, BlankLine: fixture.BlankLine})
+	if err != nil {
+		t.Fatal(err)
 	}
-	for index, credential := range refused {
-		if isCredentialStoreURLSource(credential) {
-			t.Errorf("case %d: a template that is not one credential-store line was accepted: %+v", index, credential)
-		}
+	emptyLineJSON := []byte(`{"line":"","blank_line":"^[ \t]*$"}`)
+	badLineJSON := []byte(`{"line":"(","blank_line":"^[ \t]*$"}`)
+
+	cases := []struct {
+		name    string
+		data    []byte
+		err     error
+		wantErr string
+		wantOK  bool
+	}{
+		{"missing export names allod/secrets#29", nil, missingExport, "the secrets checkout does not export lib.credentialStoreUrl and predates allod/secrets#29", false},
+		{"an unrelated eval failure passes through unchanged", nil, otherFailure, otherFailure.Error(), false},
+		{"empty line is refused before compiling", emptyLineJSON, nil, "lib.credentialStoreUrl.line is empty", false},
+		{"a line that does not compile is refused", badLineJSON, nil, "lib.credentialStoreUrl.line does not compile", false},
+		{"the testdata grammar decodes", validJSON, nil, "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			grammar, err := decodeCredentialStoreURLGrammar(tc.data, tc.err)
+			if tc.wantOK {
+				if err != nil {
+					t.Fatalf("unexpected error: %s", err)
+				}
+				if grammar.line == nil || grammar.blankLine == nil {
+					t.Fatalf("grammar not compiled: %+v", grammar)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("err = %v, want it to contain %q", err, tc.wantErr)
+			}
+		})
 	}
 }
 

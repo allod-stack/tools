@@ -38,6 +38,7 @@ package main
 // flake check, which only a real landing runs.
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -190,29 +191,88 @@ var (
 	validRegistryTargetKind = map[string]bool{"nixos-host": true, "dev-vm": true, "privacy-vm": true, "service-vm": true}
 )
 
-// credentialStoreURLTemplate is the one template shape the local auth
-// refresh contract can consume: a single netrc-consumable
-// 'https://<user>:{secret}@<host>' line. It mirrors the archetypes check's
-// own predicate character for character rather than applying a separate URL
-// grammar, so a source credential this command accepts is one that check
-// accepts too.
-var credentialStoreURLTemplate = regexp.MustCompile(`^https://[^:[:space:]][^:[:space:]]*:\{secret\}@[^/[:space:]][^/[:space:]]*$`)
+// credentialStoreURLGrammar is the compiled form of the secrets flake's
+// 'lib.credentialStoreUrl' export: the one template shape the local auth
+// refresh contract can consume (a single netrc-consumable
+// 'https://<user>:{secret}@<host>' line) and the blank-line class a
+// template's padding lines are measured against. The grammar is data read
+// from the secrets flake, not a hand-written copy: allod/archetypes'
+// 'credential-store-url-parity' check pins the testdata copy under
+// cmd/allod/testdata to the file this grammar is compiled from.
+type credentialStoreURLGrammar struct {
+	line      *regexp.Regexp
+	blankLine *regexp.Regexp
+}
+
+// credentialStoreURLGrammarJSON is the shape 'lib.credentialStoreUrl'
+// renders. Only the two regexes are read here; the vectors are the shared
+// witness table each consumer's own test suite reads, not something this
+// loader consumes.
+type credentialStoreURLGrammarJSON struct {
+	Line      string `json:"line"`
+	BlankLine string `json:"blank_line"`
+}
+
+// secretEvalCredentialStoreURL is the test seam nixEvalCredentialStoreURL
+// implements, matching the secretEvalEncodings pattern in secret.go.
+var secretEvalCredentialStoreURL = nixEvalCredentialStoreURL
+
+// nixEvalCredentialStoreURL evaluates and compiles the secrets checkout's
+// 'lib.credentialStoreUrl'. A checkout that predates allod/secrets#29 does
+// not export it, and nix eval's own "does not provide attribute" refusal
+// names the attribute, so that case is turned into a message this
+// command's caller does not have to reverse-engineer from nix's wording.
+func nixEvalCredentialStoreURL(checkout string) (credentialStoreURLGrammar, error) {
+	data, err := nixEvalJSON(checkout, "lib.credentialStoreUrl")
+	return decodeCredentialStoreURLGrammar(data, err)
+}
+
+// decodeCredentialStoreURLGrammar is the pure half of
+// nixEvalCredentialStoreURL: given the eval's raw output and error, it
+// decides what grammar (or refusal) they mean. Kept apart from the eval
+// call so a test can drive every branch, including the exact nix wording
+// for a checkout that predates allod/secrets#29, without invoking nix.
+func decodeCredentialStoreURLGrammar(data []byte, err error) (credentialStoreURLGrammar, error) {
+	if err != nil {
+		// Matched on both substrings together, not either alone: "does not
+		// provide attribute" alone fires on any missing attribute, and
+		// "lib.credentialStoreUrl" alone could appear in an unrelated
+		// message quoting the attribute path this call asked for.
+		if strings.Contains(err.Error(), "does not provide attribute") && strings.Contains(err.Error(), "lib.credentialStoreUrl") {
+			return credentialStoreURLGrammar{}, fmt.Errorf("the secrets checkout does not export lib.credentialStoreUrl and predates allod/secrets#29")
+		}
+		return credentialStoreURLGrammar{}, err
+	}
+	var raw credentialStoreURLGrammarJSON
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return credentialStoreURLGrammar{}, fmt.Errorf("lib.credentialStoreUrl is not the expected shape: %w", err)
+	}
+	// A missing or null field decodes to "", and regexp.Compile("") succeeds
+	// and matches every string, which would turn a missing export's fields
+	// into a predicate that accepts anything. Refuse before compiling.
+	if raw.Line == "" {
+		return credentialStoreURLGrammar{}, fmt.Errorf("lib.credentialStoreUrl.line is empty")
+	}
+	if raw.BlankLine == "" {
+		return credentialStoreURLGrammar{}, fmt.Errorf("lib.credentialStoreUrl.blank_line is empty")
+	}
+	line, err := regexp.Compile(raw.Line)
+	if err != nil {
+		return credentialStoreURLGrammar{}, fmt.Errorf("lib.credentialStoreUrl.line does not compile: %w", err)
+	}
+	blankLine, err := regexp.Compile(raw.BlankLine)
+	if err != nil {
+		return credentialStoreURLGrammar{}, fmt.Errorf("lib.credentialStoreUrl.blank_line does not compile: %w", err)
+	}
+	return credentialStoreURLGrammar{line: line, blankLine: blankLine}, nil
+}
 
 // isCredentialStoreURLSource reports whether a credential can be a
 // local_auth_refresh source: a declared value template that renders exactly
-// one credential-store line.
-//
-// A line counts as blank only when it is empty or holds spaces and tabs,
-// which is what the deployed netrc parser does: archetypes modules/netrc.nix
-// drops lines with awk's default field splitting, and that separates on
-// space, tab and newline alone, so a line holding only a carriage return
-// survives there. 'strings.TrimSpace' also strips a carriage return, a
-// vertical tab and the unicode spaces, so using it here would accept a
-// template whose deployed file has two lines and fails activation. The
-// archetypes and allod/nexus predicates make the same space-and-tab-only
-// test, and this one must agree with them.
-func isCredentialStoreURLSource(credential registryCredential) bool {
-	if credential.Value == nil || credential.Value.Encode != "" {
+// one credential-store line, judged against a grammar read from the
+// secrets flake rather than a copy kept in step by review.
+func isCredentialStoreURLSource(credential registryCredential, grammar credentialStoreURLGrammar) bool {
+	if credential.Format != "" || credential.Value == nil || credential.Value.Encode != "" {
 		return false
 	}
 	template := credential.Value.Template
@@ -221,11 +281,11 @@ func isCredentialStoreURLSource(credential registryCredential) bool {
 	}
 	var nonEmpty []string
 	for _, line := range strings.Split(template, "\n") {
-		if strings.Trim(line, " \t") != "" {
+		if !grammar.blankLine.MatchString(line) {
 			nonEmpty = append(nonEmpty, line)
 		}
 	}
-	return len(nonEmpty) == 1 && credentialStoreURLTemplate.MatchString(nonEmpty[0])
+	return len(nonEmpty) == 1 && grammar.line.MatchString(nonEmpty[0])
 }
 
 // validateGroupMetadata checks the registry shape rotate-token's
@@ -233,7 +293,7 @@ func isCredentialStoreURLSource(credential registryCredential) bool {
 // retired: a credential's format and a target's verify type. A group
 // missing a field this command needs is refused with what is wrong rather
 // than a blank line in the printed steps.
-func validateGroupMetadata(alias string, group tokenGroup) {
+func validateGroupMetadata(alias string, group tokenGroup, grammar credentialStoreURLGrammar) {
 	fail := func(reason string) {
 		die(1, "rotation registry group '%s' has unsupported metadata: %s", alias, reason)
 	}
@@ -277,7 +337,7 @@ func validateGroupMetadata(alias string, group tokenGroup) {
 		}
 		matches := 0
 		for _, credential := range group.Credentials {
-			if credential.Credential != refresh.SourceCredential || !isCredentialStoreURLSource(credential) {
+			if credential.Credential != refresh.SourceCredential || !isCredentialStoreURLSource(credential, grammar) {
 				continue
 			}
 			for _, target := range credential.Targets {
@@ -350,8 +410,13 @@ func secretRotate(args []string) {
 	// clean-tree check.
 	branch := requireLandingBranch(checkout)
 
+	grammar, err := secretEvalCredentialStoreURL(checkout)
+	if err != nil {
+		die(1, "could not evaluate lib.credentialStoreUrl in %s: %s", checkout, err)
+	}
+
 	alias, group, groups := selectRotationGroup(checkout, name)
-	validateGroupMetadata(alias, group)
+	validateGroupMetadata(alias, group, grammar)
 	assertUniformGroupEncoding(alias, group.Credentials)
 	verifyGroupMembersUnique(group, groups)
 	// Checked before the value is ever read, and on a dry run too: the
