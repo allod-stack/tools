@@ -2,7 +2,7 @@ package main
 
 // 'allod secret declare' writes a credential's non-secret half — the three
 // entries an agent currently has to hand-edit across credentials.nix,
-// secrets.nix, and forgejo-token-groups.json — so the PR that declares a new
+// secrets.nix, and rotation-registry.json — so the PR that declares a new
 // credential is generated rather than transcribed from the secrets
 // template's README by hand. It writes no ciphertext, reads no identity,
 // and never commits: the diff it leaves is reviewed like any other, and the
@@ -76,7 +76,7 @@ var declareValidServices = []string{"none", "forgejo"}
 const secretDeclareDetail = `'declare' writes three insertions against the secrets checkout: the
 credentials.nix entry in rotation_state "pending" (the agent-pr-token
 layout), the secrets.nix recipient line ('[ hostKey ] ++ vmKeys "<vm>"' per
-target machine), and a forgejo-token-groups.json rotation registry group
+target machine), and a rotation-registry.json rotation registry group
 whose 'service' is "none" or "forgejo". Every insertion is one contiguous
 block; nothing else in any file changes.
 
@@ -84,7 +84,7 @@ All three files are read once at the start. Every edit is built and
 validated in memory before anything is written: a name collision in any of
 the three files refuses before any of them is touched, and the built text
 for credentials.nix and secrets.nix must still have balanced nix braces and
-for forgejo-token-groups.json must still be valid JSON. Only then does
+for rotation-registry.json must still be valid JSON. Only then does
 declare replace the files, one at a time: immediately before each one, it
 re-reads that file and refuses — restoring every file already replaced,
 and saying so — if the bytes on disk no longer match what was read at the
@@ -564,14 +564,14 @@ func declareCollisions(credentialsText, secretsText string, registry map[string]
 	for _, alias := range aliases {
 		group := registry[alias]
 		if alias == name {
-			findings = append(findings, fmt.Sprintf("forgejo-token-groups.json: a group keyed '%s' already exists", alias))
+			findings = append(findings, fmt.Sprintf("rotation-registry.json: a group keyed '%s' already exists", alias))
 		}
 		for _, credential := range group.Credentials {
 			if credential.Credential == name {
-				findings = append(findings, fmt.Sprintf("forgejo-token-groups.json: group '%s' already names credential '%s'", alias, name))
+				findings = append(findings, fmt.Sprintf("rotation-registry.json: group '%s' already names credential '%s'", alias, name))
 			}
 			if credential.SecretPath == secretPath {
-				findings = append(findings, fmt.Sprintf("forgejo-token-groups.json: group '%s' already uses secret path '%s'", alias, secretPath))
+				findings = append(findings, fmt.Sprintf("rotation-registry.json: group '%s' already uses secret path '%s'", alias, secretPath))
 			}
 		}
 	}
@@ -854,7 +854,7 @@ func secretDeclare(args []string) {
 
 	credentialsPath := filepath.Join(checkout, "credentials.nix")
 	secretsPath := filepath.Join(checkout, "secrets.nix")
-	registryPath := filepath.Join(checkout, "forgejo-token-groups.json")
+	registryPath := filepath.Join(checkout, "rotation-registry.json")
 
 	credentialsText := readDeclareFile(credentialsPath)
 	secretsText := readDeclareFile(secretsPath)
@@ -958,10 +958,10 @@ func secretDeclare(args []string) {
 	group := buildDeclareGroup(parsed, targets, value)
 	newRegistryText, err := declareInsertRegistryGroup(registryText, parsed.name, group)
 	if err != nil {
-		die(1, "forgejo-token-groups.json: %s", err)
+		die(1, "rotation-registry.json: %s", err)
 	}
 	if !json.Valid([]byte(newRegistryText)) {
-		die(1, "forgejo-token-groups.json: the edit would leave invalid JSON; refusing to write")
+		die(1, "rotation-registry.json: the edit would leave invalid JSON; refusing to write")
 	}
 
 	// Nothing is written until here. From here on, immediately before each

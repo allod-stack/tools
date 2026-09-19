@@ -349,7 +349,7 @@ func lookupSecret(checkout, name string) secretTarget {
 
 	groups, err := secretEvalRegistry(checkout)
 	if err != nil {
-		die(1, "could not evaluate lib.forgejoTokenGroups in %s: %s", checkout, err)
+		die(1, "could not evaluate lib.rotationRegistry in %s: %s", checkout, err)
 	}
 	registered := false
 	for alias, group := range groups {
@@ -364,7 +364,7 @@ func lookupSecret(checkout, name string) secretTarget {
 		}
 	}
 	if !registered {
-		die(1, "no rotation registry entry for '%s' in %s/forgejo-token-groups.json; a credential is registered for rotation in the same landing that creates it", name, checkout)
+		die(1, "no rotation registry entry for '%s' in %s/rotation-registry.json; a credential is registered for rotation in the same landing that creates it", name, checkout)
 	}
 
 	return secretTarget{name: name, path: path, state: entry.RotationState, recipients: recipients}
@@ -478,7 +478,7 @@ func secretCreate(args []string) {
 	target := lookupSecret(checkout, name)
 	groups, err := secretEvalRegistry(checkout)
 	if err != nil {
-		die(1, "could not evaluate lib.forgejoTokenGroups in %s: %s", checkout, err)
+		die(1, "could not evaluate lib.rotationRegistry in %s: %s", checkout, err)
 	}
 	registryCredential, _, err := registryCredentialFor(groups, name)
 	if err != nil {
@@ -703,13 +703,13 @@ func nixEvalCredentials(checkout string) (map[string]credentialEntry, error) {
 }
 
 func nixEvalTokenGroups(checkout string) (map[string]tokenGroup, error) {
-	data, err := nixEvalJSON(checkout, "lib.forgejoTokenGroups")
+	data, err := nixEvalJSON(checkout, "lib.rotationRegistry")
 	if err != nil {
 		return nil, err
 	}
 	var groups map[string]tokenGroup
 	if err := json.Unmarshal(data, &groups); err != nil {
-		return nil, fmt.Errorf("lib.forgejoTokenGroups is not the expected shape: %w", err)
+		return nil, fmt.Errorf("lib.rotationRegistry is not the expected shape: %w", err)
 	}
 	if name, ok := firstCredentialCarryingFormat(groups); ok {
 		return nil, fmt.Errorf("credential '%s' carries 'format', which the registry no longer accepts; it holds value templates only", name)

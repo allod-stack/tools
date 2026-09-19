@@ -192,7 +192,7 @@ func registryCredentialFor(groups map[string]tokenGroup, name string) (registryC
 	case len(aliases) == 1:
 		return found, aliases[0], nil
 	case len(aliases) == 0:
-		return registryCredential{}, "", fmt.Errorf("no rotation registry entry for '%s' in forgejo-token-groups.json", name)
+		return registryCredential{}, "", fmt.Errorf("no rotation registry entry for '%s' in rotation-registry.json", name)
 	case len(distinct) > 1:
 		return registryCredential{}, "", fmt.Errorf("credential '%s' is registered in more than one rotation registry group (%s); fix the registry so each credential belongs to one group", name, strings.Join(distinct, ", "))
 	default:

@@ -144,19 +144,19 @@ func parseSecretRotateArgs(args []string) (name, checkout string, dryRun bool) {
 func selectRotationGroup(checkout, name string) (string, tokenGroup, map[string]tokenGroup) {
 	groups, err := secretEvalRegistry(checkout)
 	if err != nil {
-		die(1, "could not evaluate lib.forgejoTokenGroups in %s: %s", checkout, err)
+		die(1, "could not evaluate lib.rotationRegistry in %s: %s", checkout, err)
 	}
 	_, aliases := registryCredentialEntries(groups, name)
 	distinct := distinctSorted(aliases)
 	switch {
 	case len(aliases) == 0:
-		die(1, "no rotation registry entry for '%s' in %s/forgejo-token-groups.json; rotate operates on the registry group a credential belongs to", name, checkout)
+		die(1, "no rotation registry entry for '%s' in %s/rotation-registry.json; rotate operates on the registry group a credential belongs to", name, checkout)
 	case len(aliases) == 1:
 		return aliases[0], groups[aliases[0]], groups
 	case len(distinct) > 1:
-		die(1, "credential '%s' is registered in more than one rotation registry group (%s) in %s/forgejo-token-groups.json; fix the registry so each credential belongs to one group", name, strings.Join(distinct, ", "), checkout)
+		die(1, "credential '%s' is registered in more than one rotation registry group (%s) in %s/rotation-registry.json; fix the registry so each credential belongs to one group", name, strings.Join(distinct, ", "), checkout)
 	default:
-		die(1, "credential '%s' is listed %d times in rotation registry group '%s' in %s/forgejo-token-groups.json; rotate acts on one entry per credential, so fix the registry so each credential is listed once", name, len(aliases), distinct[0], checkout)
+		die(1, "credential '%s' is listed %d times in rotation registry group '%s' in %s/rotation-registry.json; rotate acts on one entry per credential, so fix the registry so each credential is listed once", name, len(aliases), distinct[0], checkout)
 	}
 	return "", tokenGroup{}, nil
 }

@@ -2,7 +2,7 @@ package main
 
 // Tests for 'allod secret declare' against a fixture checkout — a plain git
 // repository holding invented flake.nix, credentials.nix, secrets.nix, and
-// forgejo-token-groups.json content shaped like the secrets template's real
+// rotation-registry.json content shaped like the secrets template's real
 // files. declare has no Go-level seam for the inventory lookup: it shells
 // out to the real 'nix eval', so declareFakeNix puts a fake 'nix' on PATH
 // that answers by machine name, the way TestRcloneSiteRemoteCheck
@@ -234,10 +234,10 @@ func newDeclareFixtureFilesWithEvaluatedNames(t *testing.T, credentials, secrets
 	dir := t.TempDir()
 	fx := &declareFixture{checkout: dir}
 	for name, content := range map[string]string{
-		"flake.nix":                 declareFixtureFlake,
-		"credentials.nix":           credentials,
-		"secrets.nix":               secrets,
-		"forgejo-token-groups.json": registry,
+		"flake.nix":              declareFixtureFlake,
+		"credentials.nix":        credentials,
+		"secrets.nix":            secrets,
+		"rotation-registry.json": registry,
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0644); err != nil {
 			t.Fatal(err)
@@ -317,8 +317,8 @@ func (fx *declareFixture) assertUntouched(t *testing.T, credentials, secrets, re
 	if got := fx.file(t, "secrets.nix"); got != secrets {
 		t.Errorf("secrets.nix changed:\n%s", got)
 	}
-	if got := fx.file(t, "forgejo-token-groups.json"); got != registry {
-		t.Errorf("forgejo-token-groups.json changed:\n%s", got)
+	if got := fx.file(t, "rotation-registry.json"); got != registry {
+		t.Errorf("rotation-registry.json changed:\n%s", got)
 	}
 }
 
@@ -428,7 +428,7 @@ func TestSecretDeclareOneMachineServiceNone(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d, stderr: %s", code, errText)
 	}
-	if want := "credentials.nix\nsecrets.nix\nforgejo-token-groups.json\n"; out != want {
+	if want := "credentials.nix\nsecrets.nix\nrotation-registry.json\n"; out != want {
 		t.Errorf("stdout = %q, want %q", out, want)
 	}
 	if errText != "" {
@@ -440,8 +440,8 @@ func TestSecretDeclareOneMachineServiceNone(t *testing.T) {
 	if got := fx.file(t, "secrets.nix"); got != declareExpectedSecretsOneMachine {
 		t.Errorf("secrets.nix =\n%s\nwant\n%s", got, declareExpectedSecretsOneMachine)
 	}
-	if got := fx.file(t, "forgejo-token-groups.json"); got != declareExpectedRegistryOneMachine {
-		t.Errorf("forgejo-token-groups.json =\n%s\nwant\n%s", got, declareExpectedRegistryOneMachine)
+	if got := fx.file(t, "rotation-registry.json"); got != declareExpectedRegistryOneMachine {
+		t.Errorf("rotation-registry.json =\n%s\nwant\n%s", got, declareExpectedRegistryOneMachine)
 	}
 	var decoded map[string]any
 	if err := json.Unmarshal([]byte(declareExpectedRegistryOneMachine), &decoded); err != nil {
@@ -549,9 +549,9 @@ func TestSecretDeclareTwoMachinesServiceForgejo(t *testing.T) {
 	if got := fx.file(t, "secrets.nix"); got != declareExpectedSecretsMultiMachine {
 		t.Errorf("secrets.nix =\n%s\nwant\n%s", got, declareExpectedSecretsMultiMachine)
 	}
-	registry := fx.file(t, "forgejo-token-groups.json")
+	registry := fx.file(t, "rotation-registry.json")
 	if !strings.HasSuffix(registry, declareExpectedGroupMultiMachine) {
-		t.Errorf("forgejo-token-groups.json does not end with the expected group:\n%s", registry)
+		t.Errorf("rotation-registry.json does not end with the expected group:\n%s", registry)
 	}
 	var decoded map[string]any
 	if err := json.Unmarshal([]byte(registry), &decoded); err != nil {
@@ -576,14 +576,14 @@ func TestSecretDeclareTargetingNexusReadsHypervisorType(t *testing.T) {
 	if errText != "" {
 		t.Errorf("stderr = %q, want empty", errText)
 	}
-	if want := "credentials.nix\nsecrets.nix\nforgejo-token-groups.json\n"; out != want {
+	if want := "credentials.nix\nsecrets.nix\nrotation-registry.json\n"; out != want {
 		t.Errorf("stdout = %q, want %q", out, want)
 	}
 	secrets := fx.file(t, "secrets.nix")
 	if !strings.Contains(secrets, `"secrets/host-token.age".publicKeys = [ hostKey ];`) {
 		t.Errorf("secrets.nix missing the host-only recipient line:\n%s", secrets)
 	}
-	registry := fx.file(t, "forgejo-token-groups.json")
+	registry := fx.file(t, "rotation-registry.json")
 	if !strings.Contains(registry, `"kind": "nixos-host"`) {
 		t.Errorf("registry group does not carry the derived nixos-host kind:\n%s", registry)
 	}
@@ -635,8 +635,8 @@ func TestSecretDeclareCollisions(t *testing.T) {
 		want string
 	}{
 		{"existing-token", "credentials.nix: an entry named 'existing-token' already exists"},
-		{"shadow-token", "forgejo-token-groups.json: group 'other-alias' already names credential 'shadow-token'"},
-		{"collide-path-token", "forgejo-token-groups.json: group 'other-alias' already uses secret path 'secrets/collide-path-token.age'"},
+		{"shadow-token", "rotation-registry.json: group 'other-alias' already names credential 'shadow-token'"},
+		{"collide-path-token", "rotation-registry.json: group 'other-alias' already uses secret path 'secrets/collide-path-token.age'"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1049,12 +1049,12 @@ func TestSecretDeclareWritesTheValueTemplateShape(t *testing.T) {
 			if code != 0 {
 				t.Fatalf("exit %d, stderr: %s", code, errText)
 			}
-			if want := "credentials.nix\nsecrets.nix\nforgejo-token-groups.json\n"; out != want {
+			if want := "credentials.nix\nsecrets.nix\nrotation-registry.json\n"; out != want {
 				t.Errorf("stdout = %q, want %q", out, want)
 			}
-			registry := fx.file(t, "forgejo-token-groups.json")
+			registry := fx.file(t, "rotation-registry.json")
 			if !strings.Contains(registry, tc.want) {
-				t.Errorf("forgejo-token-groups.json lacks\n%s\ngot\n%s", tc.want, registry)
+				t.Errorf("rotation-registry.json lacks\n%s\ngot\n%s", tc.want, registry)
 			}
 			if !json.Valid([]byte(registry)) {
 				t.Error("the written registry is not valid JSON")
@@ -1358,8 +1358,8 @@ func TestSecretDeclareRefusesAndRestoresWhenAFileChangesUnderneath(t *testing.T)
 	if got, err := os.ReadFile(filepath.Join(fx.checkout, "credentials.nix")); err != nil || string(got) != declareFixtureCredentials {
 		t.Errorf("credentials.nix was not restored to its original bytes: err=%v got=%q", err, got)
 	}
-	if got, err := os.ReadFile(filepath.Join(fx.checkout, "forgejo-token-groups.json")); err != nil || string(got) != declareFixtureRegistry {
-		t.Errorf("forgejo-token-groups.json changed: err=%v got=%q", err, got)
+	if got, err := os.ReadFile(filepath.Join(fx.checkout, "rotation-registry.json")); err != nil || string(got) != declareFixtureRegistry {
+		t.Errorf("rotation-registry.json changed: err=%v got=%q", err, got)
 	}
 }
 
