@@ -487,11 +487,11 @@ type declareGroup struct {
 	Credentials      []declareCredentialEntry `json:"credentials"`
 }
 
-// registryGroup for reading the existing file back during collision checks.
+// declareRegistryGroup for reading the existing file back during collision checks.
 // It carries only what collision detection needs; every other field the
 // real validator requires is ignored here the way secret.go's decoders
 // ignore fields they do not consult.
-type registryGroup struct {
+type declareRegistryGroup struct {
 	Credentials []struct {
 		Credential string `json:"credential"`
 		SecretPath string `json:"secret_path"`
@@ -545,7 +545,7 @@ func declareSecretsHasLine(text, path string) bool {
 // declareCollisions checks all three files for the name before anything is
 // written, and returns every match found, file and finding together, so a
 // refusal names all of them at once rather than the first one hit.
-func declareCollisions(credentialsText, secretsText string, registry map[string]registryGroup, evaluatedCredentials map[string]struct{}, name, secretPath string) []string {
+func declareCollisions(credentialsText, secretsText string, registry map[string]declareRegistryGroup, evaluatedCredentials map[string]struct{}, name, secretPath string) []string {
 	var findings []string
 	if declareCredentialsHasEntry(credentialsText, name) {
 		findings = append(findings, fmt.Sprintf("credentials.nix: an entry named '%s' already exists", name))
@@ -904,7 +904,7 @@ func secretDeclare(args []string) {
 		}
 	}
 
-	var registry map[string]registryGroup
+	var registry map[string]declareRegistryGroup
 	if err := json.Unmarshal([]byte(registryText), &registry); err != nil {
 		die(1, "%s is not valid JSON: %s", registryPath, err)
 	}

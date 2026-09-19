@@ -142,7 +142,7 @@ func parseSecretRotateArgs(args []string) (name, checkout string, dryRun bool) {
 // way there is no single answer to which entry the operator meant, and
 // lookupSecret already refuses a credential with more than one agenix
 // consumer for the same reason.
-func selectRotationGroup(checkout, name string) (string, tokenGroup, map[string]tokenGroup) {
+func selectRotationGroup(checkout, name string) (string, registryGroup, map[string]registryGroup) {
 	groups, err := secretEvalRegistry(checkout)
 	if err != nil {
 		die(1, "could not evaluate lib.rotationRegistry in %s: %s", checkout, err)
@@ -159,7 +159,7 @@ func selectRotationGroup(checkout, name string) (string, tokenGroup, map[string]
 	default:
 		die(1, "credential '%s' is listed %d times in rotation registry group '%s' in %s/rotation-registry.json; rotate acts on one entry per credential, so fix the registry so each credential is listed once", name, len(aliases), distinct[0], checkout)
 	}
-	return "", tokenGroup{}, nil
+	return "", registryGroup{}, nil
 }
 
 // verifyGroupMembersUnique checks not just the requested credential but
@@ -171,7 +171,7 @@ func selectRotationGroup(checkout, name string) (string, tokenGroup, map[string]
 // credential means two declared values for one ciphertext, and rendering
 // the new secret through whichever came first is exactly the guess this
 // command does not make.
-func verifyGroupMembersUnique(group tokenGroup, groups map[string]tokenGroup) {
+func verifyGroupMembersUnique(group registryGroup, groups map[string]registryGroup) {
 	for _, credential := range group.Credentials {
 		_, aliases := registryCredentialEntries(groups, credential.Credential)
 		distinct := distinctSorted(aliases)
@@ -293,7 +293,7 @@ func isCredentialStoreURLSource(credential registryCredential, grammar credentia
 // retired: a credential's format and a target's verify type. A group
 // missing a field this command needs is refused with what is wrong rather
 // than a blank line in the printed steps.
-func validateGroupMetadata(alias string, group tokenGroup, grammar credentialStoreURLGrammar) {
+func validateGroupMetadata(alias string, group registryGroup, grammar credentialStoreURLGrammar) {
 	fail := func(reason string) {
 		die(1, "rotation registry group '%s' has unsupported metadata: %s", alias, reason)
 	}
@@ -380,7 +380,7 @@ func assertUniformGroupEncoding(alias string, credentials []registryCredential) 
 	}
 }
 
-func groupCommitSubject(alias string, group tokenGroup) string {
+func groupCommitSubject(alias string, group registryGroup) string {
 	if group.Service == "forgejo" {
 		return fmt.Sprintf("rotate %s Forgejo token", alias)
 	}
@@ -603,7 +603,7 @@ func credentialValueShape(credential registryCredential) string {
 // timing prose bash prints in this function is not ported: the printed
 // deploy step is the whole of what 'rotate' says about refresh-local-auth
 // (see printDeploySteps).
-func printGroupSummary(w io.Writer, alias string, group tokenGroup) {
+func printGroupSummary(w io.Writer, alias string, group registryGroup) {
 	if group.Service == "forgejo" {
 		fmt.Fprintf(w, "Forgejo group: %s\n", alias)
 		fmt.Fprintf(w, "Forgejo token: %s/%s\n", group.Account, group.UITokenName)
@@ -644,7 +644,7 @@ type rebuildTarget struct{ system, kind string }
 // the result by "system:kind", matching jq's unique_by(f) in
 // print_group_deploy_instructions: unique_by sorts by the key function, it
 // does not merely stabilize input order.
-func uniqueRebuildTargets(group tokenGroup) []rebuildTarget {
+func uniqueRebuildTargets(group registryGroup) []rebuildTarget {
 	seen := map[string]bool{}
 	var targets []rebuildTarget
 	for _, credential := range group.Credentials {
@@ -695,7 +695,7 @@ const (
 // local_auth_refresh entries, step 1 names 'refresh-local-auth --group
 // <alias>' as the operator's next step; 'rotate' never runs it (see
 // secret_rotate.go's file comment).
-func printDeploySteps(w io.Writer, checkout, alias, branch string, group tokenGroup, commitSubject string, landing deployStepsLandingState) {
+func printDeploySteps(w io.Writer, checkout, alias, branch string, group registryGroup, commitSubject string, landing deployStepsLandingState) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "--- Deployment steps ---")
 	step := 1
@@ -750,7 +750,7 @@ func posixShellQuote(value string) string {
 // verbatim on the machine it names and behind 'ssh' everywhere else —
 // rotate-token's four probe types are now four such strings in the
 // registry, and adding a fifth needs no code here.
-func printVerification(w io.Writer, group tokenGroup) {
+func printVerification(w io.Writer, group registryGroup) {
 	host, err := secretHostName()
 	if err != nil {
 		die(1, "could not read this machine's host name to tell a local target from a remote one: %s", err)
@@ -778,7 +778,7 @@ func printVerification(w io.Writer, group tokenGroup) {
 // for a forgejo group, generic wording for a none group, and no revocation
 // step at all when the provider rotates in place (the old value is already
 // invalid once the replacement exists).
-func printRevocationGate(w io.Writer, group tokenGroup) {
+func printRevocationGate(w io.Writer, group registryGroup) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "--- Revocation gate ---")
 	if group.RotationStrategy == "in-place" {

@@ -185,7 +185,7 @@ func verifyCommand(raw json.RawMessage) (string, error) {
 // the second behind, committed and unnoticed. Zero, two in one group, and
 // one in each of two groups are all refused, because rotate acts on
 // exactly one entry.
-func registryCredentialFor(groups map[string]tokenGroup, name string) (registryCredential, string, error) {
+func registryCredentialFor(groups map[string]registryGroup, name string) (registryCredential, string, error) {
 	found, aliases := registryCredentialEntries(groups, name)
 	distinct := distinctSorted(aliases)
 	switch {
@@ -203,7 +203,7 @@ func registryCredentialFor(groups map[string]tokenGroup, name string) (registryC
 // registryCredentialEntries returns the last entry named name and the alias
 // of the group holding each entry — one alias per entry, so two entries in
 // one group appear twice and the caller can count them.
-func registryCredentialEntries(groups map[string]tokenGroup, name string) (registryCredential, []string) {
+func registryCredentialEntries(groups map[string]registryGroup, name string) (registryCredential, []string) {
 	var found registryCredential
 	var aliases []string
 	for alias, group := range groups {

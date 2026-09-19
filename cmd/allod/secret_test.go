@@ -75,7 +75,7 @@ type secretFixture struct {
 	identity string
 
 	credentials map[string]credentialEntry
-	registry    map[string]tokenGroup
+	registry    map[string]registryGroup
 	recipients  map[string][]string
 
 	encryptCalls   int
@@ -163,7 +163,7 @@ func newSecretFixture(t *testing.T) *secretFixture {
 				{Type: "agenix", Repo: "secrets", Secret: "secrets/old-token.age"},
 			}},
 		},
-		registry: map[string]tokenGroup{
+		registry: map[string]registryGroup{
 			"dev-a.git": {Credentials: []registryCredential{
 				{Credential: "new-token", SecretPath: "secrets/new-token.age"},
 				{Credential: "old-token", SecretPath: "secrets/old-token.age"},
@@ -259,7 +259,7 @@ func newSecretFixture(t *testing.T) *secretFixture {
 		}
 		return result, nil
 	}
-	secretEvalRegistry = func(string) (map[string]tokenGroup, error) { return fx.registry, nil }
+	secretEvalRegistry = func(string) (map[string]registryGroup, error) { return fx.registry, nil }
 	secretEvalEncodings = func(string) ([]string, error) { return fx.encodings, nil }
 	secretEvalCredentialStoreURL = func(string) (credentialStoreURLGrammar, error) { return fx.credentialStoreURL, nil }
 	secretEvalRecipients = func(_ string, path string) ([]string, error) {
@@ -538,7 +538,7 @@ func TestSecretCreateRefusals(t *testing.T) {
 			fx.recipients["secrets/new-token.age"] = []string{fixtureVMKey}
 		}, "do not include this host's identity"},
 		{"no registry entry", func(_ *testing.T, fx *secretFixture) {
-			fx.registry = map[string]tokenGroup{}
+			fx.registry = map[string]registryGroup{}
 		}, "no rotation registry entry for 'new-token'"},
 		{"registry path disagrees", func(_ *testing.T, fx *secretFixture) {
 			fx.registry["dev-a.git"].Credentials[0].SecretPath = "secrets/other.age"
@@ -983,20 +983,20 @@ func TestSecretCreateRefusesADuplicateEntryInOneGroup(t *testing.T) {
 
 // --- The 'format' refusal at decode time ---
 
-// TestFirstCredentialCarryingFormat pins nixEvalTokenGroups' one witness
+// TestFirstCredentialCarryingFormat pins nixEvalRotationRegistry' one witness
 // against a stray legacy 'format': it names the credential and walks
 // aliases in sorted order, not map order, so two groups that both carry one
 // resolve to the earlier alias deterministically rather than whichever the
 // map happened to iterate first.
 func TestFirstCredentialCarryingFormat(t *testing.T) {
-	if name, ok := firstCredentialCarryingFormat(map[string]tokenGroup{
+	if name, ok := firstCredentialCarryingFormat(map[string]registryGroup{
 		"a.rotate": {Credentials: []registryCredential{{Credential: "plain-cred"}}},
 		"b.rotate": {Credentials: []registryCredential{{Credential: "legacy-cred", Format: "raw-forgejo-token"}}},
 	}); !ok || name != "legacy-cred" {
 		t.Errorf("got (%q, %v), want (\"legacy-cred\", true)", name, ok)
 	}
 
-	if _, ok := firstCredentialCarryingFormat(map[string]tokenGroup{
+	if _, ok := firstCredentialCarryingFormat(map[string]registryGroup{
 		"a.rotate": {Credentials: []registryCredential{{Credential: "plain-cred"}}},
 		"b.rotate": {Credentials: []registryCredential{{Credential: "templated-cred", Value: &credentialValue{Template: "{secret}"}}}},
 	}); ok {
@@ -1006,7 +1006,7 @@ func TestFirstCredentialCarryingFormat(t *testing.T) {
 	// Both 'a.rotate' and 'z.rotate' carry a format-bearing credential;
 	// sorted alias order makes 'a.rotate' win regardless of which the map
 	// would have visited first.
-	if name, ok := firstCredentialCarryingFormat(map[string]tokenGroup{
+	if name, ok := firstCredentialCarryingFormat(map[string]registryGroup{
 		"z.rotate": {Credentials: []registryCredential{{Credential: "later-cred", Format: "raw-forgejo-token"}}},
 		"a.rotate": {Credentials: []registryCredential{{Credential: "earlier-cred", Format: "credential-store-url"}}},
 	}); !ok || name != "earlier-cred" {

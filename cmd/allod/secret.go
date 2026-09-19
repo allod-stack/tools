@@ -50,7 +50,7 @@ import (
 // against a real git fixture without nix, age, or a terminal.
 var (
 	secretEvalCredentials = nixEvalCredentials
-	secretEvalRegistry    = nixEvalTokenGroups
+	secretEvalRegistry    = nixEvalRotationRegistry
 	secretEvalEncodings   = nixEvalCredentialEncodings
 	secretEvalRecipients  = nixEvalRecipients
 	secretEncrypt         = ageEncrypt
@@ -190,7 +190,7 @@ type registryCredential struct {
 	SecretPath string           `json:"secret_path"`
 	Value      *credentialValue `json:"value,omitempty"`
 	Targets    []registryTarget `json:"targets"`
-	// Format is decoded for exactly one purpose: nixEvalTokenGroups refuses
+	// Format is decoded for exactly one purpose: nixEvalRotationRegistry refuses
 	// a non-empty value immediately, by name, because json.Unmarshal
 	// otherwise ignores a field a struct does not declare and a stray
 	// 'format' entry would vanish rather than being refused. No command
@@ -214,7 +214,7 @@ type registryTarget struct {
 	Verify       json.RawMessage `json:"verify"`
 }
 
-type tokenGroup struct {
+type registryGroup struct {
 	Credentials      []registryCredential    `json:"credentials"`
 	RegistryAlias    string                  `json:"registry_alias"`
 	Service          string                  `json:"service"`
@@ -702,12 +702,12 @@ func nixEvalCredentials(checkout string) (map[string]credentialEntry, error) {
 	return credentials, nil
 }
 
-func nixEvalTokenGroups(checkout string) (map[string]tokenGroup, error) {
+func nixEvalRotationRegistry(checkout string) (map[string]registryGroup, error) {
 	data, err := nixEvalJSON(checkout, "lib.rotationRegistry")
 	if err != nil {
 		return nil, err
 	}
-	var groups map[string]tokenGroup
+	var groups map[string]registryGroup
 	if err := json.Unmarshal(data, &groups); err != nil {
 		return nil, fmt.Errorf("lib.rotationRegistry is not the expected shape: %w", err)
 	}
@@ -723,7 +723,7 @@ func nixEvalTokenGroups(checkout string) (map[string]tokenGroup, error) {
 // stray 'format' entry would reach every other command as if it were
 // simply absent; this is the one place that notices it and says so by
 // name instead.
-func firstCredentialCarryingFormat(groups map[string]tokenGroup) (string, bool) {
+func firstCredentialCarryingFormat(groups map[string]registryGroup) (string, bool) {
 	aliases := make([]string, 0, len(groups))
 	for alias := range groups {
 		aliases = append(aliases, alias)

@@ -355,7 +355,7 @@ func TestDecodeCredentialStoreURLGrammar(t *testing.T) {
 }
 
 func TestRegistryCredentialForRefusesZeroAndTwoGroups(t *testing.T) {
-	groups := map[string]tokenGroup{
+	groups := map[string]registryGroup{
 		"one.rotate": {Credentials: []registryCredential{{Credential: "shared-cred"}}},
 		"two.rotate": {Credentials: []registryCredential{{Credential: "shared-cred"}}},
 	}
@@ -367,7 +367,7 @@ func TestRegistryCredentialForRefusesZeroAndTwoGroups(t *testing.T) {
 		!strings.Contains(err.Error(), "no rotation registry entry for 'absent-cred'") {
 		t.Errorf("err = %v, want a no-entry refusal", err)
 	}
-	single := map[string]tokenGroup{"one.rotate": {Credentials: []registryCredential{{Credential: "only-cred"}}}}
+	single := map[string]registryGroup{"one.rotate": {Credentials: []registryCredential{{Credential: "only-cred"}}}}
 	credential, alias, err := registryCredentialFor(single, "only-cred")
 	if err != nil || alias != "one.rotate" || credential.Credential != "only-cred" {
 		t.Errorf("credential=%+v alias=%q err=%v", credential, alias, err)

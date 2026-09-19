@@ -37,16 +37,16 @@ import (
 // --- Direct unit tests: the pure ports ---
 
 func TestGroupCommitSubject(t *testing.T) {
-	if got := groupCommitSubject("dev-a.git", tokenGroup{Service: "forgejo"}); got != "rotate dev-a.git Forgejo token" {
+	if got := groupCommitSubject("dev-a.git", registryGroup{Service: "forgejo"}); got != "rotate dev-a.git Forgejo token" {
 		t.Errorf("forgejo subject = %q", got)
 	}
-	if got := groupCommitSubject("plain.service", tokenGroup{Service: "none"}); got != "rotate plain.service" {
+	if got := groupCommitSubject("plain.service", registryGroup{Service: "none"}); got != "rotate plain.service" {
 		t.Errorf("none subject = %q", got)
 	}
 }
 
 func TestUniqueRebuildTargetsDedupesAndSortsBySystemThenKind(t *testing.T) {
-	group := tokenGroup{Credentials: []registryCredential{
+	group := registryGroup{Credentials: []registryCredential{
 		{Targets: []registryTarget{{System: "dev-b", Kind: "dev-vm"}, {System: "fixture-host", Kind: "nixos-host"}}},
 		{Targets: []registryTarget{{System: "dev-b", Kind: "dev-vm"}, {System: "dev-a", Kind: "dev-vm"}}},
 	}}
@@ -95,8 +95,8 @@ func fixtureVerify(command string) json.RawMessage {
 	return encoded
 }
 
-func validRotateGroup() tokenGroup {
-	return tokenGroup{
+func validRotateGroup() registryGroup {
+	return registryGroup{
 		RegistryAlias:    "g",
 		Service:          "forgejo",
 		Account:          "acct",
@@ -115,29 +115,29 @@ func validRotateGroup() tokenGroup {
 func TestValidateGroupMetadataRefusals(t *testing.T) {
 	cases := []struct {
 		name    string
-		mutate  func(*tokenGroup)
+		mutate  func(*registryGroup)
 		wantErr string
 	}{
-		{"valid group passes", func(*tokenGroup) {}, ""},
-		{"bad service", func(g *tokenGroup) { g.Service = "github" }, "service 'github'"},
-		{"empty registry_alias", func(g *tokenGroup) { g.RegistryAlias = "" }, "registry_alias is empty"},
-		{"forgejo missing account", func(g *tokenGroup) { g.Account = "" }, "needs a non-empty account"},
-		{"bad rotation_strategy", func(g *tokenGroup) { g.RotationStrategy = "immediate" }, "rotation_strategy 'immediate'"},
-		{"no credentials", func(g *tokenGroup) { g.Credentials = nil }, "credentials is empty"},
-		{"no targets", func(g *tokenGroup) { g.Credentials[0].Targets = nil }, "has no targets"},
-		{"bad target kind", func(g *tokenGroup) { g.Credentials[0].Targets[0].Kind = "laptop" }, "unsupported kind 'laptop'"},
-		{"local_auth_refresh bad contract", func(g *tokenGroup) {
+		{"valid group passes", func(*registryGroup) {}, ""},
+		{"bad service", func(g *registryGroup) { g.Service = "github" }, "service 'github'"},
+		{"empty registry_alias", func(g *registryGroup) { g.RegistryAlias = "" }, "registry_alias is empty"},
+		{"forgejo missing account", func(g *registryGroup) { g.Account = "" }, "needs a non-empty account"},
+		{"bad rotation_strategy", func(g *registryGroup) { g.RotationStrategy = "immediate" }, "rotation_strategy 'immediate'"},
+		{"no credentials", func(g *registryGroup) { g.Credentials = nil }, "credentials is empty"},
+		{"no targets", func(g *registryGroup) { g.Credentials[0].Targets = nil }, "has no targets"},
+		{"bad target kind", func(g *registryGroup) { g.Credentials[0].Targets[0].Kind = "laptop" }, "unsupported kind 'laptop'"},
+		{"local_auth_refresh bad contract", func(g *registryGroup) {
 			g.LocalAuthRefresh = []localAuthRefreshEntry{{Contract: "run-anything", System: "dev-a", LocalUsername: "u", SourceCredential: "cred"}}
 		}, "unsupported contract 'run-anything'"},
-		{"local_auth_refresh unmatched source", func(g *tokenGroup) {
+		{"local_auth_refresh unmatched source", func(g *registryGroup) {
 			g.LocalAuthRefresh = []localAuthRefreshEntry{{Contract: "nixos-netrc-from-root-git-credentials", System: "dev-a", LocalUsername: "u", SourceCredential: "nope"}}
 		}, "does not name exactly one credential-store URL target"},
-		{"local_auth_refresh source is not a credential-store template", func(g *tokenGroup) {
+		{"local_auth_refresh source is not a credential-store template", func(g *registryGroup) {
 			g.Credentials[0].Value = &credentialValue{Template: "{secret}"}
 			g.Credentials[0].Targets[0].DeployedPath = "/root/.git-credentials"
 			g.LocalAuthRefresh = []localAuthRefreshEntry{{Contract: "nixos-netrc-from-root-git-credentials", System: "dev-a", LocalUsername: "u", SourceCredential: "cred"}}
 		}, "does not name exactly one credential-store URL target"},
-		{"local_auth_refresh template source passes", func(g *tokenGroup) {
+		{"local_auth_refresh template source passes", func(g *registryGroup) {
 			g.Credentials[0].Value = &credentialValue{Template: "https://fixture-user:{secret}@example.test"}
 			g.Credentials[0].Targets[0].DeployedPath = "/root/.git-credentials"
 			g.LocalAuthRefresh = []localAuthRefreshEntry{{Contract: "nixos-netrc-from-root-git-credentials", System: "dev-a", LocalUsername: "u", SourceCredential: "cred"}}
@@ -221,7 +221,7 @@ func newRotateFixture(t *testing.T) *rotateFixture {
 // clean and every gate rotate checks (state, ciphertext presence,
 // recipients, registry agreement, metadata shape) passes on the parts a
 // test does not itself mean to break.
-func (rf *rotateFixture) addGroup(t *testing.T, alias string, group tokenGroup, creds ...rotateGroupCredential) {
+func (rf *rotateFixture) addGroup(t *testing.T, alias string, group registryGroup, creds ...rotateGroupCredential) {
 	t.Helper()
 	for _, c := range creds {
 		path := "secrets/" + c.name + ".age"
@@ -269,8 +269,8 @@ func (rf *rotateFixture) addGroup(t *testing.T, alias string, group tokenGroup, 
 
 // forgejoGroup is the group shape most fixtures want: a Forgejo service
 // group whose metadata validateGroupMetadata accepts.
-func forgejoGroup(alias string) tokenGroup {
-	return tokenGroup{RegistryAlias: alias, Service: "forgejo", Account: "fixture-user", UITokenName: "fixture-token", RotationStrategy: "overlap"}
+func forgejoGroup(alias string) registryGroup {
+	return registryGroup{RegistryAlias: alias, Service: "forgejo", Account: "fixture-user", UITokenName: "fixture-token", RotationStrategy: "overlap"}
 }
 
 // installFakeRclone puts a real, minimal 'rclone' on PATH ahead of whatever
@@ -863,7 +863,7 @@ func TestPrintVerificationQuotesRemoteCommandsAndDetectsTheLocalHost(t *testing.
 	defer func() { secretHostName = previous }()
 	secretHostName = func() (string, error) { return "fixture-host", nil }
 
-	group := tokenGroup{Credentials: []registryCredential{{
+	group := registryGroup{Credentials: []registryCredential{{
 		Credential: "cred",
 		Targets: []registryTarget{
 			{System: "fixture-host", Kind: "nixos-host", Verify: fixtureVerify("allod site check")},
