@@ -8,7 +8,18 @@
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
-  outputs = { self, nixpkgs }:
+  # `flake = false`: the credential-store-url-parity check below only cmps
+  # one file against this tree, so the source is all it needs, and this
+  # keeps allod/secrets' own inputs (nixpkgs, inventory) out of this lock.
+  # Like the rest of this flake, this input is development-only — every
+  # consumer imports allod/tools with `flake = false`, so nothing downstream
+  # pays for it.
+  inputs.allod-secrets = {
+    url = "git+https://forge.anarch.diy/allod/secrets.git";
+    flake = false;
+  };
+
+  outputs = { self, nixpkgs, allod-secrets }:
     let
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
@@ -147,6 +158,35 @@
         touch "$out"
       '';
 
+      # allod/tools cannot evaluate Nix cheaply, so the Go tests read a
+      # checked-in copy of the secrets flake's vector table and grammar
+      # (cmd/allod/testdata/credential-store-url.json) instead of the export
+      # itself. This check is what keeps that copy honest: nothing else
+      # compares the two files, and a stale copy would test the Go
+      # implementation against a table nobody else agrees with. It moved
+      # here from allod/archetypes, where it could not hold on a fork whose
+      # `secrets` input is its own data repo (allod/archetypes#110).
+      #
+      # `${./cmd/...}` is a path literal: it copies only that one file into
+      # the store, so this derivation is stable across commits that touch
+      # anything else (nix.md).
+      credentialStoreUrlParity = pkgs.runCommand "credential-store-url-parity-check"
+        { nativeBuildInputs = [ pkgs.diffutils ]; }
+        ''
+          # `if ! cmp`, not a bare `cmp`: an inverted command never aborts
+          # under errexit, so the failure is the explicit `exit 1` and the
+          # message gets printed. cmp also names the first differing byte.
+          if ! cmp ${./cmd/allod/testdata/credential-store-url.json} ${allod-secrets}/credential-store-url.json; then
+            echo "ERROR: the credential-store URL vector table differs between repositories" >&2
+            echo "  allod/tools:   cmd/allod/testdata/credential-store-url.json" >&2
+            echo "  allod/secrets: credential-store-url.json" >&2
+            echo "allod/tools must carry a byte-for-byte copy of the allod/secrets definition" >&2
+            exit 1
+          fi
+          echo "allod/tools and allod/secrets agree on credential-store-url.json"
+          touch $out
+        '';
+
       # The mock-driven cascade suites, run against the packaged program. The
       # nixConfig suite is left out: it drives the real nix under a pty, which
       # the sandbox cannot host; run it by hand.
@@ -225,6 +265,7 @@
         inherit allod forge;
         flake-update-cascade = flakeUpdateCascade;
         allod-parity = allodParity;
+        credential-store-url-parity = credentialStoreUrlParity;
         cascade-suites = cascadeSuites;
         flake-status-suite = flakeStatusSuite;
         go-checks = goChecks;

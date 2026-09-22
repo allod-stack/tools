@@ -196,8 +196,8 @@ var (
 // refresh contract can consume (a single netrc-consumable
 // 'https://<user>:{secret}@<host>' line) and the blank-line class a
 // template's padding lines are measured against. The grammar is data read
-// from the secrets flake, not a hand-written copy: allod/archetypes'
-// 'credential-store-url-parity' check pins the testdata copy under
+// from the secrets flake, not a hand-written copy: this repo's own
+// 'credential-store-url-parity' flake check pins the testdata copy under
 // cmd/allod/testdata to the file this grammar is compiled from.
 type credentialStoreURLGrammar struct {
 	line      *regexp.Regexp

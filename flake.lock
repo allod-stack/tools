@@ -1,5 +1,21 @@
 {
   "nodes": {
+    "allod-secrets": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1790037712,
+        "narHash": "sha256-0QngvJyIgFQfdSUKGV1gZNOslvvuBMj4GA2wsv5LB5M=",
+        "ref": "refs/heads/master",
+        "rev": "8350ac854ae8147ba24b4d06e03521dabd221032",
+        "revCount": 64,
+        "type": "git",
+        "url": "https://forge.anarch.diy/allod/secrets.git"
+      },
+      "original": {
+        "type": "git",
+        "url": "https://forge.anarch.diy/allod/secrets.git"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1788881743,
@@ -18,6 +34,7 @@
     },
     "root": {
       "inputs": {
+        "allod-secrets": "allod-secrets",
         "nixpkgs": "nixpkgs"
       }
     }

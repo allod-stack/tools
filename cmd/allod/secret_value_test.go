@@ -240,8 +240,8 @@ func TestPOSIXShellQuote(t *testing.T) {
 // credentialStoreURLTestdataPath is the byte-for-byte copy of the secrets
 // checkout's credential-store-url.json: the one shared vector table every
 // implementation's own test suite reads, so a divergence between allod/tools
-// and its siblings fails here instead of surviving in a comment. The
-// allod/archetypes 'credential-store-url-parity' check pins this copy to
+// and its siblings fails here instead of surviving in a comment. This
+// repo's own 'credential-store-url-parity' flake check pins this copy to
 // the secrets flake's file.
 const credentialStoreURLTestdataPath = "testdata/credential-store-url.json"
 
