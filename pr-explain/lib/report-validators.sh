@@ -4,7 +4,12 @@
 # *_are_semantic checks, plus check_reading_cost, check_layers,
 # check_objectives_block, check_objective_coverage, check_quiz_v2,
 # visible_prose, and check_slop) and their private helpers. Each is called
-# by lib/report.sh over the assembled document. Depends on lib/common.sh.
+# by lib/report.sh over the assembled document. Depends on lib/common.sh
+# (count_regex, validation_error, validation_warning). pr_explain_visible_prose
+# also calls pr_explain_strip_quoted_code, which lives in lib/report.sh,
+# sourced after this file — sourcing order still resolves it because the
+# call happens later, when pr_explain_validate_report runs, not when this
+# file is sourced.
 
 pr_explain_body_tags_are_canonical() {
   awk '

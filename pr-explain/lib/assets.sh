@@ -2,7 +2,9 @@
 # Asset resolution and emission: locating the pr-explain lib directory,
 # resolving the forge executable, and the pr_explain_emit_* family that
 # streams the packaged CSS, JS, prompts, and gallery out to callers. Depends
-# on PR_EXPLAIN_LIB_DIR (set by lib.sh before sourcing) and on lib/common.sh.
+# on PR_EXPLAIN_LIB_DIR (set by lib.sh before sourcing). pr_explain_resolve_forge
+# and pr_explain_emit_asset also call die, which no file under pr-explain/lib
+# defines; it is caller-provided by explain.
 
 pr_explain_asset_dir() {
   printf '%s\n' "$PR_EXPLAIN_LIB_DIR"

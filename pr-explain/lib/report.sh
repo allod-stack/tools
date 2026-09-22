@@ -2,9 +2,12 @@
 # The report driver: extracting a named asset region from an assembled
 # report, stripping quoted code before a structural scan, streaming every
 # markup tag with its line number, and pr_explain_validate_report, which
-# calls the lib/report-validators.sh predicates and lib/fragments.sh
-# schema checks over the finished document. Depends on lib/common.sh,
-# lib/fragments.sh, and lib/report-validators.sh, and is sourced last.
+# calls the lib/report-validators.sh predicates over the finished document.
+# Depends on lib/common.sh, lib/report-validators.sh, and lib/assets.sh
+# (pr_explain_validate_report calls pr_explain_emit_css, pr_explain_emit_js,
+# and pr_explain_emit_gallery to compare against); sourced last.
+# pr_explain_validate_report also calls the caller-provided make_temp_file,
+# which no file under pr-explain/lib defines.
 
 pr_explain_extract_asset() {
   local report="$1" opening="$2" closing="$3" output="$4"
