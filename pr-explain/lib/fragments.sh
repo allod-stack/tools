@@ -1,10 +1,13 @@
 # shellcheck shell=bash
 # Fragment validation: the outline schema check and the per-pass tripwires
 # (front matter, section, quiz) that stop a misdirected generation pass
-# before the next provider call spends money continuing from it. Depends on
-# lib/common.sh (die is provided by the caller, not this library) and checks
-# only fragment shape and placement; the full grammar is enforced later by
-# lib/report-validators.sh over the assembled report.
+# before the next provider call spends money continuing from it. Calls no
+# other file under pr-explain/lib. pr_explain_check_front_fragment,
+# pr_explain_check_section_fragment, and pr_explain_check_quiz_fragment call
+# die, which no file under pr-explain/lib defines; it is caller-provided by
+# explain. This file checks only fragment shape and placement; the full
+# grammar is enforced later by lib/report-validators.sh over the assembled
+# report.
 
 # The section plan is provider output, so it is held to a fixed schema before
 # any section pass spends a provider call continuing from it: exact keys,
