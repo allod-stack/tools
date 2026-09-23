@@ -571,16 +571,20 @@ func requireSiteRemote(configPath string) {
 }
 
 // siteVerifyBodyLimit bounds how much of the home page verification reads.
-// A page longer than this compares unequal to anything a static site builds
-// as its front page, which is the right answer.
+// fetchSite reads one byte past it so a longer page is known to be longer,
+// and siteDeploy treats such a page as not matching the build, which is the
+// right answer for anything a static site builds as its front page.
 const siteVerifyBodyLimit = 8 << 20
 
 // fetchSite returns the status and body of https://<domain>/ itself. Redirects
 // are not followed on purpose: a docroot that answers 301 has not been
 // deployed to the place the check is asking about, and following the hop
-// would report the 200 of wherever it lands. The request asks every cache on
-// the way to revalidate, so the body is the docroot's current answer rather
-// than a copy of the page the deploy just replaced.
+// would report the 200 of wherever it lands. The request carries a one-off
+// query string, which a static docroot ignores and a cache keys on, so no
+// cache between here and the server can answer with the page the deploy just
+// replaced; Apache's default ETag is size plus mtime, so a same-length page
+// would revalidate as unchanged and 'Cache-Control: no-cache' alone is not
+// enough.
 func fetchSite(url string) (int, []byte, error) {
 	client := &http.Client{
 		Timeout: siteVerifyTimeout,
@@ -588,7 +592,7 @@ func fetchSite(url string) (int, []byte, error) {
 			return http.ErrUseLastResponse
 		},
 	}
-	request, err := http.NewRequest(http.MethodGet, url, nil)
+	request, err := http.NewRequest(http.MethodGet, url+"?allod-verify="+strconv.FormatInt(time.Now().UnixNano(), 36), nil)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -599,7 +603,7 @@ func fetchSite(url string) (int, []byte, error) {
 		return 0, nil, err
 	}
 	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, siteVerifyBodyLimit))
+	body, err := io.ReadAll(io.LimitReader(response.Body, siteVerifyBodyLimit+1))
 	if err != nil {
 		return 0, nil, err
 	}
@@ -624,11 +628,13 @@ func builtHomePage(storePath string) ([]byte, bool) {
 }
 
 // builtHtaccess returns the path of the build's .htaccess, or "" when the
-// build carries none. Anything else at that name - a directory, say, which
-// copyto would happily upload as one - stops the deploy before the first pass.
+// build carries none. Anything else at that name stops the deploy before the
+// first pass: copyto would upload a directory as one, and rclone skips a
+// symlink it is not told to follow, so Lstat rather than Stat, or a link
+// would pass here and fail two passes later.
 func builtHtaccess(storePath string) string {
 	path := filepath.Join(storePath, siteHtaccessName)
-	info, err := os.Stat(path)
+	info, err := os.Lstat(path)
 	if os.IsNotExist(err) {
 		return ""
 	}
@@ -636,7 +642,7 @@ func builtHtaccess(storePath string) string {
 		die(1, "could not read %s: %s", path, err)
 	}
 	if !info.Mode().IsRegular() {
-		die(1, "%s is not a regular file; a site's .htaccess must be one", path)
+		die(1, "%s is not a regular file; a site's .htaccess must be one, not a directory or a symlink", path)
 	}
 	return path
 }
@@ -756,15 +762,16 @@ func siteDeploy(args []string) {
 
 	// Pass one brings the docroot's file list into line with the build's.
 	// Files the build no longer carries, and files whose size changed, are
-	// moved to the trash rather than destroyed.
+	// moved to the trash rather than destroyed. --size-only keeps modtime
+	// out of that decision: FTP exposes no checksums, the builder's epoch
+	// mtimes carry no information, and a server that reported its own
+	// upload times instead would otherwise move every file to the trash.
 	syncArgs := append([]string{"sync", storePath, docroot}, filterArgs...)
-	pass(append(syncArgs, "--backup-dir", trash)...)
+	pass(append(syncArgs, "--backup-dir", trash, "--size-only")...)
 
-	// Pass two uploads every file again, unconditionally. FTP exposes no
-	// checksums, so pass one decides by size and modtime alone, and the site
-	// builder normalizes every mtime to the epoch to keep its output
-	// reproducible: an edit that keeps a file's length - a moved tag, a
-	// swapped word, a flipped digit - looked identical to pass one and never
+	// Pass two uploads every file again, unconditionally. Size is all pass
+	// one can see, so an edit that keeps a file's length - a moved tag, a
+	// swapped word, a flipped digit - looked identical to it and never
 	// reached the server. There is deliberately no --backup-dir here: with
 	// every file transferring, the trash would take a full copy of the site
 	// on every deploy.
@@ -796,8 +803,9 @@ func siteDeploy(args []string) {
 		return
 	}
 	// A 200 alone proves nothing about the transfer: the page the deploy was
-	// meant to replace answered 200 just as well.
-	if !bytes.Equal(body, homePage) {
+	// meant to replace answered 200 just as well. A body past the read limit
+	// is longer than anything compared here and so cannot be the build's.
+	if len(body) > siteVerifyBodyLimit || !bytes.Equal(body, homePage) {
 		die(siteVerifyExit, "deployed, but %s does not serve the build's index.html (%d bytes served, %d bytes built)", url, len(body), len(homePage))
 	}
 	fmt.Fprintf(stdout, "Verified: %s serves the build's index.html\n", url)
@@ -865,30 +873,31 @@ default value.
 
 Each profile's exclusion filter belongs to this command rather than to the site
 repo. A non-empty filter is written to a temporary file per run and passed as
---filter-from to every rclone pass, so every site on the deployment gets the
-same list.
+--filter-from to the sync and the copy below, so every site on the deployment
+gets the same list.
 
-A deploy is three rclone passes over the FTP remote. First, 'sync' brings the
-docroot's file list into line with the build: files the build no longer
-carries, and files whose size changed, are moved to shared:deploy-trash/<domain>
-rather than destroyed. Second, 'copy --ignore-times' uploads every file in the
-build again. FTP exposes no checksums, so the sync decides by size and modtime
-alone, and the site builder normalizes every mtime to the epoch to keep its
-output reproducible: an edit that keeps a file's length - a moved tag, a
-swapped word, a flipped digit - looks identical to the sync and never reaches
-the server. Every deploy therefore transfers the whole site; these sites are a
-few dozen small files. The trash receives only what the sync moved, never a
-copy of every file, so a file replaced by one of the same length is overwritten
-in place and not kept. Third, on a profile whose filter excludes /.htaccess -
-the directadmin layout, where the control panel writes that file - a .htaccess
-the build carries is copied over the docroot's in a pass of its own, and the
-docroot's previous copy goes to the trash. A site on that layout that ships a
-.htaccess in static/ therefore owns the file; a build that carries none leaves
-the docroot's alone, exactly as the filter always has. Every pass bounds each
-rclone filesystem instance to a fixed number of simultaneous FTP connections;
-because the docroot and the backup directory are two such instances, a pass
-opens at most twice that many, staying under a shared host's per-client
-connection limit instead of tripping it.
+A deploy is two rclone passes over the FTP remote, and a third on one layout.
+First, 'sync --size-only' brings the docroot's file list into line with the
+build: files the build no longer carries, and files whose size changed, are
+moved to shared:deploy-trash/<domain> rather than destroyed; modtime plays no
+part, since FTP exposes no checksums and the site builder normalizes every
+mtime to the epoch to keep its output reproducible. Second, 'copy
+--ignore-times' uploads every file in the build again, because size is all
+the sync can see: an edit that keeps a file's length - a moved tag, a swapped
+word, a flipped digit - looks identical to it and would never reach the
+server. Every deploy therefore transfers the whole site; these sites are a few
+dozen small files. The trash receives only what the sync moved, never a copy
+of every file, so a file replaced by one of the same length is overwritten in
+place and not kept. Third, on a profile whose filter excludes /.htaccess - the
+directadmin layout, where the control panel writes that file - a .htaccess the
+build carries is copied over the docroot's in a pass of its own, without the
+filter, and the docroot's previous copy goes to the trash. A site on that
+layout that ships a .htaccess in static/ therefore owns the file; a build that
+carries none leaves the docroot's alone, exactly as the filter always has.
+Every pass bounds each rclone filesystem instance to a fixed number of
+simultaneous FTP connections; because the docroot and the backup directory
+are two such instances, a pass opens at most twice that many, staying under a
+shared host's per-client connection limit instead of tripping it.
 
 site.toml still has exactly one key and cannot select the hosting profile:
 
@@ -898,7 +907,8 @@ Unknown keys are ignored, so a file written for a later version still deploys.
 
 '--dry-run' passes --dry-run to every rclone pass: the build still runs and
 rclone reports what each pass would transfer, but the docroot is untouched and
-the HTTPS check is skipped. Without it, deploy fetches https://<domain>/ and
+the HTTPS check is skipped. Without it, deploy fetches https://<domain>/ with a
+one-off query string, so no cache on the way can answer for the docroot, and
 compares the page with the build's index.html byte for byte, so a transfer
 that did not land fails the deploy instead of passing on a 200 the old page
 answered just as well; a build with no index.html at its root gets the 200

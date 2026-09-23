@@ -1072,6 +1072,7 @@ func TestSiteDeployDirectAdminDefault(t *testing.T) {
 			"sync", storePath, "shared:domains/example.com/public_html",
 			"--filter-from", filter,
 			"--backup-dir", "shared:deploy-trash/example.com",
+			"--size-only",
 			"--verbose",
 			"--transfers", "2",
 			"--checkers", "2",
@@ -1425,7 +1426,7 @@ func TestSiteDeployPublicHTMLProfile(t *testing.T) {
 		t.Fatalf("exit code = %d, want 0\nstderr: %s", code, errText)
 	}
 	deployRuns(t, stub, [][]string{
-		passTail(false, "sync", storePath, "shared:public_html/example.com", "--backup-dir", "shared:deploy-trash/example.com"),
+		passTail(false, "sync", storePath, "shared:public_html/example.com", "--backup-dir", "shared:deploy-trash/example.com", "--size-only"),
 		passTail(false, "copy", storePath, "shared:public_html/example.com", "--ignore-times"),
 	})
 	for _, run := range stub.syncRuns {
@@ -1523,7 +1524,7 @@ func TestSiteDeployDryRun(t *testing.T) {
 	filter := argAfter(t, stub.syncRuns[0], "--filter-from")
 	docroot := "shared:domains/example.com/public_html"
 	deployRuns(t, stub, [][]string{
-		passTail(true, "sync", storePath, docroot, "--filter-from", filter, "--backup-dir", "shared:deploy-trash/example.com"),
+		passTail(true, "sync", storePath, docroot, "--filter-from", filter, "--backup-dir", "shared:deploy-trash/example.com", "--size-only"),
 		passTail(true, "copy", storePath, docroot, "--filter-from", filter, "--ignore-times"),
 		passTail(true, "copyto", storePath+"/.htaccess", docroot+"/.htaccess", "--backup-dir", "shared:deploy-trash/example.com", "--ignore-times"),
 	})
@@ -1711,18 +1712,30 @@ func TestSiteDeployRefusesMalformedBuild(t *testing.T) {
 	tests := []struct {
 		name    string
 		profile string
-		dir     string
+		entry   string
+		symlink bool
 		errHas  string
 	}{
-		{"index.html is a directory", "directadmin", "index.html", "could not read"},
-		{"directadmin .htaccess is a directory", "directadmin", ".htaccess", "is not a regular file"},
+		{"index.html is a directory", "directadmin", "index.html", false, "could not read"},
+		{"directadmin .htaccess is a directory", "directadmin", ".htaccess", false, "is not a regular file"},
+		// rclone skips a symlink it is not told to follow, so a linked
+		// .htaccess would pass a Stat-based check and then fail, or stay
+		// behind, two passes later.
+		{"directadmin .htaccess is a symlink", "directadmin", ".htaccess", true, "is not a regular file"},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			storePath := builtSite(t, nil)
-			if err := os.Mkdir(filepath.Join(storePath, test.dir), 0755); err != nil {
-				t.Fatalf("could not create %s: %v", test.dir, err)
+			storePath := builtSite(t, map[string]string{"rules.conf": "rules\n"})
+			entry := filepath.Join(storePath, test.entry)
+			var err error
+			if test.symlink {
+				err = os.Symlink("rules.conf", entry)
+			} else {
+				err = os.Mkdir(entry, 0755)
+			}
+			if err != nil {
+				t.Fatalf("could not create %s: %v", test.entry, err)
 			}
 			stub := &deployStub{storePath: storePath, verifyStatus: 200}
 			useDeployStub(t, stub)
@@ -1749,8 +1762,16 @@ func TestSiteDeployRefusesMalformedBuild(t *testing.T) {
 // never runs.
 func TestFetchSite(t *testing.T) {
 	var cacheControl string
+	seen := map[string]bool{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cacheControl = r.Header.Get("Cache-Control")
+		// Each fetch carries a query string no earlier fetch used, so a
+		// cache keyed on the URL cannot answer for the docroot.
+		nonce := r.URL.Query().Get("allod-verify")
+		if nonce == "" || seen[nonce] {
+			t.Errorf("fetch of %s carried no fresh allod-verify query value: %q", r.URL.Path, r.URL.RawQuery)
+		}
+		seen[nonce] = true
 		switch r.URL.Path {
 		case "/ok":
 			fmt.Fprint(w, "hello")
