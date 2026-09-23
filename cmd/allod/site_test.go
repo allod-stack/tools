@@ -40,13 +40,14 @@ type deployStub struct {
 	buildCalls       int
 	storePath        string
 	buildStatus      int
-	syncArgs         []string
+	syncRuns         [][]string
 	syncCalls        int
 	syncStatus       int
 	syncConfigPath   string
 	verifyURL        string
 	verifyCalls      int
 	verifyStatus     int
+	verifyBody       []byte
 	verifyErr        error
 }
 
@@ -71,12 +72,13 @@ func useDeployStub(t *testing.T, stub *deployStub) string {
 		return stub.storePath, stub.buildStatus
 	}
 	siteSync = func(configPath string, args []string) int {
-		stub.syncConfigPath, stub.syncArgs, stub.syncCalls = configPath, args, stub.syncCalls+1
+		stub.syncConfigPath, stub.syncCalls = configPath, stub.syncCalls+1
+		stub.syncRuns = append(stub.syncRuns, args)
 		return stub.syncStatus
 	}
-	siteVerify = func(url string) (int, error) {
+	siteVerify = func(url string) (int, []byte, error) {
 		stub.verifyURL, stub.verifyCalls = url, stub.verifyCalls+1
-		return stub.verifyStatus, stub.verifyErr
+		return stub.verifyStatus, stub.verifyBody, stub.verifyErr
 	}
 	t.Cleanup(func() {
 		siteRemoteCheck, siteBuild = previousRemoteCheck, previousBuild
@@ -135,6 +137,52 @@ func hasArg(args []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// builtSite stands in for the store path 'nix build' prints: a directory
+// holding the named files, absolute and colon-free like a real one. A test of
+// verification gives it an index.html; a test of the .htaccess pass gives it
+// that file; a test that cares about neither can keep a path that does not
+// exist, which the deploy treats as a build carrying neither.
+func builtSite(t *testing.T, files map[string]string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0644); err != nil {
+			t.Fatalf("could not write %s: %v", name, err)
+		}
+	}
+	return dir
+}
+
+// passTail is what every rclone pass ends with, in the order the command
+// appends it. The values are spelled out rather than derived from the
+// constants so a test still pins the numbers.
+func passTail(dryRun bool, args ...string) []string {
+	args = append(args,
+		"--verbose",
+		"--transfers", "2",
+		"--checkers", "2",
+		"--ftp-concurrency", "3",
+		"--check-first",
+	)
+	if dryRun {
+		args = append(args, "--dry-run")
+	}
+	return args
+}
+
+// deployRuns pins one deploy's rclone invocations, run by run.
+func deployRuns(t *testing.T, stub *deployStub, want [][]string) {
+	t.Helper()
+	if len(stub.syncRuns) != len(want) {
+		t.Fatalf("rclone ran %d times, want %d:\n%v", len(stub.syncRuns), len(want), stub.syncRuns)
+	}
+	for index, run := range stub.syncRuns {
+		if fmt.Sprint(run) != fmt.Sprint(want[index]) {
+			t.Errorf("rclone run %d args =\n%v\nwant\n%v", index+1, run, want[index])
+		}
+	}
 }
 
 // --- Dispatch and usage ---
@@ -842,6 +890,62 @@ func TestDirectAdminProfileData(t *testing.T) {
 	if got := deployFilterText(profile.deployFilterRules); got != want {
 		t.Errorf("filter text =\n%q\nwant\n%q", got, want)
 	}
+	if !profile.excludesHtaccess() {
+		t.Error("directadmin does not report its /.htaccess exclusion")
+	}
+}
+
+// The directadmin filter keeps the sync away from /.htaccess so the control
+// panel's file survives a build that ships none. A filter applies to both
+// sides, so a .htaccess the build does carry goes over in a pass of its own:
+// copyto, unconditionally, with the docroot's previous copy kept in the trash.
+func TestSiteDeployDirectAdminShipsBuiltHtaccessSeparately(t *testing.T) {
+	tests := []struct {
+		name  string
+		files map[string]string
+		runs  int
+	}{
+		{"build carries one", map[string]string{".htaccess": "Header set Cache-Control \"max-age=600\"\n"}, 3},
+		{"build carries none", map[string]string{}, 2},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			storePath := builtSite(t, test.files)
+			stub := &deployStub{storePath: storePath, verifyStatus: 200}
+			useDeployStub(t, stub)
+			useSiteRepo(t, "domain = \"example.com\"\n")
+
+			_, errText, code := runAllod(t, "site", "deploy")
+			if code != 0 {
+				t.Fatalf("exit code = %d, want 0\nstderr: %s", code, errText)
+			}
+			if stub.syncCalls != test.runs {
+				t.Fatalf("rclone ran %d times, want %d:\n%v", stub.syncCalls, test.runs, stub.syncRuns)
+			}
+			for _, run := range stub.syncRuns[:2] {
+				if run[0] == "copyto" {
+					t.Errorf("a copyto ran before the sync and the copy: %v", stub.syncRuns)
+				}
+			}
+			if test.runs == 3 {
+				want := passTail(false,
+					"copyto", storePath+"/.htaccess", "shared:domains/example.com/public_html/.htaccess",
+					"--backup-dir", "shared:deploy-trash/example.com",
+					"--ignore-times",
+				)
+				if fmt.Sprint(stub.syncRuns[2]) != fmt.Sprint(want) {
+					t.Errorf("copyto args =\n%v\nwant\n%v", stub.syncRuns[2], want)
+				}
+				if hasArg(stub.syncRuns[2], "--filter-from") {
+					t.Errorf("copyto carries the filter that would exclude the file it ships: %v", stub.syncRuns[2])
+				}
+			}
+			if stub.verifyCalls != 1 {
+				t.Errorf("verification ran %d times, want 1", stub.verifyCalls)
+			}
+		})
+	}
 }
 
 // An inherited environment cannot change the destructive sync target. Profile
@@ -933,8 +1037,14 @@ func TestValidateSiteHostingProfiles(t *testing.T) {
 
 // TestSiteDeployDirectAdminDefaultIsUnchanged is the generated-command
 // regression for deployments that do not select a profile.
-func TestSiteDeployDirectAdminDefaultIsUnchanged(t *testing.T) {
-	stub := &deployStub{storePath: "/nix/store/aaa-site", verifyStatus: 200}
+// The default deploy is two passes: the sync that has always run, then a copy
+// of every file with --ignore-times, because the FTP remote compares by size
+// and modtime alone and a same-length edit is invisible to it. Only the sync
+// carries --backup-dir, so the trash never takes a copy of the whole site.
+func TestSiteDeployDirectAdminDefault(t *testing.T) {
+	home := "<html>home</html>\n"
+	storePath := builtSite(t, map[string]string{"index.html": home})
+	stub := &deployStub{storePath: storePath, verifyStatus: 200, verifyBody: []byte(home)}
 	useDeployStub(t, stub)
 	root := useSiteRepo(t, "# the site\ndomain = \"example.com\"\n")
 
@@ -949,30 +1059,39 @@ func TestSiteDeployDirectAdminDefaultIsUnchanged(t *testing.T) {
 	if built, err := filepath.EvalSymlinks(stub.buildDir); err != nil || built != root {
 		t.Errorf("nix build ran in %q, want %q", stub.buildDir, root)
 	}
-	if stub.syncCalls != 1 {
-		t.Fatalf("rclone ran %d times, want 1", stub.syncCalls)
+	if stub.syncCalls != 2 {
+		t.Fatalf("rclone ran %d times, want 2", stub.syncCalls)
 	}
 	if stub.remoteConfigPath != "" || stub.syncConfigPath != "" {
 		t.Errorf("default deploy selected an explicit rclone config: preflight=%q sync=%q", stub.remoteConfigPath, stub.syncConfigPath)
 	}
 
-	filter := argAfter(t, stub.syncArgs, "--filter-from")
-	want := []string{
-		"sync", "/nix/store/aaa-site", "shared:domains/example.com/public_html",
-		"--filter-from", filter,
-		"--backup-dir", "shared:deploy-trash/example.com",
-		"--verbose",
-		"--transfers", "2",
-		"--checkers", "2",
-		"--ftp-concurrency", "3",
-		"--check-first",
-	}
-	if fmt.Sprint(stub.syncArgs) != fmt.Sprint(want) {
-		t.Errorf("rclone args =\n%v\nwant\n%v", stub.syncArgs, want)
-	}
-	for _, arg := range stub.syncArgs {
-		if arg == "--dry-run" {
-			t.Errorf("rclone got --dry-run without the flag: %v", stub.syncArgs)
+	filter := argAfter(t, stub.syncRuns[0], "--filter-from")
+	deployRuns(t, stub, [][]string{
+		{
+			"sync", storePath, "shared:domains/example.com/public_html",
+			"--filter-from", filter,
+			"--backup-dir", "shared:deploy-trash/example.com",
+			"--verbose",
+			"--transfers", "2",
+			"--checkers", "2",
+			"--ftp-concurrency", "3",
+			"--check-first",
+		},
+		{
+			"copy", storePath, "shared:domains/example.com/public_html",
+			"--filter-from", filter,
+			"--ignore-times",
+			"--verbose",
+			"--transfers", "2",
+			"--checkers", "2",
+			"--ftp-concurrency", "3",
+			"--check-first",
+		},
+	})
+	for _, run := range stub.syncRuns {
+		if hasArg(run, "--dry-run") {
+			t.Errorf("rclone got --dry-run without the flag: %v", run)
 		}
 	}
 
@@ -984,9 +1103,9 @@ func TestSiteDeployDirectAdminDefaultIsUnchanged(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Domain: example.com\n",
-		"Source: /nix/store/aaa-site\n",
+		"Source: " + storePath + "\n",
 		"Target: shared:domains/example.com/public_html\n",
-		"Verified: https://example.com/ returned 200\n",
+		"Verified: https://example.com/ serves the build's index.html\n",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("stdout does not contain %q\ngot: %q", want, out)
@@ -1258,10 +1377,14 @@ func TestSiteDeployWritesTheFilter(t *testing.T) {
 	useDeployStub(t, stub)
 	previousSync := siteSync
 	siteSync = func(configPath string, args []string) int {
-		stub.syncConfigPath, stub.syncArgs, stub.syncCalls = configPath, args, stub.syncCalls+1
+		stub.syncConfigPath, stub.syncCalls = configPath, stub.syncCalls+1
+		stub.syncRuns = append(stub.syncRuns, args)
 		data, err := os.ReadFile(argAfter(t, args, "--filter-from"))
 		if err != nil {
 			t.Errorf("could not read the filter file: %v", err)
+		}
+		if contents != "" && contents != string(data) {
+			t.Errorf("filter file changed between passes:\n%q\nthen\n%q", contents, data)
 		}
 		contents = string(data)
 		return 0
@@ -1272,6 +1395,9 @@ func TestSiteDeployWritesTheFilter(t *testing.T) {
 	if _, errText, code := runAllod(t, "site", "deploy"); code != 0 {
 		t.Fatalf("exit code = %d, want 0\nstderr: %s", code, errText)
 	}
+	if stub.syncCalls != 2 {
+		t.Fatalf("rclone ran %d times, want 2", stub.syncCalls)
+	}
 	profile := selectedSiteHostingProfile()
 	if want := deployFilterText(profile.deployFilterRules); contents != want {
 		t.Errorf("filter file =\n%q\nwant\n%q", contents, want)
@@ -1279,10 +1405,13 @@ func TestSiteDeployWritesTheFilter(t *testing.T) {
 }
 
 // The second profile changes both pieces of hosting data while leaving the
-// remote, backup directory, and verification behavior alone. The misleading
-// site.toml key is ignored: profile selection belongs to the deployment.
+// remote, backup directory, and verification behavior alone. It excludes
+// nothing, so a .htaccess the build carries travels with the sync and there
+// is no third pass for it. The misleading site.toml key is ignored: profile
+// selection belongs to the deployment.
 func TestSiteDeployPublicHTMLProfile(t *testing.T) {
-	stub := &deployStub{storePath: "/nix/store/aaa-site", verifyStatus: 200}
+	storePath := builtSite(t, map[string]string{".htaccess": "Header set Cache-Control no-cache\n"})
+	stub := &deployStub{storePath: storePath, verifyStatus: 200}
 	useDeployStub(t, stub)
 	useSiteHostingProfile(t, "public-html")
 	useSiteRepo(t, "domain = \"example.com\"\nhosting_profile = \"directadmin\"\n")
@@ -1295,20 +1424,14 @@ func TestSiteDeployPublicHTMLProfile(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0\nstderr: %s", code, errText)
 	}
-	want := []string{
-		"sync", "/nix/store/aaa-site", "shared:public_html/example.com",
-		"--backup-dir", "shared:deploy-trash/example.com",
-		"--verbose",
-		"--transfers", "2",
-		"--checkers", "2",
-		"--ftp-concurrency", "3",
-		"--check-first",
-	}
-	if fmt.Sprint(stub.syncArgs) != fmt.Sprint(want) {
-		t.Errorf("rclone args =\n%v\nwant\n%v", stub.syncArgs, want)
-	}
-	if hasArg(stub.syncArgs, "--filter-from") {
-		t.Errorf("rclone got --filter-from for a profile with no exclusions: %v", stub.syncArgs)
+	deployRuns(t, stub, [][]string{
+		passTail(false, "sync", storePath, "shared:public_html/example.com", "--backup-dir", "shared:deploy-trash/example.com"),
+		passTail(false, "copy", storePath, "shared:public_html/example.com", "--ignore-times"),
+	})
+	for _, run := range stub.syncRuns {
+		if hasArg(run, "--filter-from") {
+			t.Errorf("rclone got --filter-from for a profile with no exclusions: %v", run)
+		}
 	}
 	if stub.remoteConfigPath != configPath || stub.syncConfigPath != configPath {
 		t.Errorf("named config paths: preflight=%q sync=%q, want %q", stub.remoteConfigPath, stub.syncConfigPath, configPath)
@@ -1382,7 +1505,8 @@ func TestSiteDeployRejectsInvalidHostingProfileTableBeforeEffects(t *testing.T) 
 }
 
 func TestSiteDeployDryRun(t *testing.T) {
-	stub := &deployStub{storePath: "/nix/store/aaa-site", verifyStatus: 200}
+	storePath := builtSite(t, map[string]string{"index.html": "home\n", ".htaccess": "rules\n"})
+	stub := &deployStub{storePath: storePath, verifyStatus: 200}
 	useDeployStub(t, stub)
 	useSiteRepo(t, "domain = \"example.com\"\n")
 
@@ -1390,26 +1514,19 @@ func TestSiteDeployDryRun(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0\nstderr: %s", code, errText)
 	}
-	if stub.syncCalls != 1 {
-		t.Fatalf("rclone ran %d times, want 1", stub.syncCalls)
+	if stub.syncCalls != 3 {
+		t.Fatalf("rclone ran %d times, want 3", stub.syncCalls)
 	}
-	// --dry-run is the only difference from a real deploy's argv: the same
-	// connection budget applies to the listing a dry run does.
-	filter := argAfter(t, stub.syncArgs, "--filter-from")
-	want := []string{
-		"sync", "/nix/store/aaa-site", "shared:domains/example.com/public_html",
-		"--filter-from", filter,
-		"--backup-dir", "shared:deploy-trash/example.com",
-		"--verbose",
-		"--transfers", "2",
-		"--checkers", "2",
-		"--ftp-concurrency", "3",
-		"--check-first",
-		"--dry-run",
-	}
-	if fmt.Sprint(stub.syncArgs) != fmt.Sprint(want) {
-		t.Errorf("rclone args =\n%v\nwant\n%v", stub.syncArgs, want)
-	}
+	// --dry-run is the only difference from a real deploy's argv, on every
+	// pass: the same connection budget applies to the listing a dry run does,
+	// and a pass left out of the dry run would be a pass the report omits.
+	filter := argAfter(t, stub.syncRuns[0], "--filter-from")
+	docroot := "shared:domains/example.com/public_html"
+	deployRuns(t, stub, [][]string{
+		passTail(true, "sync", storePath, docroot, "--filter-from", filter, "--backup-dir", "shared:deploy-trash/example.com"),
+		passTail(true, "copy", storePath, docroot, "--filter-from", filter, "--ignore-times"),
+		passTail(true, "copyto", storePath+"/.htaccess", docroot+"/.htaccess", "--backup-dir", "shared:deploy-trash/example.com", "--ignore-times"),
+	})
 	if stub.verifyCalls != 0 {
 		t.Errorf("verification ran %d times on a dry run, want 0", stub.verifyCalls)
 	}
@@ -1476,21 +1593,78 @@ func TestSiteDeploySyncFailure(t *testing.T) {
 	}
 }
 
-func TestSiteDeployVerificationFailure(t *testing.T) {
+// A pass after the first can fail too, and the message names which one, so
+// the reader knows the sync landed and what is still missing.
+func TestSiteDeployLaterPassFailure(t *testing.T) {
 	tests := []struct {
-		name   string
-		status int
-		err    error
-		errHas string
+		name    string
+		files   map[string]string
+		failing int
+		runs    int
+		errHas  string
 	}{
-		{"not found", 404, nil, "returned 404, not 200"},
-		{"redirect is not a pass", 301, nil, "returned 301, not 200"},
-		{"unreachable", 0, errors.New("connection refused"), "could not be reached"},
+		{"copy", map[string]string{}, 2, 2, "rclone copy failed"},
+		{"copyto", map[string]string{".htaccess": "rules\n"}, 3, 3, "rclone copyto failed"},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			stub := &deployStub{storePath: "/nix/store/aaa-site", verifyStatus: test.status, verifyErr: test.err}
+			stub := &deployStub{storePath: builtSite(t, test.files), verifyStatus: 200}
+			useDeployStub(t, stub)
+			previousSync := siteSync
+			siteSync = func(configPath string, args []string) int {
+				stub.syncCalls++
+				stub.syncRuns = append(stub.syncRuns, args)
+				if stub.syncCalls == test.failing {
+					return 4
+				}
+				return 0
+			}
+			t.Cleanup(func() { siteSync = previousSync })
+			useSiteRepo(t, "domain = \"example.com\"\n")
+
+			_, errText, code := runAllod(t, "site", "deploy")
+			if code != 4 {
+				t.Errorf("exit code = %d, want 4", code)
+			}
+			if !strings.Contains(errText, test.errHas) {
+				t.Errorf("stderr does not contain %q\ngot: %q", test.errHas, errText)
+			}
+			if !strings.Contains(errText, "deployment to shared:domains/example.com/public_html did not complete") {
+				t.Errorf("stderr does not say the deployment did not complete\ngot: %q", errText)
+			}
+			if stub.syncCalls != test.runs {
+				t.Errorf("rclone ran %d times, want %d", stub.syncCalls, test.runs)
+			}
+			if stub.verifyCalls != 0 {
+				t.Errorf("verification ran %d times after a failed pass, want 0", stub.verifyCalls)
+			}
+		})
+	}
+}
+
+// Every case here deploys a build whose index.html is "new". A 200 alone is
+// not a pass any more: the page the deploy was meant to replace answered 200
+// too, so a served body that is not the built one fails the same way an
+// unreachable site does.
+func TestSiteDeployVerificationFailure(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		served string
+		err    error
+		errHas string
+	}{
+		{"not found", 404, "", nil, "returned 404, not 200"},
+		{"redirect is not a pass", 301, "", nil, "returned 301, not 200"},
+		{"unreachable", 0, "", errors.New("connection refused"), "could not be reached"},
+		{"old page still served", 200, "old", nil, "does not serve the build's index.html (3 bytes served, 3 bytes built)"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			storePath := builtSite(t, map[string]string{"index.html": "new"})
+			stub := &deployStub{storePath: storePath, verifyStatus: test.status, verifyBody: []byte(test.served), verifyErr: test.err}
 			useDeployStub(t, stub)
 			useSiteRepo(t, "domain = \"example.com\"\n")
 
@@ -1506,18 +1680,77 @@ func TestSiteDeployVerificationFailure(t *testing.T) {
 			if !strings.Contains(errText, "deployed, but") {
 				t.Errorf("stderr does not say the deploy happened\ngot: %q", errText)
 			}
-			if stub.syncCalls != 1 {
-				t.Errorf("rclone ran %d times, want 1", stub.syncCalls)
+			if stub.syncCalls != 2 {
+				t.Errorf("rclone ran %d times, want 2", stub.syncCalls)
 			}
 		})
 	}
 }
 
-// TestProbeSite exercises the real HTTP check rather than the seam, because
-// the one thing it has to get right — not following redirects — is a property
-// of the client the stub never runs.
-func TestProbeSite(t *testing.T) {
+// A build with no index.html at its root has nothing to compare the home
+// page with, so the status check stands alone and the output says so rather
+// than claiming a comparison that did not happen.
+func TestSiteDeployWithoutHomePageChecksStatusAlone(t *testing.T) {
+	storePath := builtSite(t, map[string]string{"style.css": "body{}\n"})
+	stub := &deployStub{storePath: storePath, verifyStatus: 200, verifyBody: []byte("whatever the host answers")}
+	useDeployStub(t, stub)
+	useSiteRepo(t, "domain = \"example.com\"\n")
+
+	out, errText, code := runAllod(t, "site", "deploy")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0\nstderr: %s", code, errText)
+	}
+	if want := "Verified: https://example.com/ returned 200; the build has no index.html to compare it with\n"; !strings.Contains(out, want) {
+		t.Errorf("stdout does not say the comparison was skipped\ngot: %q", out)
+	}
+}
+
+// A build shaped so that a pass could not do the right thing with it stops
+// the deploy before the first pass, not between passes.
+func TestSiteDeployRefusesMalformedBuild(t *testing.T) {
+	tests := []struct {
+		name    string
+		profile string
+		dir     string
+		errHas  string
+	}{
+		{"index.html is a directory", "directadmin", "index.html", "could not read"},
+		{"directadmin .htaccess is a directory", "directadmin", ".htaccess", "is not a regular file"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			storePath := builtSite(t, nil)
+			if err := os.Mkdir(filepath.Join(storePath, test.dir), 0755); err != nil {
+				t.Fatalf("could not create %s: %v", test.dir, err)
+			}
+			stub := &deployStub{storePath: storePath, verifyStatus: 200}
+			useDeployStub(t, stub)
+			useSiteHostingProfile(t, test.profile)
+			useSiteRepo(t, "domain = \"example.com\"\n")
+
+			_, errText, code := runAllod(t, "site", "deploy")
+			if code != 1 {
+				t.Errorf("exit code = %d, want 1", code)
+			}
+			if !strings.Contains(errText, test.errHas) {
+				t.Errorf("stderr does not contain %q\ngot: %q", test.errHas, errText)
+			}
+			if stub.syncCalls != 0 {
+				t.Errorf("rclone ran %d times on a malformed build, want 0", stub.syncCalls)
+			}
+		})
+	}
+}
+
+// TestFetchSite exercises the real HTTP check rather than the seam, because
+// the things it has to get right — not following redirects, and returning
+// the body the comparison needs — are properties of the client the stub
+// never runs.
+func TestFetchSite(t *testing.T) {
+	var cacheControl string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cacheControl = r.Header.Get("Cache-Control")
 		switch r.URL.Path {
 		case "/ok":
 			fmt.Fprint(w, "hello")
@@ -1532,25 +1765,32 @@ func TestProbeSite(t *testing.T) {
 	tests := []struct {
 		path string
 		code int
+		body string
 	}{
-		{"/ok", 200},
-		{"/moved", 301},
-		{"/gone", 404},
+		{"/ok", 200, "hello"},
+		{"/moved", 301, ""},
+		{"/gone", 404, ""},
 	}
 	for _, test := range tests {
-		code, err := probeSite(server.URL + test.path)
+		code, body, err := fetchSite(server.URL + test.path)
 		if err != nil {
-			t.Errorf("probeSite(%s) error = %v, want nil", test.path, err)
+			t.Errorf("fetchSite(%s) error = %v, want nil", test.path, err)
 			continue
 		}
 		if code != test.code {
-			t.Errorf("probeSite(%s) = %d, want %d", test.path, code, test.code)
+			t.Errorf("fetchSite(%s) = %d, want %d", test.path, code, test.code)
+		}
+		if test.body != "" && string(body) != test.body {
+			t.Errorf("fetchSite(%s) body = %q, want %q", test.path, body, test.body)
+		}
+		if cacheControl != "no-cache" {
+			t.Errorf("fetchSite(%s) sent Cache-Control %q, want no-cache", test.path, cacheControl)
 		}
 	}
 
 	server.Close()
-	if _, err := probeSite(server.URL + "/ok"); err == nil {
-		t.Error("probeSite on a closed server returned nil error")
+	if _, _, err := fetchSite(server.URL + "/ok"); err == nil {
+		t.Error("fetchSite on a closed server returned nil error")
 	}
 }
 

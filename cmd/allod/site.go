@@ -48,6 +48,14 @@ const siteRemoteName = "shared"
 
 const defaultSiteHostingProfile = "directadmin"
 
+// siteHtaccessName is the one file a profile's filter may exclude that a
+// site is nevertheless allowed to ship; siteHtaccessExclusion is the rule
+// that marks such a profile. See siteHostingProfile.excludesHtaccess.
+const (
+	siteHtaccessName      = ".htaccess"
+	siteHtaccessExclusion = "- /" + siteHtaccessName
+)
+
 // siteHostingProfileName is deployment-owned build configuration. A
 // site-enabled build can replace this string with:
 //
@@ -72,7 +80,10 @@ type siteHostingProfile struct {
 // DirectAdmin is the exact original behavior:
 //   - /.well-known/** holds ACME challenges. Deleting it breaks certificate
 //     renewal silently, weeks after the deploy that caused it.
-//   - /.htaccess is written by the hosting control panel, not by the build.
+//   - /.htaccess is written by the hosting control panel. Excluding it keeps
+//     the sync from deleting that file when the build carries none; a build
+//     that does carry one ships it in a pass of its own (see siteDeploy),
+//     because a filter rule applies to both sides of a sync.
 //   - /stats/** and /cgi-bin/** are created and owned by the host.
 //
 // The public-html layout is the concrete second deployment: its docroots sit
@@ -83,7 +94,7 @@ var siteHostingProfiles = []siteHostingProfile{
 		docrootPattern: "domains/<domain>/public_html",
 		deployFilterRules: []string{
 			"- /.well-known/**",
-			"- /.htaccess",
+			siteHtaccessExclusion,
 			"- /stats/**",
 			"- /cgi-bin/**",
 		},
@@ -213,6 +224,21 @@ func (profile siteHostingProfile) docroot(domain string) string {
 	return siteRemoteName + ":" + strings.Replace(profile.docrootPattern, siteDomainPlaceholder, domain, 1)
 }
 
+// excludesHtaccess reports whether the profile's filter keeps the sync away
+// from /.htaccess. The rule is there so a control-panel file survives a build
+// that ships none, but a filter applies to both sides of a sync, so on such a
+// profile a .htaccess the build does carry would never reach the docroot
+// either. siteDeploy ships it separately; a profile with no such rule already
+// ships it through the sync.
+func (profile siteHostingProfile) excludesHtaccess() bool {
+	for _, rule := range profile.deployFilterRules {
+		if rule == siteHtaccessExclusion {
+			return true
+		}
+	}
+	return false
+}
+
 // siteVerifyTimeout bounds the post-deploy HTTPS check.
 const siteVerifyTimeout = 15 * time.Second
 
@@ -230,7 +256,7 @@ var (
 	siteRemoteCheck = rcloneSiteRemoteCheck
 	siteBuild       = nixBuild
 	siteSync        = rcloneSync
-	siteVerify      = probeSite
+	siteVerify      = fetchSite
 )
 
 // init extends the 'site' namespace site_preview.go's init() already
@@ -544,24 +570,75 @@ func requireSiteRemote(configPath string) {
 	exit(siteRemoteFailureExitCode(result.status))
 }
 
-// probeSite reports the status of https://<domain>/ itself. Redirects are not
-// followed on purpose: a docroot that answers 301 has not been deployed to the
-// place the check is asking about, and following the hop would report the 200
-// of wherever it lands.
-func probeSite(url string) (int, error) {
+// siteVerifyBodyLimit bounds how much of the home page verification reads.
+// A page longer than this compares unequal to anything a static site builds
+// as its front page, which is the right answer.
+const siteVerifyBodyLimit = 8 << 20
+
+// fetchSite returns the status and body of https://<domain>/ itself. Redirects
+// are not followed on purpose: a docroot that answers 301 has not been
+// deployed to the place the check is asking about, and following the hop
+// would report the 200 of wherever it lands. The request asks every cache on
+// the way to revalidate, so the body is the docroot's current answer rather
+// than a copy of the page the deploy just replaced.
+func fetchSite(url string) (int, []byte, error) {
 	client := &http.Client{
 		Timeout: siteVerifyTimeout,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
-	response, err := client.Get(url)
+	request, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
+	}
+	request.Header.Set("Cache-Control", "no-cache")
+	request.Header.Set("Pragma", "no-cache")
+	response, err := client.Do(request)
+	if err != nil {
+		return 0, nil, err
 	}
 	defer response.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1<<20))
-	return response.StatusCode, nil
+	body, err := io.ReadAll(io.LimitReader(response.Body, siteVerifyBodyLimit))
+	if err != nil {
+		return 0, nil, err
+	}
+	return response.StatusCode, body, nil
+}
+
+// builtHomePage reads the build's root index.html, the page verification
+// compares with what https://<domain>/ serves after the deploy. A build with
+// none gets the status check alone, and the deploy's output says so; anything
+// unreadable at that name stops the deploy before the first pass rather than
+// after the last.
+func builtHomePage(storePath string) ([]byte, bool) {
+	path := filepath.Join(storePath, "index.html")
+	page, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil, false
+	}
+	if err != nil {
+		die(1, "could not read %s: %s", path, err)
+	}
+	return page, true
+}
+
+// builtHtaccess returns the path of the build's .htaccess, or "" when the
+// build carries none. Anything else at that name - a directory, say, which
+// copyto would happily upload as one - stops the deploy before the first pass.
+func builtHtaccess(storePath string) string {
+	path := filepath.Join(storePath, siteHtaccessName)
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return ""
+	}
+	if err != nil {
+		die(1, "could not read %s: %s", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		die(1, "%s is not a regular file; a site's .htaccess must be one", path)
+	}
+	return path
 }
 
 // siteDeployTransfers, siteDeployCheckers, and siteDeployFTPConcurrency bound
@@ -571,19 +648,21 @@ func probeSite(url string) (int, error) {
 // and --checkers. If you use --check-first then it just needs to be one more
 // than the maximum of --checkers and --transfers. So for concurrency 3 you'd
 // use --checkers 2 --transfers 2 --check-first or --checkers 1 --transfers
-// 1." The sync passes --check-first, so concurrency only has to be
+// 1." Every pass passes --check-first, so concurrency only has to be
 // max(transfers, checkers) + 1 = 3 rather than transfers + checkers + 1 = 5;
 // --check-first also means the listing phase - the phase that tripped the
 // connection limit - runs to completion before any file starts moving, at
 // the cost of holding the whole transfer list in memory first, which is
 // nothing for a static site.
 //
-// The cap is per rclone filesystem instance, not per deploy: '--backup-dir
+// The cap is per rclone filesystem instance, not per pass: '--backup-dir
 // shared:deploy-trash/<domain>' on the same remote is a second filesystem
 // instance with its own connection pool alongside the one syncing to the
-// docroot, so a deploy's worst case is two instances each opening up to
+// docroot, so a pass's worst case is two instances each opening up to
 // siteDeployFTPConcurrency connections - up to 2*siteDeployFTPConcurrency = 6
-// connections total, not siteDeployFTPConcurrency alone. The values are
+// connections total, not siteDeployFTPConcurrency alone. The passes run one
+// after another, so a deploy never holds more than one pass's worth. The
+// values are
 // small and fixed rather than tuned to any one host: shared hosting commonly
 // allows only a handful of simultaneous connections per client, and what
 // matters is that the total stays under that, not the exact number.
@@ -654,19 +733,82 @@ func siteDeploy(args []string) {
 	}
 
 	docroot := profile.docroot(config.domain)
+	trash := siteRemoteName + ":deploy-trash/" + config.domain
+	// Both reads settle the build's shape before anything is transferred, so
+	// a malformed build stops the deploy here rather than between passes.
+	homePage, hasHomePage := builtHomePage(storePath)
+	htaccess := ""
+	if profile.excludesHtaccess() {
+		htaccess = builtHtaccess(storePath)
+	}
 
 	fmt.Fprintf(stdout, "Domain: %s\nSource: %s\nTarget: %s\n", config.domain, storePath, docroot)
 
-	syncArgs := []string{
-		"sync", storePath, docroot,
-	}
+	var filterArgs []string
 	if len(profile.deployFilterRules) > 0 {
 		filter := writeDeployFilter(profile.deployFilterRules)
 		defer os.Remove(filter)
-		syncArgs = append(syncArgs, "--filter-from", filter)
+		filterArgs = []string{"--filter-from", filter}
 	}
-	syncArgs = append(syncArgs,
-		"--backup-dir", siteRemoteName+":deploy-trash/"+config.domain,
+	pass := func(args ...string) {
+		runDeployPass(configPath, deployPassArgs(dryRun, args...), dryRun, docroot)
+	}
+
+	// Pass one brings the docroot's file list into line with the build's.
+	// Files the build no longer carries, and files whose size changed, are
+	// moved to the trash rather than destroyed.
+	syncArgs := append([]string{"sync", storePath, docroot}, filterArgs...)
+	pass(append(syncArgs, "--backup-dir", trash)...)
+
+	// Pass two uploads every file again, unconditionally. FTP exposes no
+	// checksums, so pass one decides by size and modtime alone, and the site
+	// builder normalizes every mtime to the epoch to keep its output
+	// reproducible: an edit that keeps a file's length - a moved tag, a
+	// swapped word, a flipped digit - looked identical to pass one and never
+	// reached the server. There is deliberately no --backup-dir here: with
+	// every file transferring, the trash would take a full copy of the site
+	// on every deploy.
+	copyArgs := append([]string{"copy", storePath, docroot}, filterArgs...)
+	pass(append(copyArgs, "--ignore-times")...)
+
+	// Pass three ships the build's .htaccess on a profile whose filter keeps
+	// the sync away from it. A build that carries none leaves the docroot's
+	// alone, exactly as the filter always has.
+	if htaccess != "" {
+		pass("copyto", htaccess, docroot+"/"+siteHtaccessName, "--backup-dir", trash, "--ignore-times")
+	}
+
+	if dryRun {
+		fmt.Fprintf(stdout, "Dry run: %s was not modified\n", docroot)
+		return
+	}
+
+	url := "https://" + config.domain + "/"
+	status, body, err := siteVerify(url)
+	if err != nil {
+		die(siteVerifyExit, "deployed, but %s could not be reached: %s", url, err)
+	}
+	if status != 200 {
+		die(siteVerifyExit, "deployed, but %s returned %d, not 200", url, status)
+	}
+	if !hasHomePage {
+		fmt.Fprintf(stdout, "Verified: %s returned 200; the build has no index.html to compare it with\n", url)
+		return
+	}
+	// A 200 alone proves nothing about the transfer: the page the deploy was
+	// meant to replace answered 200 just as well.
+	if !bytes.Equal(body, homePage) {
+		die(siteVerifyExit, "deployed, but %s does not serve the build's index.html (%d bytes served, %d bytes built)", url, len(body), len(homePage))
+	}
+	fmt.Fprintf(stdout, "Verified: %s serves the build's index.html\n", url)
+}
+
+// deployPassArgs finishes one pass's rclone argument list with what every
+// pass shares: verbose logging, the connection budget, --check-first, and
+// --dry-run last when asked for. It copies args rather than growing them in
+// place so the caller's slice is untouched.
+func deployPassArgs(dryRun bool, args ...string) []string {
+	args = append(append([]string(nil), args...),
 		"--verbose",
 		"--transfers", strconv.Itoa(siteDeployTransfers),
 		"--checkers", strconv.Itoa(siteDeployCheckers),
@@ -674,30 +816,24 @@ func siteDeploy(args []string) {
 		"--check-first",
 	)
 	if dryRun {
-		syncArgs = append(syncArgs, "--dry-run")
+		args = append(args, "--dry-run")
 	}
-	if status := siteSync(configPath, syncArgs); status != 0 {
-		// A dry run writes nothing, so reporting it as a possibly partial
-		// update sends the reader looking for damage that cannot exist.
-		if dryRun {
-			die(status, "rclone dry run failed; %s was not modified", docroot)
-		}
-		die(status, "rclone sync failed; deployment to %s did not complete", docroot)
-	}
-	if dryRun {
-		fmt.Fprintf(stdout, "Dry run: %s was not modified\n", docroot)
+	return args
+}
+
+// runDeployPass runs one rclone pass and stops the deploy when it fails,
+// naming the pass so the reader knows how far the deploy got. A dry run
+// writes nothing, so reporting it as a possibly partial update would send
+// the reader looking for damage that cannot exist.
+func runDeployPass(configPath string, args []string, dryRun bool, docroot string) {
+	status := siteSync(configPath, args)
+	if status == 0 {
 		return
 	}
-
-	url := "https://" + config.domain + "/"
-	code, err := siteVerify(url)
-	if err != nil {
-		die(siteVerifyExit, "deployed, but %s could not be reached: %s", url, err)
+	if dryRun {
+		die(status, "rclone dry run failed; %s was not modified", docroot)
 	}
-	if code != 200 {
-		die(siteVerifyExit, "deployed, but %s returned %d, not 200", url, code)
-	}
-	fmt.Fprintf(stdout, "Verified: %s returned %d\n", url, code)
+	die(status, "rclone %s failed; deployment to %s did not complete", args[0], docroot)
 }
 
 // siteDeployDetail, siteCheckDetail, and siteConfigDetail are the three
@@ -729,12 +865,30 @@ default value.
 
 Each profile's exclusion filter belongs to this command rather than to the site
 repo. A non-empty filter is written to a temporary file per run and passed as
---filter-from, so every site on the deployment gets the same list. Replaced and
-deleted files are moved to shared:deploy-trash/<domain> rather than destroyed.
-The sync bounds each rclone filesystem instance to a fixed number of
-simultaneous FTP connections; because the docroot and the backup directory
-are two such instances, a deploy opens at most twice that many, staying
-under a shared host's per-client connection limit instead of tripping it.
+--filter-from to every rclone pass, so every site on the deployment gets the
+same list.
+
+A deploy is three rclone passes over the FTP remote. First, 'sync' brings the
+docroot's file list into line with the build: files the build no longer
+carries, and files whose size changed, are moved to shared:deploy-trash/<domain>
+rather than destroyed. Second, 'copy --ignore-times' uploads every file in the
+build again. FTP exposes no checksums, so the sync decides by size and modtime
+alone, and the site builder normalizes every mtime to the epoch to keep its
+output reproducible: an edit that keeps a file's length - a moved tag, a
+swapped word, a flipped digit - looks identical to the sync and never reaches
+the server. Every deploy therefore transfers the whole site; these sites are a
+few dozen small files. The trash receives only what the sync moved, never a
+copy of every file, so a file replaced by one of the same length is overwritten
+in place and not kept. Third, on a profile whose filter excludes /.htaccess -
+the directadmin layout, where the control panel writes that file - a .htaccess
+the build carries is copied over the docroot's in a pass of its own, and the
+docroot's previous copy goes to the trash. A site on that layout that ships a
+.htaccess in static/ therefore owns the file; a build that carries none leaves
+the docroot's alone, exactly as the filter always has. Every pass bounds each
+rclone filesystem instance to a fixed number of simultaneous FTP connections;
+because the docroot and the backup directory are two such instances, a pass
+opens at most twice that many, staying under a shared host's per-client
+connection limit instead of tripping it.
 
 site.toml still has exactly one key and cannot select the hosting profile:
 
@@ -742,11 +896,15 @@ site.toml still has exactly one key and cannot select the hosting profile:
 
 Unknown keys are ignored, so a file written for a later version still deploys.
 
-'--dry-run' passes --dry-run to rclone: the build still runs and rclone reports
-the changes it would make, but the docroot is untouched and the HTTPS check is
-skipped. Without it, deploy checks that https://<domain>/ answers 200 and exits
-7 if it does not, which distinguishes a site that did not deploy from one that
-deployed and is not serving.
+'--dry-run' passes --dry-run to every rclone pass: the build still runs and
+rclone reports what each pass would transfer, but the docroot is untouched and
+the HTTPS check is skipped. Without it, deploy fetches https://<domain>/ and
+compares the page with the build's index.html byte for byte, so a transfer
+that did not land fails the deploy instead of passing on a 200 the old page
+answered just as well; a build with no index.html at its root gets the 200
+check alone, and the output says so. Either failure exits 7, which
+distinguishes a site that did not deploy from one that deployed and is not
+serving what was built.
 `
 
 const siteCheckDetail = `'check' opens the 'shared' remote without reading a site repo, building, syncing,
