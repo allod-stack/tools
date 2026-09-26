@@ -668,7 +668,7 @@ func printRebuildCommand(w io.Writer, deployCheckout, system, kind string) {
 	case "nixos-host":
 		fmt.Fprintf(w, "   sudo nixos-rebuild switch --flake ~/work/%s#%s\n", deployCheckout, system)
 	case "dev-vm", "privacy-vm", "service-vm":
-		fmt.Fprintf(w, "   rebuild-vm-from-host %s\n", system)
+		fmt.Fprintf(w, "   rebuild-vm %s\n", system)
 	default:
 		die(1, "unsupported target kind '%s' for %s", kind, system)
 	}

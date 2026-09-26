@@ -610,7 +610,7 @@ func TestSecretRotateDryRunPrintsStepsWithoutWriting(t *testing.T) {
 		`as "rotate shared.rotate Forgejo token" and pushes agent/landing to origin; merging stays your act.`,
 		"nix flake update secrets",
 		"sudo nixos-rebuild switch --flake ~/work/allod/deploy#fixture-host",
-		"rebuild-vm-from-host dev-a",
+		"rebuild-vm dev-a",
 		"GIT_TERMINAL_PROMPT=0 git ls-remote https://example.test/fixture/repo.git HEAD",
 		"Revocation gate",
 	} {
