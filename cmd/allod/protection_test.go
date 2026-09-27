@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -97,6 +98,13 @@ func writeCaseBranchList(t *testing.T, home string, testCase protectionCase) {
 	if err := os.MkdirAll(config, 0755); err != nil {
 		t.Fatal(err)
 	}
+	target := filepath.Join(config, "protected-branches")
+	if testCase.entries == "@directory" {
+		if err := os.MkdirAll(target, 0755); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
 	var list strings.Builder
 	if testCase.entries != "-" {
 		for _, entry := range strings.Split(testCase.entries, ";") {
@@ -107,9 +115,36 @@ func writeCaseBranchList(t *testing.T, home string, testCase protectionCase) {
 			list.WriteString(path + " " + branch + "\n")
 		}
 	}
-	if err := os.WriteFile(filepath.Join(config, "protected-branches"), []byte(list.String()), 0644); err != nil {
+	if err := os.WriteFile(target, []byte(list.String()), 0644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// captureCliExit runs a rail helper that ends the program through die and reports
+// the exit code it asked for and what it wrote to stderr.
+func captureCliExit(t *testing.T, run func()) (int, string) {
+	t.Helper()
+	var buffer bytes.Buffer
+	previous := stderr
+	stderr = &buffer
+	defer func() { stderr = previous }()
+
+	code := 0
+	func() {
+		defer func() {
+			recovered := recover()
+			if recovered == nil {
+				return
+			}
+			if wanted, ok := recovered.(cliExit); ok {
+				code = wanted.code
+				return
+			}
+			panic(recovered)
+		}()
+		run()
+	}()
+	return code, buffer.String()
 }
 
 func initCaseRepo(t *testing.T, dir, branch string) {
@@ -186,6 +221,17 @@ func TestLookupProtectionSharedCases(t *testing.T) {
 			t.Setenv("HOME", home)
 			dir := buildProtectionFixture(t, home, testCase)
 
+			if testCase.verdict == "error" {
+				code, message := captureCliExit(t, func() { lookupProtection(dir) })
+				if code == 0 {
+					t.Fatalf("lookupProtection returned instead of failing; stderr %q", message)
+				}
+				if !strings.Contains(message, "protected-branches") {
+					t.Fatalf("failure does not name the branch list: %q", message)
+				}
+				return
+			}
+
 			found, ok := lookupProtection(dir)
 			verdict := "unprotected"
 			if ok && found.branch == testCase.branch {
@@ -211,6 +257,41 @@ func TestLookupProtectionSharedCases(t *testing.T) {
 				t.Error("identity is empty; the refusal cannot name the repository")
 			}
 		})
+	}
+}
+
+// A line longer than bufio.Scanner's default token must not swallow the entries
+// behind it: the rail would read a shorter list than the hook's awk does.
+func TestReadBranchListKeepsEntriesBehindALongLine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "protected-branches")
+	content := "# " + strings.Repeat("x", 200*1024) + "\nwork/acme/widget master\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := readBranchList(path)
+	if err != nil {
+		t.Fatalf("readBranchList: %v", err)
+	}
+	if len(entries) != 1 || entries[0].path != "work/acme/widget" || entries[0].branch != "master" {
+		t.Fatalf("entries = %+v, want one work/acme/widget master entry", entries)
+	}
+}
+
+func TestReadBranchListAbsentFileIsNoPolicy(t *testing.T) {
+	entries, err := readBranchList(filepath.Join(t.TempDir(), "absent"))
+	if err != nil || entries != nil {
+		t.Fatalf("readBranchList on an absent file = (%+v, %v), want (nil, nil)", entries, err)
+	}
+}
+
+func TestReadBranchListUnreadableFileIsAnError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "protected-branches")
+	if err := os.MkdirAll(path, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readBranchList(path); err == nil {
+		t.Fatal("readBranchList on a directory returned no error")
 	}
 }
 

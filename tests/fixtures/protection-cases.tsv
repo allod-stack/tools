@@ -8,7 +8,8 @@
 #
 # Tab-separated. Columns:
 #   name      case id, also the fixture directory name
-#   entries   ';'-separated '<path>=<branch>' lines of the list file, '-' for empty
+#   entries   ';'-separated '<path>=<branch>' lines of the list file, '-' for an
+#             empty file, '@directory' for a list path that cannot be read
 #   origin    origin remote URL, '-' for a repository with no origin
 #   checkout  $HOME-relative path of the repository under test; under the
 #             'submodule' layout its last component is the submodule's path
@@ -17,9 +18,10 @@
 #   home      plain, symlink ($HOME is a symlink to the real directory), or
 #             trailing-slash ($HOME ends in '/')
 #   branch    the branch under test
-#   verdict   unprotected, protected (an entry matches the checkout path), or
+#   verdict   unprotected, protected (an entry matches the checkout path),
 #             mismatch (an entry matches the origin identity while none matches
-#             the path, so the checkout is misplaced)
+#             the path, so the checkout is misplaced), or error (the rail must
+#             stop and name the list file)
 #   expected  on a mismatch, the entry path the refusal must name; '-' otherwise
 #
 # The verdict is the branch-list answer, not what each rail then does with it:
@@ -52,3 +54,4 @@ second-entry-remote-matches	work/other/gadget=main;work/acme/widget=master	https
 path-entry-wins	work/flat-widget=main;work/acme/widget=master	https://forge.example/acme/widget.git	work/flat-widget	plain	plain	main	protected	-
 path-entry-suppresses-remote	work/flat-widget=main;work/acme/widget=master	https://forge.example/acme/widget.git	work/flat-widget	plain	plain	master	unprotected	-
 empty-list	-	https://forge.example/acme/widget.git	work/acme/widget	plain	plain	master	unprotected	-
+unreadable-list	@directory	https://forge.example/acme/widget.git	work/acme/widget	plain	plain	master	error	-

@@ -2,7 +2,9 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -167,20 +169,43 @@ func repoLookupKey(dir string) (string, bool) {
 // repository the line is about, and the branch it constrains.
 type branchListEntry struct{ path, branch string }
 
-func readBranchList(path string) []branchListEntry {
+// branchListLineLimit bounds one line of a branch list. bufio.Scanner's default
+// is 64 KiB, and a line over the limit ends the scan: without this and the
+// scanner.Err check below, a long line would hide every entry behind it while
+// the hook's awk went on reading them.
+const branchListLineLimit = 1 << 20
+
+func readBranchList(path string) ([]branchListEntry, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return nil
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
 	}
 	defer file.Close()
 	var entries []branchListEntry
 	scanner := bufio.NewScanner(file)
+	scanner.Buffer(nil, branchListLineLimit)
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
 		if len(fields) < 2 || strings.HasPrefix(fields[0], "#") {
 			continue
 		}
 		entries = append(entries, branchListEntry{path: fields[0], branch: fields[1]})
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return entries, nil
+}
+
+// branchList is readBranchList for a rail: an absent list is no policy on this
+// machine, but one that is present and unreadable is never an absence of policy.
+func branchList(path string) []branchListEntry {
+	entries, err := readBranchList(path)
+	if err != nil {
+		die(1, "cannot read the branch list: %v; fix or remove that file before continuing", err)
 	}
 	return entries
 }
@@ -232,7 +257,7 @@ func remoteMatches(entryPath, identity string) bool {
 // tests/fixtures/protection-cases.tsv is what keeps the two agreeing.
 func lookupProtection(dir string) (protection, bool) {
 	actual := identityPath(dir)
-	entries := readBranchList(filepath.Join(homeDir(), ".config", "git", "protected-branches"))
+	entries := branchList(filepath.Join(homeDir(), ".config", "git", "protected-branches"))
 	for _, entry := range entries {
 		if entry.path == actual {
 			return protection{branch: entry.branch, actual: actual}, true

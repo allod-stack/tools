@@ -237,6 +237,12 @@ fi
 
 write_branch_list() {
   local target="$1" entries="$2" entry
+  if [ "$entries" = "@directory" ]; then
+    rm -f "$target"
+    mkdir -p "$target"
+    return 0
+  fi
+  rm -rf "$target"
   : > "$target"
   if [ "$entries" = "-" ]; then
     return 0
@@ -381,6 +387,16 @@ while IFS=$'\t' read -r -u 3 name entries origin checkout layout home_kind branc
         fail "case $name: block names the actual path" "stderr:" "$(cat "$test_stderr")"
       fi
       pass "case $name: pre-commit blocked, naming both paths"
+      ;;
+    error)
+      if [ "$case_status" -eq 0 ]; then
+        fail "case $name: pre-commit fails on an unreadable branch list" \
+          "hook allowed the commit"
+      fi
+      if ! grep -q "protected-branches" "$test_stderr"; then
+        fail "case $name: the failure names the branch list" "stderr:" "$(cat "$test_stderr")"
+      fi
+      pass "case $name: pre-commit failed loudly, naming the branch list"
       ;;
     *)
       fail "case $name: verdict is a known word" "unknown verdict: $verdict"
