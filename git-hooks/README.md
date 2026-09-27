@@ -21,18 +21,27 @@ Also blocks non-fast-forward (force) pushes on `agent/*` and active PR branches.
 ### How a repository is recognised
 
 `protected-branches` and `signing-required-branches` are keyed on the repository
-the checkout belongs to — its path relative to `$HOME` — so a linked worktree
-resolves to its main repository rather than to its own directory, and the
-policies apply inside worktrees as they do in the checkout they came from.
+the checkout belongs to, as a path relative to `$HOME`. That repository is the
+linked worktree's main checkout rather than the worktree's own directory, so the
+policies apply inside a worktree as they do in the checkout it came from; and it
+is the submodule or `--separate-git-dir` checkout itself, neither of which keeps
+its git directory beside its worktree. `$HOME` is resolved to its physical path
+first, because git reports resolved ones. A repository may have several entries,
+one per branch, and every branch they name is protected.
 
 When no entry names that path but one names the repository `origin` points at,
 the checkout is somewhere its entry does not put it. That is a misconfiguration,
 not an absence of protection: the hook blocks that entry's branch anyway and
 names the expected and the actual path beside it. An entry matches the origin
-when its path is the remote's `owner/repo` or ends in `/owner/repo`, so
-`work/allod/profiles` answers for `allod/profiles` while `work/xallod/profiles`
-does not. A repository with no `origin`, or whose `origin` matches no entry,
-stays unprotected and silent.
+when its path is the remote's `owner/repo` or ends in `/owner/repo`, ignoring
+case because the forge does, so `work/allod/profiles` answers for
+`Allod/Profiles` while `work/xallod/profiles` answers for neither. A repository
+with no `origin`, or whose `origin` matches no entry, stays unprotected and
+silent.
+
+A branch list that is absent means no policy on this machine. One that is
+present and cannot be read is an error: the hook refuses the operation and names
+the file, rather than reading it as an absence of policy.
 
 `allod change begin` and `allod change record` apply the same rule and refuse a
 misplaced checkout outright, on every branch, with exit code 8.
