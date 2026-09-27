@@ -165,6 +165,15 @@ protected repo has no legitimate in-place change, so it refuses instead.
 cd "$(allod change begin ~/work/allod/memory)"
 ```
 
+`record` refuses two situations rather than committing something wrong. If
+the checkout was switched to a different branch after `begin` set it up —
+another agent's `git switch`, say — `record` names the branch it expected and
+the branch that is actually checked out, and refuses. And with no `--files`
+named, `record` normally stages every tracked change; that is safe in a
+`begin -d` worktree, which belongs to one agent alone, but in a shared
+checkout it could sweep in another agent's edit, so there `record` lists the
+unnamed changed paths and refuses — pass `--files` to say what to commit.
+
 ### Reclaiming worktrees
 
 `allod change list` prints one tab-separated row per linked worktree — repo,

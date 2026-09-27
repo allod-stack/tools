@@ -140,7 +140,13 @@ state — where the state is the one thing standing between that worktree and
 '--files a --files b' both stage a and b. It stops at the next option, so it
 can go anywhere in the line; pass a path that begins with '-' after '--',
 which ends option parsing. With no path named, record stages every tracked
-change — in a shared checkout, that includes another agent's.
+change — safe in a worktree from 'begin -d', which belongs to one agent
+alone, but in a shared checkout that would include another agent's, so there
+record refuses and names the paths; pass --files to say what to stage.
+
+'record' also refuses if the checkout was moved: 'begin' remembers the branch
+it created, and if something switched the checkout to a different branch
+since, record names both branches and refuses to commit onto the wrong one.
 `
 
 const patchUsageText = `Usage: allod patch <command> [options]

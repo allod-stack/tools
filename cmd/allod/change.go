@@ -417,9 +417,35 @@ func changeRecord(args []string) {
 	}
 	repo := resolveGitRepo("")
 	branch := currentBranch(repo)
+
+	// The handoff file 'begin' (and '--resume') write into the private
+	// git-dir names the branch it created there. Its absence means 'begin'
+	// was never called for this checkout, which is the in-place default-
+	// branch flow, so record proceeds exactly as it always has.
+	gitDir, ok := gitOutput(repo, "rev-parse", "--path-format=absolute", "--git-dir")
+	if !ok {
+		exit(1)
+	}
+	if handoff, err := os.ReadFile(filepath.Join(gitDir, "allod-change-branch")); err == nil {
+		if expected := strings.TrimSpace(string(handoff)); expected != branch {
+			die(3, "checkout '%s' now has branch '%s' checked out, but 'allod change begin' handed out branch '%s'; the checkout was moved after begin ran, so record refuses to commit into the wrong branch", repo, branch, expected)
+		}
+	}
+
 	if protected, ok := protectedBranch(repo); ok && branch == protected {
 		die(2, "refusing to commit directly to protected branch '%s'; run 'allod change begin' first", branch)
 	}
+
+	// Staging a bare 'git add -u' sweeps every tracked modification, which is
+	// safe only inside a linked worktree, where the tree belongs to one
+	// agent by construction. In the main checkout, where a concurrent agent's
+	// edit could be swept, an unnamed tracked change is refused instead.
+	if len(files) == 0 && mainRepoDir(repo) == repo {
+		if diff, ok := gitOutput(repo, "diff", "--name-only"); ok && diff != "" {
+			die(7, "refusing to stage unnamed tracked changes in a shared checkout: %s; use --files to name what to record", strings.ReplaceAll(diff, "\n", ", "))
+		}
+	}
+
 	if len(files) > 0 {
 		gitArgs := append([]string{"add", "--"}, files...)
 		if status := gitInherit(repo, gitArgs...); status != 0 {

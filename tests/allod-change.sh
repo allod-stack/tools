@@ -816,7 +816,7 @@ repo="$HOME/work/record-open"
 init_repo "$repo" master
 git -C "$repo" checkout -q -b feature
 printf 'changed\n' > "$repo/tracked.txt"
-capture record_in_repo "$repo" -m "record nonprotected"
+capture record_in_repo "$repo" -m "record nonprotected" -f tracked.txt
 assert_status 0 "record commits and pushes non-protected branch"
 remote_has_branch "$repo" feature &&
   pass "record creates remote branch for non-protected branch" ||
@@ -846,6 +846,65 @@ git -C "$repo" diff --cached --quiet &&
   pass "record leaves index untouched when protected branch is refused" ||
   fail "record leaves index untouched when protected branch is refused"
 
+# A worktree from 'begin -d' carries a handoff file naming the branch it was
+# given. If something switches that checkout to a different branch, record
+# refuses to commit onto whatever HEAD now points at instead of guessing.
+repo="$HOME/work/record-moved-checkout"
+init_repo "$repo" master
+desc="${RUN_ID}-moved-checkout"
+path=$(begin_worktree "$desc" "$repo")
+git -C "$path" switch -q -c some/other-branch
+printf 'changed\n' > "$path/tracked.txt"
+status_before=$(git -C "$path" status --porcelain)
+head_before=$(git -C "$path" rev-parse HEAD)
+capture record_in_repo "$path" -m "moved checkout"
+assert_status 3 "record refuses a checkout moved off the branch begin handed out"
+assert_contains "$CAPTURE_OUTPUT" "agent/$desc" "record names the branch begin handed out"
+assert_contains "$CAPTURE_OUTPUT" "some/other-branch" "record names the branch actually checked out"
+assert_equal "$(git -C "$path" status --porcelain)" "$status_before" \
+  "record leaves a moved checkout's working tree unchanged"
+assert_equal "$(git -C "$path" rev-parse HEAD)" "$head_before" \
+  "record makes no commit in a moved checkout"
+
+# A main checkout (no handoff file, so begin -d was never called for it) has
+# no agent boundary around it, so an unnamed tracked change might belong to
+# another agent. Without --files, record refuses instead of sweeping it in.
+repo="$HOME/work/record-sweep-refused"
+init_repo "$repo" master
+printf 'changed\n' > "$repo/tracked.txt"
+head_before=$(git -C "$repo" rev-parse HEAD)
+capture record_in_repo "$repo" -m "sweep refused"
+assert_status 7 "record refuses to sweep an unnamed tracked change in a main checkout"
+assert_contains "$CAPTURE_OUTPUT" "tracked.txt" "record names the swept path it refuses to stage"
+assert_contains "$CAPTURE_OUTPUT" "--files" "record points at --files"
+git -C "$repo" diff --cached --quiet &&
+  pass "record stages nothing when the sweep is refused" ||
+  fail "record stages nothing when the sweep is refused" "$(git -C "$repo" diff --cached --name-only)"
+assert_equal "$(git -C "$repo" rev-parse HEAD)" "$head_before" \
+  "record makes no commit when the sweep is refused"
+
+# Naming the file is the one required argument the sweep refusal adds, and it
+# still records normally.
+repo="$HOME/work/record-sweep-named"
+init_repo "$repo" master
+printf 'changed\n' > "$repo/tracked.txt"
+capture record_in_repo "$repo" -m "sweep named" --files tracked.txt
+assert_status 0 "record commits a named file in a main checkout"
+assert_equal "$(git -C "$repo" log -1 --format=%s)" "sweep named" \
+  "record --files commit uses the given message"
+
+# Inside a linked worktree the tree belongs to one agent by construction, so
+# the sweep refusal does not apply there and 'git add -u' stays the default.
+repo="$HOME/work/record-sweep-worktree"
+init_repo "$repo" master
+desc="${RUN_ID}-sweep-worktree"
+path=$(begin_worktree "$desc" "$repo")
+printf 'changed\n' > "$path/tracked.txt"
+capture record_in_repo "$path" -m "worktree sweep unaffected"
+assert_status 0 "record still stages tracked modifications in a worktree with no --files"
+assert_equal "$(git -C "$path" log -1 --format=%s)" "worktree sweep unaffected" \
+  "record commits the worktree's swept change"
+
 repo="$HOME/work/record-detached"
 init_repo "$repo" master
 git -C "$repo" checkout -q --detach
@@ -862,7 +921,7 @@ repo="$HOME/work/record-empty-message"
 init_repo "$repo" master
 git -C "$repo" checkout -q -b empty-message
 printf 'changed\n' > "$repo/tracked.txt"
-capture record_in_repo "$repo" -m ""
+capture record_in_repo "$repo" -m "" -f tracked.txt
 assert_status 1 "record rejects empty commit message"
 
 repo="$HOME/work/record-files"
@@ -959,20 +1018,23 @@ assert_equal "$(git -C "$repo" rev-parse HEAD)" "$head_before" \
   "record commits nothing when an option is missing its value"
 
 # A bare '--' ends option parsing and names nothing. Unlike an option missing
-# its value, that is not an error: it leaves the 'git add -u' default in force,
-# exactly as omitting the file flags entirely would.
+# its value, that is not an error: it leaves the 'git add -u' default in
+# force, exactly as omitting the file flags entirely would. That default only
+# survives in a worktree now that a main checkout refuses an unnamed sweep,
+# so this runs inside one.
 repo="$HOME/work/record-bare-dashdash"
 init_repo "$repo" master
-git -C "$repo" checkout -q -b bare-dashdash
-printf 'one\n' > "$repo/file1.txt"
-printf 'two\n' > "$repo/file2.txt"
-git -C "$repo" add file1.txt file2.txt
-git -C "$repo" commit -qm "add tracked files"
-printf 'one changed\n' > "$repo/file1.txt"
-printf 'two changed\n' > "$repo/file2.txt"
-capture record_in_repo "$repo" -m "bare dashdash" --
+desc="${RUN_ID}-bare-dashdash"
+path=$(begin_worktree "$desc" "$repo")
+printf 'one\n' > "$path/file1.txt"
+printf 'two\n' > "$path/file2.txt"
+git -C "$path" add file1.txt file2.txt
+git -C "$path" commit -qm "add tracked files"
+printf 'one changed\n' > "$path/file1.txt"
+printf 'two changed\n' > "$path/file2.txt"
+capture record_in_repo "$path" -m "bare dashdash" --
 assert_status 0 "record accepts a bare -- with no path"
-files=$(changed_files_in_head "$repo")
+files=$(changed_files_in_head "$path")
 assert_contains "$files" "file1.txt" "bare -- falls back to add -u for the first file"
 assert_contains "$files" "file2.txt" "bare -- falls back to add -u for the second file"
 
@@ -992,19 +1054,23 @@ files=$(changed_files_in_head "$repo")
 assert_contains "$files" "file1.txt" "record keeps the --files list when -- follows it"
 assert_contains "$files" "-dash.txt" "record stages the path named after --"
 
+# The 'git add -u' default without --files only survives in a worktree, whose
+# tree belongs to one agent by construction; a main checkout now refuses the
+# same unnamed sweep (covered below), so this runs inside a worktree.
 repo="$HOME/work/record-add-u"
 init_repo "$repo" master
-git -C "$repo" checkout -q -b add-u
-printf 'one\n' > "$repo/file1.txt"
-printf 'two\n' > "$repo/file2.txt"
-git -C "$repo" add file1.txt file2.txt
-git -C "$repo" commit -qm "add tracked files"
-printf 'one changed\n' > "$repo/file1.txt"
-printf 'two changed\n' > "$repo/file2.txt"
-printf 'new\n' > "$repo/untracked.txt"
-capture record_in_repo "$repo" -m "tracked changes"
-assert_status 0 "record without -f stages tracked modifications"
-files=$(changed_files_in_head "$repo")
+desc="${RUN_ID}-add-u"
+path=$(begin_worktree "$desc" "$repo")
+printf 'one\n' > "$path/file1.txt"
+printf 'two\n' > "$path/file2.txt"
+git -C "$path" add file1.txt file2.txt
+git -C "$path" commit -qm "add tracked files"
+printf 'one changed\n' > "$path/file1.txt"
+printf 'two changed\n' > "$path/file2.txt"
+printf 'new\n' > "$path/untracked.txt"
+capture record_in_repo "$path" -m "tracked changes"
+assert_status 0 "record without -f stages tracked modifications in a worktree"
+files=$(changed_files_in_head "$path")
 assert_contains "$files" "file1.txt" "record add -u includes first tracked file"
 assert_contains "$files" "file2.txt" "record add -u includes second tracked file"
 assert_not_contains "$files" "untracked.txt" "record add -u excludes untracked file"
@@ -1015,7 +1081,7 @@ good_remote=$(git -C "$repo" remote get-url origin)
 git -C "$repo" checkout -q -b retry
 printf 'retry\n' > "$repo/tracked.txt"
 git -C "$repo" remote set-url origin "$TMP/missing-remote.git"
-capture record_in_repo "$repo" -m "retry push"
+capture record_in_repo "$repo" -m "retry push" -f tracked.txt
 [[ "$CAPTURE_STATUS" -ne 0 ]] || fail "record first push can fail after commit" "$CAPTURE_OUTPUT"
 git -C "$repo" remote set-url origin "$good_remote"
 capture record_in_repo "$repo" -m "retry push ignored"
@@ -1030,7 +1096,7 @@ git -C "$repo" checkout -q -b stacked
 printf 'first\n' > "$repo/tracked.txt"
 git -C "$repo" commit -qam "first unpushed"
 printf 'second\n' > "$repo/tracked.txt"
-capture record_in_repo "$repo" -m "second unpushed"
+capture record_in_repo "$repo" -m "second unpushed" -f tracked.txt
 assert_status 0 "record commits new changes on top of existing unpushed commits"
 git -C "$repo" fetch -q origin stacked
 assert_equal "$(git -C "$repo" rev-list --count origin/master..origin/stacked)" "2" \
@@ -1064,7 +1130,7 @@ init_repo "$repo" master
 git -C "$repo" checkout -q -b message-file
 printf 'message from file\n' > "$TMP/message.txt"
 printf 'changed\n' > "$repo/tracked.txt"
-capture record_in_repo "$repo" -M "$TMP/message.txt"
+capture record_in_repo "$repo" -M "$TMP/message.txt" -f tracked.txt
 assert_status 0 "record reads commit message from file"
 assert_equal "$(git -C "$repo" log -1 --format=%s)" "message from file" \
   "record -M file uses file message"
@@ -1074,7 +1140,7 @@ init_repo "$repo" master
 git -C "$repo" checkout -q -b message-stdin
 printf 'changed\n' > "$repo/tracked.txt"
 set +e
-CAPTURE_OUTPUT=$(cd "$repo" && printf 'message from stdin' | "$ALLOD" change record -M - 2>&1)
+CAPTURE_OUTPUT=$(cd "$repo" && printf 'message from stdin' | "$ALLOD" change record -M - -f tracked.txt 2>&1)
 CAPTURE_STATUS=$?
 set -e
 assert_status 0 "record reads commit message from stdin"
@@ -1085,10 +1151,10 @@ repo="$HOME/work/record-no-amend"
 init_repo "$repo" master
 git -C "$repo" checkout -q -b no-amend
 printf 'first\n' > "$repo/tracked.txt"
-capture record_in_repo "$repo" -m "first record"
+capture record_in_repo "$repo" -m "first record" -f tracked.txt
 assert_status 0 "record first commit for no-amend test"
 printf 'second\n' > "$repo/tracked.txt"
-capture record_in_repo "$repo" -m "second record"
+capture record_in_repo "$repo" -m "second record" -f tracked.txt
 assert_status 0 "record second commit for no-amend test"
 assert_equal "$(git -C "$repo" rev-list --count origin/master..HEAD)" "2" \
   "record creates additive commits instead of amending"
@@ -1101,7 +1167,7 @@ push_log="$TMP/push.log"
 : > "$push_log"
 export REAL_GIT GIT_PUSH_LOG="$push_log"
 mock_git_path=$(make_mock_git_path no-force)
-capture_with_path "$mock_git_path" bash -c 'cd "$1" && "$2" change record -m "no force"' _ "$repo" "$ALLOD"
+capture_with_path "$mock_git_path" bash -c 'cd "$1" && "$2" change record -m "no force" -f tracked.txt' _ "$repo" "$ALLOD"
 assert_status 0 "record succeeds through mock git wrapper"
 push_args=$(cat "$push_log")
 assert_contains "$push_args" "push -u origin HEAD" "record uses additive push command"
