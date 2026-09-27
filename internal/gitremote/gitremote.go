@@ -36,6 +36,25 @@ var ErrNoOrigin = errors.New("git remote get-url origin failed")
 // alike. Like grep, it simply finds nothing when the URL has no such tail.
 var repoTail = regexp.MustCompile(`[^/:]+/[^/:]+$`)
 
+// RepoFromURL returns the owner/repo slug of a remote URL, or "" when the URL
+// carries no such tail.
+//
+// It is InferRepo's rule applied to a URL the caller already holds, with one
+// deliberate difference: a trailing slash is stripped instead of defeating the
+// match. InferRepo stays bug-for-bug with bash there, because forge's callers
+// depend on that; a protection rail must not read a cosmetic slash as "this
+// repository is not one I know".
+//
+// The bash twin of this function is remote_identity in
+// git-hooks/protected-refs-policy, and tests/fixtures/protection-cases.tsv is
+// what keeps the two agreeing.
+func RepoFromURL(url string) string {
+	url = strings.TrimRight(url, "/")
+	url = strings.TrimSuffix(url, ".git")
+	url = strings.TrimRight(url, "/")
+	return repoTail.FindString(url)
+}
+
 // InferRepo returns the owner/repo slug taken from the origin remote URL.
 //
 // It returns ErrNoOrigin when git fails. It returns an empty string with a nil

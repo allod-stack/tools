@@ -63,6 +63,31 @@ func TestInferRepo(t *testing.T) {
 	}
 }
 
+func TestRepoFromURL(t *testing.T) {
+	tests := []struct {
+		url  string
+		want string
+	}{
+		{"ssh://git@forge.example:2222/acme/widget.git", "acme/widget"},
+		{"ssh://git@forge.example:2222/acme/widget", "acme/widget"},
+		{"git@forge.example:acme/widget.git", "acme/widget"},
+		{"https://forge.example/acme/widget", "acme/widget"},
+		{"https://forge.example/a/b/acme/widget.git", "acme/widget"},
+		{"/srv/git/acme/widget.git", "acme/widget"},
+		// Where this parts company with InferRepo.
+		{"https://forge.example/acme/widget.git/", "acme/widget"},
+		{"https://forge.example/acme/widget/", "acme/widget"},
+		{"widget", ""},
+		{"forge.example:widget", ""},
+	}
+
+	for _, tt := range tests {
+		if got := RepoFromURL(tt.url); got != tt.want {
+			t.Errorf("RepoFromURL(%q) = %q, want %q", tt.url, got, tt.want)
+		}
+	}
+}
+
 func TestInferRepoNoOrigin(t *testing.T) {
 	initRepo(t, "")
 	got, err := InferRepo()
