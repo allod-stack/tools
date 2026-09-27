@@ -40,6 +40,11 @@ write_lock "$HOME/work/gamma" "$REV_A" false
 mkdir -p "$HOME/work/no-lock/.git"
 : > "$HOME/work/no-lock/.git/HEAD"
 
+# unheaded pins demo at the same revision as alpha and delta, so it never
+# changes which repo is "the" differing one — it only exercises the health
+# warning for a repo whose origin/HEAD cannot be resolved (allod/tools#126).
+write_lock "$HOME/work/unheaded" "$REV_A" true
+
 # epsilon holds the pins --upstream must compare to the branch each lock
 # names, not to the remote's default branch: stable sits at the head of its
 # release branch while the default branch has moved on; lagging is behind its
@@ -155,6 +160,9 @@ case "$command" in
     printf '%s\n' "$repo_dir"
     ;;
   "symbolic-ref refs/remotes/origin/HEAD")
+    if [[ "$repo" == unheaded ]]; then
+      exit 1
+    fi
     printf 'refs/remotes/origin/master\n'
     ;;
   "branch --show-current")
@@ -221,6 +229,8 @@ assert_contains "$output" "beta                  bbbbbbb  1970-01-01" \
   "shows a differing revision"
 assert_contains "$output" "[on branch feature, not master]" \
   "warns about a non-default branch"
+assert_contains "$output" "[default branch unknown — run: git -C $HOME/work/unheaded remote set-head origin -a]" \
+  "marks the default branch unknown instead of guessing master"
 assert_contains "$output" "[dirty: unstaged changes]" \
   "warns about unstaged changes"
 assert_contains "$output" "[2 unpushed commits]" \

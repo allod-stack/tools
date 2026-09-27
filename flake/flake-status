@@ -163,9 +163,12 @@ repo_health_warnings() {
   local branch
   branch=$(git -C "$dir" branch --show-current 2>/dev/null || true)
   local default_branch
-  default_branch=$(workspace_repo_default_branch "$dir")
-  if [[ -n "$branch" && "$branch" != "$default_branch" ]]; then
-    warnings+=("[on branch $branch, not $default_branch]")
+  if default_branch=$(workspace_repo_default_branch "$dir"); then
+    if [[ -n "$branch" && "$branch" != "$default_branch" ]]; then
+      warnings+=("[on branch $branch, not $default_branch]")
+    fi
+  else
+    warnings+=("[default branch unknown — run: git -C $dir remote set-head origin -a]")
   fi
 
   if ! git -C "$dir" diff --cached --quiet 2>/dev/null; then

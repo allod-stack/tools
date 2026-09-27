@@ -51,8 +51,7 @@ trap 'rm -rf "$tmpdir"' EXIT
 process_repo() {
   local repo="$1" dir="$2" outfile="$3"
 
-  local default_branch current_branch
-  default_branch=$(workspace_repo_default_branch "$dir")
+  local current_branch
   current_branch=$(git -C "$dir" branch --show-current 2>/dev/null || true)
 
   # Skip dirty repos
@@ -63,26 +62,34 @@ process_repo() {
   fi
 
   # With --switch, try to check out the default branch first
-  if [[ "$current_branch" != "$default_branch" && "$SWITCH_DEFAULT" == true ]]; then
-    if ! git -C "$dir" rev-parse --abbrev-ref "@{u}" >/dev/null 2>&1; then
-      printf '  %-24s  skipped    [on %s — no remote tracking branch]\n' "$repo" "$current_branch" > "$outfile"
+  if [[ "$SWITCH_DEFAULT" == true ]]; then
+    local default_branch
+    if ! default_branch=$(workspace_repo_default_branch "$dir"); then
+      printf '  %-24s  skipped    [default branch unresolved — run: git -C %s remote set-head origin -a]\n' \
+        "$repo" "$dir" > "$outfile"
       return
     fi
-    local unpushed
-    unpushed=$(git -C "$dir" rev-list "HEAD...@{u}" --count 2>/dev/null || echo 0)
-    if [[ "$unpushed" -gt 0 ]]; then
-      if [[ "$unpushed" -eq 1 ]]; then
-        printf '  %-24s  skipped    [on %s — 1 unpushed commit]\n' "$repo" "$current_branch" > "$outfile"
-      else
-        printf '  %-24s  skipped    [on %s — %d unpushed commits]\n' "$repo" "$current_branch" "$unpushed" > "$outfile"
+    if [[ "$current_branch" != "$default_branch" ]]; then
+      if ! git -C "$dir" rev-parse --abbrev-ref "@{u}" >/dev/null 2>&1; then
+        printf '  %-24s  skipped    [on %s — no remote tracking branch]\n' "$repo" "$current_branch" > "$outfile"
+        return
       fi
-      return
+      local unpushed
+      unpushed=$(git -C "$dir" rev-list "HEAD...@{u}" --count 2>/dev/null || echo 0)
+      if [[ "$unpushed" -gt 0 ]]; then
+        if [[ "$unpushed" -eq 1 ]]; then
+          printf '  %-24s  skipped    [on %s — 1 unpushed commit]\n' "$repo" "$current_branch" > "$outfile"
+        else
+          printf '  %-24s  skipped    [on %s — %d unpushed commits]\n' "$repo" "$current_branch" "$unpushed" > "$outfile"
+        fi
+        return
+      fi
+      if ! git -C "$dir" checkout "$default_branch" > /dev/null 2>&1; then
+        printf '  %-24s  error      [checkout %s failed]\n' "$repo" "$default_branch" > "$outfile"
+        return
+      fi
+      current_branch="$default_branch"
     fi
-    if ! git -C "$dir" checkout "$default_branch" > /dev/null 2>&1; then
-      printf '  %-24s  error      [checkout %s failed]\n' "$repo" "$default_branch" > "$outfile"
-      return
-    fi
-    current_branch="$default_branch"
   fi
 
   # Pull

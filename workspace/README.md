@@ -19,6 +19,7 @@ PULL_ALL_JOBS=2 pull-all
 For each repo:
 - **Dirty working tree** -> skipped with notice
 - **Current branch** -> pulls and reports whether anything changed
+- **With `--switch`, origin's default branch cannot be resolved** -> skipped with notice naming the repair (`git -C <repo> remote set-head origin -a`); never guessed
 - **With `--switch`, non-default branch with no remote tracking** -> skipped with notice (local-only branch)
 - **With `--switch`, non-default branch with unpushed commits** -> skipped with notice
 - **With `--switch`, non-default branch clean and fully pushed** -> checks out the default branch, then pulls

@@ -34,6 +34,13 @@ allod-tools — all repos consistent at 97b57e1 (2026-06-03)
 If repos are out of sync, the header says `INCONSISTENT` and the stale rows are
 marked `<- stale`.
 
+Each repo row can carry health warnings in brackets: a non-default current
+branch, a dirty tree, unpushed commits, or `[default branch unknown — run:
+git -C <repo> remote set-head origin -a]` when origin's default branch cannot
+be resolved. The last case is shown as unknown rather than guessed at, since a
+wrong guess (`master` for a repo whose default is `main`) would misreport
+every other warning that compares against it.
+
 **`--upstream`** makes a network call to compare each local pin against the
 head of the branch its lock names: the `ref` in the lock's `original` entry, or
 the remote's default branch when it names none. A `nixpkgs` pin tracking

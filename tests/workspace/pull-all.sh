@@ -9,7 +9,7 @@ export HOME="$TMP/home"
 export MOCK_LOG="$TMP/git.log"
 mkdir -p "$HOME/work/.git" "$HOME/work/group/nested" "$TMP/bin"
 
-for repo in clean dirty local unpushed switched pull-fail group/nested/repo .profile .cache/ignored; do
+for repo in clean dirty local unpushed switched pull-fail nohead group/nested/repo .profile .cache/ignored; do
   mkdir -p "$HOME/work/$repo/.git"
   : > "$HOME/work/$repo/.git/HEAD"
 done
@@ -66,14 +66,14 @@ case "$command" in
     printf '%s\n' "$repo_dir"
     ;;
   "symbolic-ref refs/remotes/origin/HEAD")
-    if [[ "$repo" == local ]]; then
+    if [[ "$repo" == nohead ]]; then
       exit 1
     fi
     printf 'refs/remotes/origin/master\n'
     ;;
   "branch --show-current")
     case "$repo" in
-      local|unpushed|switched) printf 'feature\n' ;;
+      local|unpushed|switched|nohead) printf 'feature\n' ;;
       *) printf 'master\n' ;;
     esac
     ;;
@@ -183,6 +183,8 @@ assert_output_contains "switched                  pulled     [feature]" \
   "default: pulls non-default branch without switching"
 assert_output_contains "pull-fail                 error      [pull failed: network unavailable]" \
   "default: reports the first line of a pull failure"
+assert_output_contains "nohead                    up to date [feature]" \
+  "default: pulls in place a repo whose default branch cannot be resolved"
 assert_output_contains "group/nested/repo         pulled     [master]" \
   "default: discovers and pulls a nested repository"
 assert_output_contains ".profile                  up to date [master]" \
@@ -212,6 +214,8 @@ assert_output_contains "local                     skipped    [on feature — no 
   "--switch: skips a branch without remote tracking"
 assert_output_contains "unpushed                  skipped    [on feature — 2 unpushed commits]" \
   "--switch: skips a branch with unpushed commits"
+assert_output_contains "nohead                    skipped    [default branch unresolved — run: git -C $HOME/work/nohead remote set-head origin -a]" \
+  "--switch: skips a repo whose default branch cannot be resolved, naming the repair"
 assert_output_contains "switched                  pulled     [master]" \
   "--switch: reports a successful branch switch and pull"
 assert_output_contains "pull-fail                 error      [pull failed: network unavailable]" \
@@ -230,8 +234,10 @@ assert_log_contains $'repo\tpull' \
 assert_log_contains $'.profile\tpull' \
   "--switch: pulls a dot-named repository"
 
-assert_log_not_contains $'^(dirty|local|unpushed)\tpull$' \
+assert_log_not_contains $'^(dirty|local|unpushed|nohead)\tpull$' \
   "--switch: never pulls repositories that were skipped"
+assert_log_not_contains $'^nohead\tcheckout' \
+  "--switch: never checks out a repo whose default branch cannot be resolved"
 
 # --- --help ---
 

@@ -66,9 +66,14 @@ workspace_collect_worktrees() {
   done < <(git -C "$repo_dir" worktree list --porcelain 2>/dev/null; printf '\n')
 }
 
+# Print origin's default branch and exit 0, or print nothing and exit
+# non-zero when it cannot be resolved — a repo cloned with a limited fetch,
+# or one whose origin/HEAD was cleared by `git remote set-head origin -d`.
+# It never guesses 'master' (allod/tools#126): a caller that needs an answer
+# either way must resolve one itself or refuse, naming the repair
+# `git -C <repo> remote set-head origin -a`.
 workspace_repo_default_branch() {
-  local dir="$1"
-  git -C "$dir" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null \
-    | sed 's|refs/remotes/origin/||' \
-    || echo "master"
+  local dir="$1" ref
+  ref=$(git -C "$dir" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null) || return 1
+  printf '%s\n' "${ref#refs/remotes/origin/}"
 }
