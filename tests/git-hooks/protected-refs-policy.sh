@@ -58,8 +58,20 @@ assert_allows() {
   fi
 }
 
+assert_same_commit() {
+  local description="$1" actual="$2" expected="$3"
+  if [ "$actual" = "$expected" ]; then
+    pass "$description"
+  else
+    fail "$description" "expected HEAD: $expected" "actual HEAD: $actual"
+  fi
+}
+
 forge_url="ssh://git@forge.anarch.diy:2222/vnprc/repo.git"
 zero="0000000000000000000000000000000000000000"
+# Resolved, not '#!/usr/bin/env bash': the fixture hooks below are written at run
+# time, so patchShebangs cannot reach them and a sandbox has no /usr/bin/env.
+hook_shebang="#!$(command -v bash)"
 
 # --- Protected branch: pre-commit ---
 
@@ -162,7 +174,7 @@ git -C "$hookspath_repo" config user.email "test@example.invalid"
 git -C "$hookspath_repo" commit --allow-empty -m initial >/dev/null 2>&1
 
 mkdir -p "$hookspath_repo/misc/git-hooks"
-printf '#!/usr/bin/env bash\nprintf "hookspath-ran\n"\n' > "$hookspath_repo/misc/git-hooks/pre-commit"
+printf '%s\nprintf "hookspath-ran\n"\n' "$hook_shebang" > "$hookspath_repo/misc/git-hooks/pre-commit"
 chmod +x "$hookspath_repo/misc/git-hooks/pre-commit"
 printf 'misc/git-hooks\n' > "$hookspath_repo/.hookspath"
 
@@ -186,7 +198,7 @@ git -C "$fallback_repo" config user.email "test@example.invalid"
 git -C "$fallback_repo" commit --allow-empty -m initial >/dev/null 2>&1
 
 mkdir -p "$fallback_repo/.hooks"
-printf '#!/usr/bin/env bash\nprintf "fallback-ran\n"\n' > "$fallback_repo/.hooks/pre-commit"
+printf '%s\nprintf "fallback-ran\n"\n' "$hook_shebang" > "$fallback_repo/.hooks/pre-commit"
 chmod +x "$fallback_repo/.hooks/pre-commit"
 
 cd "$fallback_repo"
@@ -211,6 +223,302 @@ cd "$nohook_repo"
 
 assert_allows "tracked hook: succeeds silently when no .hookspath or .hooks/" \
   bash "$policy" pre-commit
+
+# --- Repository identity: the cases shared with the Go rails ---
+#
+# tests/fixtures/protection-cases.tsv is the one table both implementations of
+# the rule answer to; its header states the columns. Each row gets its own $HOME
+# because the branch list is part of the case.
+
+cases_file="$repo_root/tests/fixtures/protection-cases.tsv"
+if [ ! -r "$cases_file" ]; then
+  fail "shared case table is readable" "missing or unreadable: $cases_file"
+fi
+
+write_branch_list() {
+  local target="$1" entries="$2" entry
+  : > "$target"
+  if [ "$entries" = "-" ]; then
+    return 0
+  fi
+  local IFS=';'
+  for entry in $entries; do
+    printf '%s %s\n' "${entry%%=*}" "${entry#*=}" >> "$target"
+  done
+}
+
+# Builds one case and prints the directory the hook is to run in. One branch
+# cannot be checked out twice, so a worktree case keeps the branch under test out
+# of the main repository entirely.
+init_case_checkout() {
+  local home="$1" origin="$2" checkout="$3" worktree="$4" branch="$5" name="$6"
+  local main="$home/$checkout" run_dir
+  mkdir -p "$main"
+  git -C "$main" init -q --initial-branch=bootstrap >/dev/null
+  git -C "$main" config user.name "Test User"
+  git -C "$main" config user.email "test@example.invalid"
+  git -C "$main" commit -q --allow-empty -m initial >/dev/null
+  if [ "$origin" != "-" ]; then
+    git -C "$main" remote add origin "$origin"
+  fi
+  if [ "$worktree" = "yes" ]; then
+    run_dir="$home/worktrees/$name"
+    mkdir -p "$home/worktrees"
+    git -C "$main" worktree add -q -b "$branch" "$run_dir" >/dev/null
+  else
+    run_dir="$main"
+    git -C "$main" checkout -q -b "$branch" >/dev/null
+  fi
+  printf '%s\n' "$run_dir"
+}
+
+case_count=0
+while IFS=$'\t' read -r -u 3 name entries origin checkout worktree branch verdict expected; do
+  case "$name" in ''|\#*) continue ;; esac
+  case_count=$((case_count + 1))
+  case_home="$tmp/cases/$name/home"
+  mkdir -p "$case_home/.config/git"
+  write_branch_list "$case_home/.config/git/protected-branches" "$entries"
+  export HOME="$case_home"
+  run_dir="$(init_case_checkout "$case_home" "$origin" "$checkout" "$worktree" "$branch" "$name")"
+
+  set +e
+  ( cd "$run_dir" && bash "$policy" pre-commit ) >"$test_stdout" 2>"$test_stderr" </dev/null
+  case_status=$?
+  set -e
+
+  case "$verdict" in
+    unprotected)
+      if [ "$case_status" -ne 0 ]; then
+        fail "case $name: pre-commit allowed" "hook blocked it:" "$(cat "$test_stderr")"
+      fi
+      if [ -s "$test_stderr" ]; then
+        fail "case $name: pre-commit silent" "stderr:" "$(cat "$test_stderr")"
+      fi
+      pass "case $name: pre-commit allowed, silently"
+      ;;
+    protected)
+      if [ "$case_status" -eq 0 ]; then
+        fail "case $name: pre-commit blocked" "hook allowed the commit"
+      fi
+      if ! grep -q "not permitted on protected branch '$branch'" "$test_stderr"; then
+        fail "case $name: block names the branch" "stderr:" "$(cat "$test_stderr")"
+      fi
+      if grep -q "Move the checkout" "$test_stderr"; then
+        fail "case $name: block reports no misplacement" "stderr:" "$(cat "$test_stderr")"
+      fi
+      pass "case $name: pre-commit blocked on the protected branch"
+      ;;
+    mismatch)
+      if [ "$case_status" -eq 0 ]; then
+        fail "case $name: pre-commit blocked" "hook allowed the commit"
+      fi
+      if ! grep -q "not permitted on protected branch '$branch'" "$test_stderr"; then
+        fail "case $name: block names the branch" "stderr:" "$(cat "$test_stderr")"
+      fi
+      if ! grep -q "expects the checkout at '$expected'" "$test_stderr"; then
+        fail "case $name: block names the expected path" "stderr:" "$(cat "$test_stderr")"
+      fi
+      if ! grep -q "it is at '$checkout'" "$test_stderr"; then
+        fail "case $name: block names the actual path" "stderr:" "$(cat "$test_stderr")"
+      fi
+      pass "case $name: pre-commit blocked, naming both paths"
+      ;;
+    *)
+      fail "case $name: verdict is a known word" "unknown verdict: $verdict"
+      ;;
+  esac
+done 3< "$cases_file"
+
+table_rows="$(awk '!/^#/ && NF > 0' "$cases_file" | wc -l)"
+if [ "$case_count" -eq 0 ]; then
+  fail "shared case table was consumed" "no rows ran"
+fi
+if [ "$case_count" -ne "$table_rows" ]; then
+  fail "shared case table was consumed whole" "ran $case_count of $table_rows rows"
+fi
+pass "shared case table: every one of its $case_count rows ran"
+
+assert_names_both_paths() {
+  local description="$1" expected="$2" actual="$3"
+  if ! grep -q "expects the checkout at '$expected'" "$test_stderr"; then
+    fail "$description" "expected path missing from stderr:" "$(cat "$test_stderr")"
+  fi
+  if ! grep -q "it is at '$actual'" "$test_stderr"; then
+    fail "$description" "actual path missing from stderr:" "$(cat "$test_stderr")"
+  fi
+  pass "$description"
+}
+
+# A fixture hooks directory, so the cases below witness the hook the way git
+# invokes it and not only the script called by hand.
+hooks_fixture="$tmp/hooks-fixture"
+mkdir -p "$hooks_fixture"
+printf '%s\nexec bash %q pre-commit "$@"\n' "$hook_shebang" "$policy" > "$hooks_fixture/pre-commit"
+chmod +x "$hooks_fixture/pre-commit"
+
+# --- Near miss: a protected repo checked out where no entry names ---
+
+export HOME="$tmp/near-miss-home"
+mkdir -p "$HOME/.config/git"
+printf 'work/acme/widget master\n' > "$HOME/.config/git/protected-branches"
+printf 'forge.example\n' > "$HOME/.config/git/allowed-external-remotes"
+
+near_origin="ssh://git@forge.example:2222/acme/widget.git"
+near_repo="$HOME/work/acme-widget"
+mkdir -p "$near_repo"
+git -C "$near_repo" init -q --initial-branch=master
+git -C "$near_repo" config user.name "Test User"
+git -C "$near_repo" config user.email "test@example.invalid"
+git -C "$near_repo" commit -q --allow-empty -m initial
+git -C "$near_repo" remote add origin "$near_origin"
+near_sha="$(git -C "$near_repo" rev-parse HEAD)"
+
+cd "$near_repo"
+
+assert_blocks "near miss: blocks commit on the protected branch" \
+  bash "$policy" pre-commit
+assert_names_both_paths "near miss: commit block names both paths" \
+  work/acme/widget work/acme-widget
+
+assert_blocks "near miss: blocks rebase of the protected branch" \
+  bash "$policy" pre-rebase origin/master master
+assert_names_both_paths "near miss: rebase block names both paths" \
+  work/acme/widget work/acme-widget
+
+assert_blocks "near miss: blocks merge into the protected branch" \
+  bash "$policy" pre-merge-commit
+assert_names_both_paths "near miss: merge block names both paths" \
+  work/acme/widget work/acme-widget
+
+printf '%s %s %s %s\n' \
+  refs/heads/master "$near_sha" refs/heads/agent/x "$zero" \
+  | assert_blocks "near miss: blocks push from the protected branch" \
+    bash "$policy" pre-push origin "$near_origin"
+assert_names_both_paths "near miss: push-from block names both paths" \
+  work/acme/widget work/acme-widget
+
+printf '%s %s %s %s\n' \
+  refs/heads/agent/x "$near_sha" refs/heads/master "$zero" \
+  | assert_blocks "near miss: blocks push to the protected branch" \
+    bash "$policy" pre-push origin "$near_origin"
+assert_names_both_paths "near miss: push-to block names both paths" \
+  work/acme/widget work/acme-widget
+
+printf '%s %s %s %s\n' \
+  refs/heads/agent/x "$near_sha" refs/heads/agent/x "$zero" \
+  | assert_allows "near miss: allows an agent branch push" \
+    bash "$policy" pre-push origin "$near_origin"
+
+# Driven through core.hooksPath, as git would.
+git -C "$near_repo" config core.hooksPath "$hooks_fixture"
+printf 'edit\n' > "$near_repo/file.txt"
+git -C "$near_repo" add file.txt
+
+assert_blocks "near miss: git commit is refused through core.hooksPath" \
+  git -C "$near_repo" commit -m "must be refused"
+assert_names_both_paths "near miss: the refused commit names both paths" \
+  work/acme/widget work/acme-widget
+assert_same_commit "near miss: the refused commit left HEAD where it was" \
+  "$(git -C "$near_repo" rev-parse HEAD)" "$near_sha"
+
+# The same fixture hooks directory over a repository nothing lists, so the
+# refusal above cannot be core.hooksPath breaking every commit.
+unlisted_repo="$HOME/work/other/gadget"
+mkdir -p "$unlisted_repo"
+git -C "$unlisted_repo" init -q --initial-branch=master
+git -C "$unlisted_repo" config user.name "Test User"
+git -C "$unlisted_repo" config user.email "test@example.invalid"
+git -C "$unlisted_repo" remote add origin "https://forge.example/other/gadget.git"
+git -C "$unlisted_repo" config core.hooksPath "$hooks_fixture"
+printf 'edit\n' > "$unlisted_repo/file.txt"
+git -C "$unlisted_repo" add file.txt
+
+assert_allows "unlisted repo: git commit succeeds through the same core.hooksPath" \
+  git -C "$unlisted_repo" commit -m "allowed"
+
+# --- Linked worktree of a canonically placed protected repo ---
+
+export HOME="$tmp/worktree-home"
+mkdir -p "$HOME/.config/git"
+printf 'work/acme/widget master\n' > "$HOME/.config/git/protected-branches"
+printf 'work/acme/widget agent/signed\n' > "$HOME/.config/git/signing-required-branches"
+printf 'forge.example\n' > "$HOME/.config/git/allowed-external-remotes"
+
+wt_main="$HOME/work/acme/widget"
+mkdir -p "$wt_main"
+git -C "$wt_main" init -q --initial-branch=bootstrap
+git -C "$wt_main" config user.name "Test User"
+git -C "$wt_main" config user.email "test@example.invalid"
+git -C "$wt_main" commit -q --allow-empty -m initial
+git -C "$wt_main" remote add origin "$near_origin"
+wt_protected="$HOME/changes/widget-master"
+wt_agent="$HOME/changes/widget-agent"
+git -C "$wt_main" worktree add -q -b master "$wt_protected"
+git -C "$wt_main" worktree add -q -b agent/x "$wt_agent"
+wt_sha="$(git -C "$wt_agent" rev-parse HEAD)"
+
+cd "$wt_protected"
+
+assert_blocks "worktree: blocks commit on the protected branch of the repo it belongs to" \
+  bash "$policy" pre-commit
+
+cd "$wt_agent"
+
+assert_allows "worktree: allows commit on an agent branch" \
+  bash "$policy" pre-commit
+
+printf '%s %s %s %s\n' \
+  refs/heads/agent/signed "$wt_sha" refs/heads/agent/signed "$zero" \
+  | assert_blocks "worktree: enforces the signing requirement of the repo it belongs to" \
+    bash "$policy" pre-push origin "$near_origin"
+if grep -q "must be GPG-signed" "$test_stderr"; then
+  pass "worktree: the signing block names the requirement"
+else
+  fail "worktree: the signing block names the requirement" "stderr:" "$(cat "$test_stderr")"
+fi
+
+git -C "$wt_main" config core.hooksPath "$hooks_fixture"
+printf 'edit\n' > "$wt_protected/file.txt"
+git -C "$wt_protected" add file.txt
+
+assert_blocks "worktree: git commit on the protected branch is refused through core.hooksPath" \
+  git -C "$wt_protected" commit -m "must be refused"
+
+printf 'edit\n' > "$wt_agent/file.txt"
+git -C "$wt_agent" add file.txt
+
+assert_allows "worktree: git commit on an agent branch succeeds through core.hooksPath" \
+  git -C "$wt_agent" commit -m "allowed"
+
+# --- Repo-local hook dispatch from a linked worktree ---
+#
+# .git is a file in a worktree, so this only works through the common git dir.
+
+printf '%s\nprintf "repo-local-ran\n"\n' "$hook_shebang" > "$wt_main/.git/hooks/pre-commit"
+chmod +x "$wt_main/.git/hooks/pre-commit"
+
+cd "$wt_agent"
+
+assert_allows "repo-local hook: dispatcher runs it from a linked worktree" \
+  bash "$policy" pre-commit
+if grep -q "repo-local-ran" "$test_stdout"; then
+  pass "repo-local hook: its output reached the dispatcher's stdout"
+else
+  fail "repo-local hook: its output reached the dispatcher's stdout" \
+    "expected 'repo-local-ran' in stdout, got:" "$(cat "$test_stdout")"
+fi
+
+cd "$wt_main"
+
+assert_allows "repo-local hook: dispatcher still runs it from the main checkout" \
+  bash "$policy" pre-commit
+if grep -q "repo-local-ran" "$test_stdout"; then
+  pass "repo-local hook: main-checkout output reached the dispatcher's stdout"
+else
+  fail "repo-local hook: main-checkout output reached the dispatcher's stdout" \
+    "expected 'repo-local-ran' in stdout, got:" "$(cat "$test_stdout")"
+fi
 
 total=$(<"$counter_file")
 printf '\nTests run: %d\n' "$total"

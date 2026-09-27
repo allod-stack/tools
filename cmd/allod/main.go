@@ -147,6 +147,12 @@ record refuses and names the paths; pass --files to say what to stage.
 'record' also refuses if the checkout was moved: 'begin' remembers the branch
 it created, and if something switched the checkout to a different branch
 since, record names both branches and refuses to commit onto the wrong one.
+
+A repo is protected by what its 'origin' names, not by where it sits: if
+origin names a repo ~/.config/git/protected-branches lists and the checkout is
+not at that entry's path, 'begin' and 'record' refuse on every branch, naming
+the expected and the actual path. Move the checkout there. A repo whose origin
+matches no entry is unprotected.
 `
 
 const patchUsageText = `Usage: allod patch <command> [options]

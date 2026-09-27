@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strings"
 	"syscall"
+
+	"forge.anarch.diy/allod/tools/internal/gitremote"
 )
 
 func isRepoRoot(dir string) bool {
@@ -149,27 +151,96 @@ func repoLookupKey(dir string) (string, bool) {
 	return filepath.ToSlash(rel), true
 }
 
-func protectedBranch(dir string) (string, bool) {
-	key, ok := repoLookupKey(dir)
-	if !ok {
-		return "", false
-	}
-	file, err := os.Open(filepath.Join(homeDir(), ".config", "git", "protected-branches"))
+// branchListEntry is one line of a branch list under ~/.config/git: the
+// repository the line is about, and the branch it constrains.
+type branchListEntry struct{ path, branch string }
+
+func readBranchList(path string) []branchListEntry {
+	file, err := os.Open(path)
 	if err != nil {
-		return "", false
+		return nil
 	}
 	defer file.Close()
+	var entries []branchListEntry
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
-		if len(fields) == 0 || strings.HasPrefix(fields[0], "#") {
+		if len(fields) < 2 || strings.HasPrefix(fields[0], "#") {
 			continue
 		}
-		if len(fields) > 1 && fields[0] == key {
-			return fields[1], true
+		entries = append(entries, branchListEntry{path: fields[0], branch: fields[1]})
+	}
+	return entries
+}
+
+// identityPath is the $HOME-relative path of the repository a checkout belongs
+// to — the main repository, never a linked worktree's own directory. A checkout
+// outside $HOME gets its absolute path, which matches no entry: entries are
+// $HOME-relative, so such a checkout can only ever be misplaced.
+func identityPath(dir string) string {
+	if key, ok := repoLookupKey(dir); ok {
+		return key
+	}
+	return mainRepoDir(dir)
+}
+
+// originRepo is the owner/repo a checkout's origin names, or "" when there is no
+// origin or its URL carries no such tail. Not patch.go's remoteIdentity, which
+// keeps the host so that two remote URLs can be compared.
+func originRepo(dir string) string {
+	url, ok := gitOutput(dir, "remote", "get-url", "origin")
+	if !ok {
+		return ""
+	}
+	return gitremote.RepoFromURL(url)
+}
+
+// protection is how one checkout resolves against a branch list. A non-empty
+// expected means the list recognises the repository by its origin but places it
+// somewhere else: the checkout is misplaced, and no rail may read that as
+// "unprotected".
+type protection struct {
+	branch   string
+	expected string
+	actual   string
+	identity string
+}
+
+func (p protection) misplaced() bool { return p.expected != "" }
+
+// remoteMatches reports whether an entry path names the repository identity:
+// the whole path, or its final owner/repo components. A '/' is required before
+// the identity so that work/xacme/widget does not answer for acme/widget.
+func remoteMatches(entryPath, identity string) bool {
+	return entryPath == identity || strings.HasSuffix(entryPath, "/"+identity)
+}
+
+// lookupProtection resolves a checkout against the protected-branches list.
+// Its bash twin is branch_listed in git-hooks/protected-refs-policy, and
+// tests/fixtures/protection-cases.tsv is what keeps the two agreeing.
+func lookupProtection(dir string) (protection, bool) {
+	actual := identityPath(dir)
+	entries := readBranchList(filepath.Join(homeDir(), ".config", "git", "protected-branches"))
+	for _, entry := range entries {
+		if entry.path == actual {
+			return protection{branch: entry.branch, actual: actual}, true
 		}
 	}
-	return "", false
+	identity := originRepo(dir)
+	if identity == "" {
+		return protection{}, false
+	}
+	for _, entry := range entries {
+		if remoteMatches(entry.path, identity) {
+			return protection{
+				branch:   entry.branch,
+				expected: entry.path,
+				actual:   actual,
+				identity: identity,
+			}, true
+		}
+	}
+	return protection{}, false
 }
 
 var unsafeSlug = regexp.MustCompile(`[^a-zA-Z0-9._-]`)

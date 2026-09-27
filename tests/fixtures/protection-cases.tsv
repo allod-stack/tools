@@ -1,0 +1,45 @@
+# Shared cases for the branch-list rule. One row is one checkout, one branch,
+# and how a branch list under ~/.config/git resolves it.
+#
+# Two implementations of that rule exist, one in Go and one in bash, because the
+# hook is deployed as a standalone file with no access to the allod binary. This
+# table is what keeps them from drifting: tests/git-hooks/protected-refs-policy.sh
+# drives the hook with it, and cmd/allod/protection_test.go drives the Go rails.
+#
+# Tab-separated. Columns:
+#   name      case id, also the fixture directory name
+#   entries   ';'-separated '<path>=<branch>' lines of the list file, '-' for empty
+#   origin    origin remote URL, '-' for a repository with no origin
+#   checkout  $HOME-relative path of the MAIN repository
+#   worktree  'yes' when the branch under test lives in a linked worktree of it
+#   branch    the branch under test
+#   verdict   unprotected, protected (an entry matches the checkout path), or
+#             mismatch (an entry matches the origin identity while none matches
+#             the path, so the checkout is misplaced)
+#   expected  on a mismatch, the entry path the refusal must name; '-' otherwise
+#
+# The verdict is the branch-list answer, not what each rail then does with it:
+# 'allod change begin' and 'record' refuse a misplaced checkout on every branch,
+# while the hook blocks only the entry's branch.
+canonical-checkout	work/acme/widget=master	ssh://git@forge.example:2222/acme/widget.git	work/acme/widget	no	master	protected	-
+canonical-agent-branch	work/acme/widget=master	ssh://git@forge.example:2222/acme/widget.git	work/acme/widget	no	agent/x	unprotected	-
+flat-checkout	work/acme/widget=master	ssh://git@forge.example:2222/acme/widget.git	work/acme-widget	no	master	mismatch	work/acme/widget
+flat-checkout-agent-branch	work/acme/widget=master	ssh://git@forge.example:2222/acme/widget.git	work/acme-widget	no	agent/x	unprotected	-
+scp-origin	work/acme/widget=master	git@forge.example:acme/widget.git	elsewhere/widget	no	master	mismatch	work/acme/widget
+https-origin	work/acme/widget=master	https://forge.example/acme/widget	elsewhere/widget	no	master	mismatch	work/acme/widget
+trailing-slash-origin	work/acme/widget=master	https://forge.example/acme/widget.git/	elsewhere/widget	no	master	mismatch	work/acme/widget
+entry-is-bare-identity	acme/widget=master	https://forge.example/acme/widget.git	acme/widget	no	master	protected	-
+bare-identity-flat-checkout	acme/widget=master	https://forge.example/acme/widget.git	work/acme/widget	no	master	mismatch	acme/widget
+linked-worktree-protected	work/acme/widget=master	ssh://git@forge.example:2222/acme/widget.git	work/acme/widget	yes	master	protected	-
+linked-worktree-agent-branch	work/acme/widget=master	ssh://git@forge.example:2222/acme/widget.git	work/acme/widget	yes	agent/x	unprotected	-
+linked-worktree-flat-checkout	work/acme/widget=master	ssh://git@forge.example:2222/acme/widget.git	work/acme-widget	yes	master	mismatch	work/acme/widget
+no-origin	work/acme/widget=master	-	work/acme-widget	no	master	unprotected	-
+unlisted-origin	work/acme/widget=master	https://forge.example/other/gadget.git	work/other/gadget	no	master	unprotected	-
+unparseable-origin	work/acme/widget=master	widget	work/acme-widget	no	master	unprotected	-
+lookalike-other-owner	work/acme/widget=master	https://forge.example/otherowner/widget.git	work/otherowner/widget	no	master	unprotected	-
+lookalike-repo-suffix	work/acme/widget=master	https://forge.example/acme/widget-extra.git	work/acme/widget-extra	no	master	unprotected	-
+lookalike-owner-prefix	work/xacme/widget=master	https://forge.example/acme/widget.git	work/acme/widget	no	master	unprotected	-
+second-entry-remote-matches	work/other/gadget=main;work/acme/widget=master	https://forge.example/acme/widget.git	work/flat-widget	no	master	mismatch	work/acme/widget
+path-entry-wins	work/flat-widget=main;work/acme/widget=master	https://forge.example/acme/widget.git	work/flat-widget	no	main	protected	-
+path-entry-suppresses-remote	work/flat-widget=main;work/acme/widget=master	https://forge.example/acme/widget.git	work/flat-widget	no	master	unprotected	-
+empty-list	-	https://forge.example/acme/widget.git	work/acme/widget	no	master	unprotected	-

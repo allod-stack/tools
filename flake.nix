@@ -229,6 +229,33 @@
         touch "$out"
       '';
 
+      # tests/fixtures/protection-cases.tsv only holds the Go and bash
+      # implementations of the branch-list rule together while both suites run.
+      # goChecks runs the Go half; nothing ran the bash half.
+      gitHookSuites = pkgs.runCommand "git-hook-suites"
+        {
+          nativeBuildInputs = [
+            pkgs.bash
+            pkgs.coreutils
+            pkgs.gawk
+            pkgs.git
+            pkgs.gnugrep
+            pkgs.jq
+          ];
+          src = ./.;
+        } ''
+        export HOME="$TMPDIR/home"
+        cp -r "$src" source
+        chmod -R u+w source
+        cd source
+        patchShebangs .
+
+        bash tests/git-hooks/protected-refs-policy.sh
+        bash tests/git-hooks/setup-tracked-hooks.sh
+
+        touch "$out"
+      '';
+
       # The flake-status suite drives the Bash program against fixture locks
       # and a mock git, so it needs no network and no real git.
       flakeStatusSuite = pkgs.runCommand "flake-status-suite"
@@ -268,6 +295,7 @@
         credential-store-url-parity = credentialStoreUrlParity;
         cascade-suites = cascadeSuites;
         flake-status-suite = flakeStatusSuite;
+        git-hook-suites = gitHookSuites;
         go-checks = goChecks;
       };
 

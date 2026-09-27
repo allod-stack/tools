@@ -1312,5 +1312,74 @@ assert_contains "$CAPTURE_OUTPUT" "regular repository" "cleanup regular repo fai
   pass "cleanup regular repo refusal leaves branch intact" ||
   fail "cleanup regular repo refusal leaves branch intact"
 
+# Misplaced protected checkout: origin names a repo protected-branches lists,
+# and the checkout is not where that entry puts it. Both rails refuse before
+# touching anything, whatever branch is checked out.
+
+misplace_repo() {
+  local repo="$1" entry="$2" branch="${3:-master}"
+  init_repo_no_remote "$repo" "$branch"
+  git -C "$repo" remote add origin "ssh://git@forge.example:2222/acme/widget.git"
+  printf '%s %s\n' "$entry" master >> "$HOME/.config/git/protected-branches"
+}
+
+assert_names_both_paths() {
+  local output="$1" description="$2"
+  assert_contains "$output" "'work/acme/widget'" "$description names the expected path"
+  assert_contains "$output" "'work/acme-widget'" "$description names the actual path"
+  assert_contains "$output" "'acme/widget'" "$description names the repository"
+}
+
+repo="$HOME/work/acme-widget"
+misplace_repo "$repo" work/acme/widget
+
+capture "$ALLOD" change begin "$repo"
+assert_status 8 "begin without -d refuses a misplaced protected checkout"
+assert_names_both_paths "$CAPTURE_OUTPUT" "the begin refusal"
+
+capture "$ALLOD" change begin -d "${RUN_ID}-misplaced" "$repo"
+assert_status 8 "begin -d refuses a misplaced protected checkout"
+assert_names_both_paths "$CAPTURE_OUTPUT" "the begin -d refusal"
+assert_equal "$(git -C "$repo" branch --list "agent/${RUN_ID}-misplaced")" "" \
+  "the refused begin -d created no branch"
+
+capture "$ALLOD" change begin --resume "${RUN_ID}-misplaced" "$repo"
+assert_status 8 "begin --resume refuses a misplaced protected checkout"
+assert_names_both_paths "$CAPTURE_OUTPUT" "the begin --resume refusal"
+
+printf 'edit\n' > "$repo/tracked.txt"
+capture record_in_repo "$repo" -m "must be refused" -f tracked.txt
+assert_status 8 "record refuses a misplaced protected checkout"
+assert_names_both_paths "$CAPTURE_OUTPUT" "the record refusal"
+assert_equal "$(git -C "$repo" diff --cached --name-only)" "" \
+  "the refused record staged nothing"
+assert_equal "$(git -C "$repo" log -1 --format=%s)" "initial" \
+  "the refused record committed nothing"
+
+# On an agent branch too: the checkout is in the wrong place whatever is
+# checked out, which is where this differs from the hook.
+git -C "$repo" checkout -q -b "agent/${RUN_ID}-misplaced-branch"
+capture record_in_repo "$repo" -m "must be refused" -f tracked.txt
+assert_status 8 "record refuses a misplaced protected checkout on an agent branch"
+git -C "$repo" checkout -q master
+git -C "$repo" checkout -q -- tracked.txt
+
+# A linked worktree of a misplaced checkout is misplaced too: identity is the
+# repository, not the directory the worktree happens to sit in.
+worktree="$TMP/misplaced-worktree"
+git -C "$repo" worktree add -q -b "agent/${RUN_ID}-misplaced-wt" "$worktree"
+WORKTREES+=("$worktree")
+capture record_in_repo "$worktree" -m "must be refused" -f tracked.txt
+assert_status 8 "record refuses from a worktree of a misplaced protected checkout"
+assert_names_both_paths "$CAPTURE_OUTPUT" "the worktree record refusal"
+
+# The guard does not over-fire: an origin that matches no entry stays silent.
+repo="$HOME/work/other/gadget"
+init_repo_no_remote "$repo" master
+git -C "$repo" remote add origin "https://forge.example/other/gadget.git"
+capture "$ALLOD" change begin "$repo"
+assert_status 0 "begin allows a repo whose origin matches no entry"
+assert_equal "$CAPTURE_OUTPUT" "$repo" "an unlisted repo still prints its checkout path"
+
 printf '\nTests run: %d\n' "$test_number"
 printf 'All %d allod change tests passed.\n' "$test_number"

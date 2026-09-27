@@ -2,6 +2,16 @@
 set -euo pipefail
 
 repo="$(git rev-parse --show-toplevel)"
+common_dir="$(git rev-parse --path-format=absolute --git-common-dir)"
+git_dir="$(git rev-parse --path-format=absolute --git-dir)"
+# The branch lists are keyed on the repository, so a linked worktree must
+# resolve to the repository it belongs to; $repo stays the working tree, which
+# is where tracked hooks live.
+if [ "$git_dir" = "$common_dir" ]; then
+  main_repo="$repo"
+else
+  main_repo="$(dirname "$common_dir")"
+fi
 hook="${1:?missing hook name}"
 shift
 protected_branches_file="$HOME/.config/git/protected-branches"
@@ -16,32 +26,95 @@ if [ "$hook" = "pre-push" ]; then
   cat > "$hook_stdin"
 fi
 
-is_protected_branch() {
-  branch="$1"
-  repo_relative="${repo#"$HOME"/}"
+# The owner/repo the origin remote names, or failure when there is no origin or
+# its URL carries no such tail. Twin of gitremote.RepoFromURL; the two are held
+# together by tests/fixtures/protection-cases.tsv.
+remote_identity() {
+  local url repo_name rest owner
+  url="$(git remote get-url origin 2>/dev/null)" || return 1
+  while [ "${url%/}" != "$url" ]; do url="${url%/}"; done
+  url="${url%.git}"
+  while [ "${url%/}" != "$url" ]; do url="${url%/}"; done
+  case "$url" in */*) ;; *) return 1 ;; esac
+  repo_name="${url##*/}"
+  rest="${url%/*}"
+  owner="${rest##*[/:]}"
+  case "$repo_name" in *:*) return 1 ;; esac
+  if [ -z "$owner" ] || [ -z "$repo_name" ]; then
+    return 1
+  fi
+  printf '%s/%s\n' "$owner" "$repo_name"
+}
+
+# Extra lines for the refusal, set by branch_listed when the entry that answered
+# was reached through the origin remote rather than through the checkout path.
+protection_detail=""
+
+# Whether a branch list constrains $2 for this checkout. An entry keyed on the
+# repository's own path answers first; failing that, an entry naming the
+# repository that origin points at means the checkout is in the wrong place,
+# which is a misconfiguration and never an absence of protection.
+#
+# Twin of lookupProtection in cmd/allod/workspace.go, held together by
+# tests/fixtures/protection-cases.tsv.
+branch_listed() {
+  local list_file="$1" branch="$2"
+  local main_relative="${main_repo#"$HOME"/}"
+  local identity entry expected_path expected_branch
+
+  protection_detail=""
 
   [ -n "$branch" ] || return 1
-  [ -r "$protected_branches_file" ] || return 1
+  [ -r "$list_file" ] || return 1
 
-  awk -v repo="$repo_relative" -v branch="$branch" '
+  if awk -v repo="$main_relative" -v branch="$branch" '
+      /^[[:space:]]*(#|$)/ { next }
+      $1 == repo && $2 == branch { found = 1 }
+      END { exit found ? 0 : 1 }
+    ' "$list_file"; then
+    return 0
+  fi
+
+  # An entry keyed on this very path settles the question: the checkout is where
+  # its entry puts it, so there is no misplacement to report.
+  if awk -v repo="$main_relative" '
+      /^[[:space:]]*(#|$)/ { next }
+      $1 == repo { found = 1 }
+      END { exit found ? 0 : 1 }
+    ' "$list_file"; then
+    return 1
+  fi
+
+  identity="$(remote_identity)" || return 1
+
+  # index(), not a regex: an owner or repository name may contain a dot.
+  entry="$(awk -v identity="$identity" '
     /^[[:space:]]*(#|$)/ { next }
-    $1 == repo && $2 == branch { found = 1 }
-    END { exit found ? 0 : 1 }
-  ' "$protected_branches_file"
+    {
+      needle = "/" identity
+      n = length($1) - length(needle)
+      if ($1 == identity || (n >= 0 && substr($1, n + 1) == needle)) {
+        print $1 "\t" $2
+        exit
+      }
+    }
+  ' "$list_file")"
+  [ -n "$entry" ] || return 1
+
+  expected_path="${entry%%$'\t'*}"
+  expected_branch="${entry#*$'\t'}"
+  [ "$expected_branch" = "$branch" ] || return 1
+
+  protection_detail="Origin identifies this repository as '$identity', whose entry expects the checkout at '$expected_path'; it is at '$main_relative'. Move the checkout to '$expected_path'."
+  return 0
+}
+
+is_protected_branch() {
+  branch_listed "$protected_branches_file" "$1"
 }
 
 is_signing_required_branch() {
-  branch="$1"
-  repo_relative="${repo#"$HOME"/}"
-
-  [ -n "$branch" ] || return 1
-  [ -r "$signing_required_branches_file" ] || return 1
-
-  awk -v repo="$repo_relative" -v branch="$branch" '
-    /^[[:space:]]*(#|$)/ { next }
-    $1 == repo && $2 == branch { found = 1 }
-    END { exit found ? 0 : 1 }
-  ' "$signing_required_branches_file"
+  branch_listed "$signing_required_branches_file" "$1"
 }
 
 is_active_pr_branch() {
@@ -76,6 +149,7 @@ require_signed_push() {
 
   if ! git verify-commit "$sha" 2>/dev/null; then
     echo "ERROR: Commits on '$branch' must be GPG-signed." >&2
+    [ -z "$protection_detail" ] || echo "$protection_detail" >&2
     exit 1
   fi
 }
@@ -92,11 +166,15 @@ require_override() {
   branch="$2"
 
   echo "ERROR: '$action' is not permitted on protected branch '$branch'." >&2
+  [ -z "$protection_detail" ] || echo "$protection_detail" >&2
   exit 1
 }
 
+# Through the common git dir, so a linked worktree still finds them: its .git is
+# a file. Not `git rev-parse --git-path hooks`, which returns core.hooksPath
+# when that is set — this script lives there, so it would call itself.
 run_repo_hook() {
-  repo_hook="$repo/.git/hooks/$hook"
+  repo_hook="$common_dir/hooks/$hook"
   if [ -x "$repo_hook" ]; then
     if [ -n "$hook_stdin" ]; then
       "$repo_hook" "$@" < "$hook_stdin"

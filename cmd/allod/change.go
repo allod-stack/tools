@@ -33,6 +33,21 @@ func changeMain(args []string) {
 	}
 }
 
+// exitMisplacedCheckout is unused by every other refusal in 'change begin' and
+// 'change record', so a caller can tell this one apart.
+const exitMisplacedCheckout = 8
+
+// requireCanonicalCheckout stops a rail that cannot do its job: the checkout is
+// a repository protected-branches names, sitting somewhere its entry does not.
+func requireCanonicalCheckout(found protection) {
+	if !found.misplaced() {
+		return
+	}
+	die(exitMisplacedCheckout,
+		"protected repository '%s' is checked out at '%s', but its protected-branches entry is '%s'; move the checkout to '%s' so its branch protections apply",
+		found.identity, found.actual, found.expected, found.expected)
+}
+
 func validDescription(description string) bool {
 	if description == "" {
 		return false
@@ -112,7 +127,9 @@ func changeBegin(args []string) {
 	}
 
 	repo := resolveGitRepo(repoArg)
-	protected, isProtected := protectedBranch(repo)
+	found, isProtected := lookupProtection(repo)
+	requireCanonicalCheckout(found)
+	protected := found.branch
 	if !descriptionSet {
 		if isProtected {
 			die(1, "change begin requires -d <description> to branch in protected repo '%s'", repo)
@@ -414,6 +431,8 @@ func changeRecord(args []string) {
 		}
 	}
 	repo := resolveGitRepo("")
+	found, isProtected := lookupProtection(repo)
+	requireCanonicalCheckout(found)
 	branch := currentBranch(repo)
 
 	gitDir, ok := gitOutput(repo, "rev-parse", "--path-format=absolute", "--git-dir")
@@ -426,7 +445,7 @@ func changeRecord(args []string) {
 		}
 	}
 
-	if protected, ok := protectedBranch(repo); ok && branch == protected {
+	if isProtected && branch == found.branch {
 		die(2, "refusing to commit directly to protected branch '%s'; run 'allod change begin' first", branch)
 	}
 

@@ -165,6 +165,14 @@ protected repo has no legitimate in-place change, so it refuses instead.
 cd "$(allod change begin ~/work/allod/memory)"
 ```
 
+Whether a repo is protected is decided by the repo `origin` points at, not by
+where it happens to sit: `begin` and `record` refuse outright, with exit code 8,
+when `origin` names a repo `~/.config/git/protected-branches` lists and the
+checkout is not at that entry's path. The message names the expected and the
+actual path; move the checkout there. A repo whose `origin` matches no entry is
+unprotected as before. The `protected-refs-policy` git hook applies the same
+rule — see [git-hooks/README.md](git-hooks/README.md).
+
 `record` refuses two situations rather than committing something wrong. If
 the checkout was switched to a different branch after `begin` set it up —
 another agent's `git switch`, say — `record` names the branch it expected and
