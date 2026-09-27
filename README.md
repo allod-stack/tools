@@ -212,23 +212,10 @@ left behind before removing it by hand: it may still hold uncommitted work.
 
 ### Running a repository's checks
 
-`allod check` replaces `nix flake check` on any repository holding NixOS
-machines: one `nix` process per machine and per check, every failing step
-reported in one run, and a run that built nothing refused. It writes nothing,
-the checkout's `flake.lock` included.
-
-```bash
-cd ~/work/<checkout>
-allod check
-
-# prove an unmerged data-repo branch through the whole suite
-allod check --override-input inventory 'git+https://<forge>/<owner>/inventory.git?ref=add-machine'
-```
-
-Run one at a time: each run peaks above a gigabyte. A repository that exposes a
-top-level output which is neither a machine, a check nor a module allows it by
-name in `allod-check.toml` at its root. See
-[allod check](docs/allod-check.md).
+`cd ~/work/<checkout> && allod check` replaces `nix flake check`: one `nix`
+process per machine and per check, every failing step reported in one run, and a
+run that evaluated checks and built none refused. Input overrides and
+`allod-check.toml`: [allod check](docs/allod-check.md).
 
 ### Updating a flake input
 

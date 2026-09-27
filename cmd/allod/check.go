@@ -1,14 +1,11 @@
 package main
 
-// The 'check' namespace is the workspace's gate, in place of `nix flake check`:
-// it runs a flake's machines, modules, passive outputs and checks one `nix`
-// process at a time, reports every failing step in one run, and refuses a run
-// that witnessed nothing. It reads a flake and builds its checks; it writes
-// nothing. docs/allod-check.md is the long version.
+// docs/allod-check.md is the long version of this command.
 
 import (
 	"fmt"
 	"os/exec"
+	"slices"
 	"strings"
 )
 
@@ -24,23 +21,17 @@ const checkUsageText = `Usage:
   allod check [--override-input <input> <flake-ref>]... [<flake-ref>]
 
 Runs every machine, nixos module, allowed passive output and check the flake
-exposes, one 'nix' process at a time, and reports all of them: a failing step
-does not stop the run. The flake reference defaults to '.'.
+exposes, one 'nix' process at a time, reporting all of them: a failing step does
+not stop the run. The reference defaults to '.'. A check keyed on another system
+is only evaluated, and a run that evaluated checks and built none is refused.
 
-A check keyed on this machine's Nix system is built; one keyed on another
-system can only be evaluated, and a run that built no check at all is refused
-rather than reported green.
+'--override-input' takes two values, as 'nix' does, and may be repeated; every
+'nix' invocation that reads the flake gets all of them. The checkout is never
+written to, lock file included.
 
-'--override-input <input> <flake-ref>' takes two values, as 'nix' does, and
-may be repeated. Every 'nix' invocation that reads the flake gets all of them,
-so the whole gate runs against the overridden inputs, and the checkout's
-flake.lock is left untouched.
-
-An output that is neither run (nixosConfigurations, checks, nixosModules) nor
-allowed is refused before any step runs. Allowed are 'lib' and 'vmFacts', plus
-whatever 'passive-outputs' lists in allod-check.toml at the flake root:
-
-  passive-outputs = ["profilesSource", "secretsSource"]
+An output other than nixosConfigurations, checks and nixosModules is refused
+unless allowed: 'lib' and 'vmFacts' always, and whatever passive-outputs lists
+in allod-check.toml at the flake root, which is forced and nothing more.
 `
 
 type checkOverride struct {
@@ -65,7 +56,7 @@ func parseCheckArgs(args []string) checkOptions {
 	for len(args) > 0 {
 		switch args[0] {
 		case "--override-input":
-			if len(args) < 3 {
+			if len(args) < 3 || strings.HasPrefix(args[1], "-") || strings.HasPrefix(args[2], "-") {
 				checkUsageError("--override-input requires an input name and a flake reference")
 			}
 			options.overrides = append(options.overrides, checkOverride{input: args[1], ref: args[2]})
@@ -94,22 +85,20 @@ func parseCheckArgs(args []string) checkOptions {
 	return options
 }
 
-// checkStep is one step of the gate: one label in the transcript and one `nix`
-// invocation, or two when the check's name cannot be spelled in an installable
-// and its derivation has to be evaluated before it can be built.
+type checkStepKind int
+
+const (
+	checkForcedStep checkStepKind = iota
+	checkMachineStep
+	checkBuiltStep
+	checkEvaluatedStep
+)
+
 type checkStep struct {
-	label string
-	argv  []string
-	// buildDrv turns argv into an evaluation that prints a derivation path,
-	// which the step then builds.
-	buildDrv bool
-	// covered marks a step that makes the run meaningful: a machine or a
-	// check. A passive output or a module does not.
-	covered bool
-	// system is set on a check step, and built says whether it is built or
-	// only evaluated.
+	kind   checkStepKind
+	label  string
+	argv   []string
 	system string
-	built  bool
 }
 
 func checkMain(args []string) {
@@ -124,11 +113,7 @@ func checkMain(args []string) {
 	}
 
 	allowed := checkAllowedPassive(options)
-
-	enumeration, ok := checkEnumerate(options)
-	if !ok {
-		die(1, "could not enumerate what to run in %s", options.flake)
-	}
+	enumeration := checkEnumerate(options)
 
 	if refused := checkRefusedOutputs(enumeration.Outputs, allowed); len(refused) > 0 {
 		fmt.Fprintf(stderr, "allod: %s exposes flake output(s) allod check does not run:\n", options.flake)
@@ -151,49 +136,32 @@ func checkMain(args []string) {
 	runner.report(options.flake, system)
 }
 
-// checkSteps is the whole of what the gate runs, in the order it runs it:
-// passive outputs, modules, machines, checks.
 func checkSteps(options checkOptions, enumeration checkEnumeration, allowed []string, system string) []checkStep {
 	var steps []checkStep
+	add := func(kind checkStepKind, label, expr, stepSystem string) {
+		steps = append(steps, checkStep{kind: kind, label: label, argv: options.rootArgs(expr), system: stepSystem})
+	}
 	for _, name := range checkPassiveOutputs(enumeration.Outputs, allowed) {
-		steps = append(steps, checkStep{
-			label: "passive output " + name,
-			argv:  checkPassiveArgs(options, name),
-		})
+		add(checkForcedStep, "passive output "+name,
+			checkForceExpr("builtins.getAttr "+nixStringLiteral(name)+" o"), "")
 	}
 	for _, name := range enumeration.Modules {
-		steps = append(steps, checkStep{
-			label: "nixos module " + name,
-			argv:  checkModuleArgs(options, name),
-		})
+		add(checkForcedStep, "nixos module "+name,
+			checkForceExpr("builtins.getAttr "+nixStringLiteral(name)+" o.nixosModules"), "")
 	}
 	for _, name := range enumeration.Machines {
-		steps = append(steps, checkStep{
-			label:   "machine " + name,
-			argv:    checkMachineArgs(options, name),
-			covered: true,
-		})
+		add(checkMachineStep, "machine "+name, checkDrvPathExpr("config.system.build.toplevel",
+			"(builtins.getAttr "+nixStringLiteral(name)+" o.nixosConfigurations).config.system.build.toplevel"), "")
 	}
 	for _, entry := range enumeration.Checks {
+		expr := checkDrvPathExpr("the check", "builtins.getAttr "+nixStringLiteral(entry.Name)+
+			" (builtins.getAttr "+nixStringLiteral(entry.System)+" o.checks)")
 		if entry.System == system {
-			argv, buildDrv := checkBuiltArgs(options, entry)
-			steps = append(steps, checkStep{
-				label:    fmt.Sprintf("check %s.%s (built)", entry.System, entry.Name),
-				argv:     argv,
-				buildDrv: buildDrv,
-				covered:  true,
-				system:   entry.System,
-				built:    true,
-			})
+			add(checkBuiltStep, fmt.Sprintf("check %s.%s (built)", entry.System, entry.Name), expr, entry.System)
 			continue
 		}
-		steps = append(steps, checkStep{
-			label: fmt.Sprintf("check %s.%s (evaluated, not built: %s is not %s)",
-				entry.System, entry.Name, entry.System, system),
-			argv:    checkEvaluatedArgs(options, entry),
-			covered: true,
-			system:  entry.System,
-		})
+		add(checkEvaluatedStep, fmt.Sprintf("check %s.%s (evaluated, not built: %s is not %s)",
+			entry.System, entry.Name, entry.System, system), expr, entry.System)
 	}
 	return steps
 }
@@ -210,16 +178,16 @@ type checkRunner struct {
 func (runner *checkRunner) run(step checkStep) {
 	fmt.Fprintf(stdout, "\n==> %s\n", step.label)
 	runner.steps++
-	if step.covered {
+	switch step.kind {
+	case checkMachineStep:
 		runner.covered++
-	}
-	if step.system != "" {
-		if step.built {
-			runner.built++
-		} else {
-			runner.evaluated++
-			runner.rememberSystem(step.system)
-		}
+	case checkBuiltStep:
+		runner.covered++
+		runner.built++
+	case checkEvaluatedStep:
+		runner.covered++
+		runner.evaluated++
+		runner.rememberSystem(step.system)
 	}
 	if !runner.invoke(step) {
 		fmt.Fprintf(stderr, "!!! FAILED: %s\n", step.label)
@@ -228,7 +196,7 @@ func (runner *checkRunner) run(step checkStep) {
 }
 
 func (runner *checkRunner) invoke(step checkStep) bool {
-	if !step.buildDrv {
+	if step.kind != checkBuiltStep {
 		return checkStream("nix", step.argv) == 0
 	}
 	drv, status := checkCapture("nix", step.argv)
@@ -238,17 +206,18 @@ func (runner *checkRunner) invoke(step checkStep) bool {
 	return checkStream("nix", checkBuildDrvArgs(drv)) == 0
 }
 
-// rememberSystem deduplicates by exact name rather than sorting lines: a system
-// name containing a newline is one name, and a line-oriented pass would count
-// it as two.
+// rememberSystem deduplicates by exact name, not by sorting lines: a system name
+// containing a newline is one name, and a line-oriented pass counts it as two.
 func (runner *checkRunner) rememberSystem(system string) {
-	for _, seen := range runner.evaluatedSystem {
-		if seen == system {
-			return
-		}
+	if !slices.Contains(runner.evaluatedSystem, system) {
+		runner.evaluatedSystem = append(runner.evaluatedSystem, system)
 	}
-	runner.evaluatedSystem = append(runner.evaluatedSystem, system)
 }
+
+const checkWitnessedNothing = `Evaluation alone is not this gate. A check that fails in its builder shell rather
+than in its Nix expression evaluates here and fails only on a build, so an
+all-evaluated run cannot tell a passing suite from a failing one.
+`
 
 func (runner *checkRunner) report(flake, system string) {
 	if runner.covered == 0 {
@@ -264,29 +233,21 @@ func (runner *checkRunner) report(flake, system string) {
 	}
 
 	systems := strings.Join(runner.evaluatedSystem, ",")
-
-	// Evaluation catches a failure written in a check's Nix expression, where
-	// most of them live; it does not catch one written into a builder's shell.
-	// An all-evaluated run therefore cannot tell a passing suite from a
-	// failing one, and reporting it green is the false green this refusal
-	// exists for.
 	if runner.built == 0 && runner.evaluated > 0 {
 		fmt.Fprintf(stderr, "\nWitnessed nothing: evaluated %d of %d checks and built none of them.\n",
 			runner.evaluated, runner.evaluated)
-		fmt.Fprint(stderr, "Evaluation alone is not this gate. A check that fails in its builder shell rather\n")
-		fmt.Fprint(stderr, "than in its Nix expression evaluates here and fails only on a build, so an\n")
-		fmt.Fprint(stderr, "all-evaluated run cannot tell a passing suite from a failing one.\n")
+		fmt.Fprint(stderr, checkWitnessedNothing)
 		fmt.Fprintf(stderr, "This host is %s; run the gate on %s, the system these checks are keyed on.\n",
 			system, systems)
 		exit(1)
 	}
 
-	if runner.evaluated > 0 {
-		fmt.Fprintf(stdout, "\nAll %d steps passed (checks: %d built, %d evaluated only).\n",
-			runner.steps, runner.built, runner.evaluated)
-		fmt.Fprintf(stdout, "The %d evaluated-only check(s) are for %s and need a host of that system to be built.\n",
-			runner.evaluated, systems)
+	if runner.evaluated == 0 {
+		fmt.Fprintf(stdout, "\nAll %d steps passed (checks: %d built).\n", runner.steps, runner.built)
 		return
 	}
-	fmt.Fprintf(stdout, "\nAll %d steps passed (checks: %d built).\n", runner.steps, runner.built)
+	fmt.Fprintf(stdout, "\nAll %d steps passed (checks: %d built, %d evaluated only).\n",
+		runner.steps, runner.built, runner.evaluated)
+	fmt.Fprintf(stdout, "The %d evaluated-only check(s) are for %s and need a host of that system to be built.\n",
+		runner.evaluated, systems)
 }
