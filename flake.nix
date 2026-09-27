@@ -123,6 +123,9 @@
         touch "$out"
       '';
 
+      # tests/allod-check-selftest.sh is left out: it drives the real nix over
+      # throwaway flakes, which a sandboxed check cannot host; run it by hand
+      # (docs/allod-check.md).
       allodParity = pkgs.runCommand "allod-parity-tests"
         {
           nativeBuildInputs = [

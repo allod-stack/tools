@@ -10,7 +10,7 @@ host install them through their Nix composition, with no manual installation aft
 ## Layout
 
 ```
-cmd/allod/                Go main CLI (change, patch, pr, trace, site preview; deploy/check/config and secret opt-in)
+cmd/allod/                Go main CLI (change, check, patch, pr, trace, site preview; deploy/check/config and secret opt-in)
 cmd/flake-update-cascade/ flake input update cascade Go command
 cmd/forge/                Forgejo CLI Go command
 internal/flakelock/       flake.lock graph walking for the cascade
@@ -105,6 +105,7 @@ namespace present, and each untagged run asserts it absent.
 - [Report components](docs/components.md) — semantic visual vocabulary and
   authoring contracts
 - [Git hooks](git-hooks/README.md) — `protected-refs-policy`, `setup-tracked-hooks`
+- [allod check](docs/allod-check.md) — run a repository's machines and checks, one `nix` process at a time, in place of `nix flake check`
 - [allod trace](docs/allod-trace.md) — distill local Claude, Codex, and Pi session logs into redacted markdown traces
 
 ## Shared Library
@@ -208,6 +209,26 @@ worktree and the repo is broken — usually because the directory was deleted, b
 also when the directory survives and its `.git` file did not. `git worktree
 prune` clears the admin entry and never deletes a directory, so check what is
 left behind before removing it by hand: it may still hold uncommitted work.
+
+### Running a repository's checks
+
+`allod check` replaces `nix flake check` on any repository holding NixOS
+machines: one `nix` process per machine and per check, every failing step
+reported in one run, and a run that built nothing refused. It writes nothing,
+the checkout's `flake.lock` included.
+
+```bash
+cd ~/work/<checkout>
+allod check
+
+# prove an unmerged data-repo branch through the whole suite
+allod check --override-input inventory 'git+https://<forge>/<owner>/inventory.git?ref=add-machine'
+```
+
+Run one at a time: each run peaks above a gigabyte. A repository that exposes a
+top-level output which is neither a machine, a check nor a module allows it by
+name in `allod-check.toml` at its root. See
+[allod check](docs/allod-check.md).
 
 ### Updating a flake input
 
