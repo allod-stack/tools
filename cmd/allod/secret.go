@@ -247,13 +247,17 @@ type secretTarget struct {
 // too, and is named as such rather than silently swept into the landing.
 func requireLandingBranch(checkout string) string {
 	branch := currentBranch(checkout)
-	// defaultRemoteBranch guesses 'master' when origin/HEAD is unset, and a
-	// guess is not good enough here: a checkout whose default is 'main' would
-	// pass the comparison and the landing would be pushed straight to it.
+	// defaultRemoteBranch now fails rather than guessing 'master'
+	// (allod/tools#126), so this assertion duplicates its own failure; kept
+	// for parity with change begin, which keeps the same redundant check.
 	if !gitQuiet(checkout, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD") {
 		die(1, "could not resolve the default branch of %s; run: git -C %s remote set-head origin -a", checkout, checkout)
 	}
-	if branch == defaultRemoteBranch(checkout) {
+	defaultBranch, ok := defaultRemoteBranch(checkout)
+	if !ok {
+		die(1, "could not resolve the default branch of %s; run: git -C %s remote set-head origin -a", checkout, checkout)
+	}
+	if branch == defaultBranch {
 		die(1, "%s is on its default branch '%s'; check out the branch that declares the credential (an agent's agent/<description> branch) and rerun. Merging stays a separate act.", checkout, branch)
 	}
 	status, ok := gitOutput(checkout, "status", "--porcelain")

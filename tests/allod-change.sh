@@ -1110,6 +1110,18 @@ assert_contains "$CAPTURE_OUTPUT" "cannot determine whether commits are unpushed
 assert_contains "$CAPTURE_OUTPUT" "no origin remote" \
   "record names why the comparison is unknown"
 
+repo="$HOME/work/record-no-default-head"
+init_repo_no_origin_head "$repo" master
+git -C "$repo" checkout -q -b orphan
+printf 'local\n' > "$repo/tracked.txt"
+git -C "$repo" commit -qam "local commit"
+capture record_in_repo "$repo" -m "must not be used"
+assert_status 4 "record refuses rather than guess master when origin/HEAD is unresolved"
+assert_contains "$CAPTURE_OUTPUT" "cannot determine whether commits are unpushed" \
+  "record reports the unresolved default branch honestly"
+assert_contains "$CAPTURE_OUTPUT" "default branch of origin cannot be resolved" \
+  "record names why the comparison is unknown"
+
 repo="$HOME/work/record-message-file"
 init_repo "$repo" master
 git -C "$repo" checkout -q -b message-file
@@ -1222,6 +1234,13 @@ init_repo "$repo" master
 git -C "$repo" checkout -q --detach
 capture submit_in_repo "$repo" -t "Detached" -b "$body" --dry-run
 assert_status 1 "submit rejects detached HEAD"
+
+repo="$HOME/work/submit-no-default-head"
+init_repo_no_origin_head "$repo" master
+git -C "$repo" checkout -q -b agent/submit-no-default-head
+capture submit_in_repo "$repo" -t "No default" -b "$body"
+assert_status 1 "submit refuses a PR base it cannot resolve rather than guessing master"
+assert_contains "$CAPTURE_OUTPUT" "remote set-head" "submit names the origin/HEAD repair"
 
 # cleanup tests
 

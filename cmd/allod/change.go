@@ -143,10 +143,17 @@ func changeBegin(args []string) {
 	} else {
 		start = protected
 		if !isProtected {
+			// defaultRemoteBranch now fails loudly on its own, so this
+			// assertion is redundant with the check below; it is kept for
+			// parity with the pre-existing behavior (allod/tools#126).
 			if !gitQuiet(repo, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD") {
 				die(1, "could not resolve the default branch of '%s'; run: git -C %s remote set-head origin -a", repo, repo)
 			}
-			start = defaultRemoteBranch(repo)
+			resolved, ok := defaultRemoteBranch(repo)
+			if !ok {
+				die(1, "could not resolve the default branch of '%s'; run: git -C %s remote set-head origin -a", repo, repo)
+			}
+			start = resolved
 		}
 		if start == "" {
 			die(1, "could not resolve the default branch of '%s'; run: git -C %s remote set-head origin -a", repo, repo)
@@ -267,8 +274,8 @@ func unpushedCommits(dir string) (unpushedResult, string) {
 	} else if gitQuiet(dir, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/"+branch+"^{commit}") {
 		base = "refs/remotes/origin/" + branch
 	} else if gitQuiet(dir, "remote", "get-url", "origin") {
-		defaultBranch := defaultRemoteBranch(dir)
-		if defaultBranch == "" {
+		defaultBranch, ok := defaultRemoteBranch(dir)
+		if !ok {
 			return unpushedUnknown, "the default branch of origin cannot be resolved"
 		}
 		if !gitQuiet(dir, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/"+defaultBranch+"^{commit}") {
@@ -538,7 +545,11 @@ func changeSubmit(args []string) {
 	repo := resolveGitRepo("")
 	branch := currentBranch(repo)
 	if base == "" {
-		base = defaultRemoteBranch(repo)
+		resolved, ok := defaultRemoteBranch(repo)
+		if !ok {
+			die(1, "could not resolve the default branch of '%s' to use as the PR base; run: git -C %s remote set-head origin -a, or pass --base", repo, repo)
+		}
+		base = resolved
 	}
 	if !dryRun {
 		if _, err := exec.LookPath("forge"); err != nil {

@@ -71,6 +71,7 @@ or, from a terminal with nothing piped, `allod secret create <name>` and paste t
 Every refusal names the file that disagrees and what it holds. The command touches nothing until every check below passes, and after it starts writing, a failed check restores both files.
 
 - The checkout is on its default branch, or has uncommitted or untracked changes. A leftover `.age` from a failed attempt counts as untracked and is named.
+- Origin's default branch cannot be resolved, so there is nothing to compare the current branch against; the message names the repair (`git -C <repo> remote set-head origin -a`) rather than guessing `master`.
 - No `credentials.nix` entry has that name, or the entry is not `pending`, or it does not have exactly one `agenix` consumer in this repository.
 - `secrets.nix` does not declare the consumer's path, lists no recipients for it, or lists recipients that do not include this host's identity, which would make a ciphertext the host could never rekey or rotate.
 - No rotation registry entry names the credential, the one that does names a different path, or the credential has more than one entry — two entries in one group, or one in each of two groups. A command acts on exactly one entry, so a second entry of the same name would be left behind.

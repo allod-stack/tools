@@ -190,12 +190,19 @@ func currentBranch(dir string) string {
 	return branch
 }
 
-func defaultRemoteBranch(dir string) string {
+// defaultRemoteBranch resolves origin's default branch from its recorded
+// HEAD. It reports failure rather than guessing 'master': a repo cloned
+// with a limited fetch, or one whose origin/HEAD was cleared by
+// `git remote set-head origin -d`, has no such ref, and inventing one gives
+// a wrong answer no caller can tell from a right one (allod/tools#126).
+// Every caller repairs a failure the same way: `git -C <repo> remote
+// set-head origin -a`.
+func defaultRemoteBranch(dir string) (string, bool) {
 	ref, ok := gitOutput(dir, "symbolic-ref", "refs/remotes/origin/HEAD")
 	if !ok {
-		return "master"
+		return "", false
 	}
-	return strings.TrimPrefix(ref, "refs/remotes/origin/")
+	return strings.TrimPrefix(ref, "refs/remotes/origin/"), true
 }
 
 func collectRepos(root string) []string {
