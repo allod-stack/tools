@@ -846,9 +846,6 @@ git -C "$repo" diff --cached --quiet &&
   pass "record leaves index untouched when protected branch is refused" ||
   fail "record leaves index untouched when protected branch is refused"
 
-# A worktree from 'begin -d' carries a handoff file naming the branch it was
-# given. If something switches that checkout to a different branch, record
-# refuses to commit onto whatever HEAD now points at instead of guessing.
 repo="$HOME/work/record-moved-checkout"
 init_repo "$repo" master
 desc="${RUN_ID}-moved-checkout"
@@ -866,9 +863,6 @@ assert_equal "$(git -C "$path" status --porcelain)" "$status_before" \
 assert_equal "$(git -C "$path" rev-parse HEAD)" "$head_before" \
   "record makes no commit in a moved checkout"
 
-# A main checkout (no handoff file, so begin -d was never called for it) has
-# no agent boundary around it, so an unnamed tracked change might belong to
-# another agent. Without --files, record refuses instead of sweeping it in.
 repo="$HOME/work/record-sweep-refused"
 init_repo "$repo" master
 printf 'changed\n' > "$repo/tracked.txt"
@@ -883,8 +877,6 @@ git -C "$repo" diff --cached --quiet &&
 assert_equal "$(git -C "$repo" rev-parse HEAD)" "$head_before" \
   "record makes no commit when the sweep is refused"
 
-# Naming the file is the one required argument the sweep refusal adds, and it
-# still records normally.
 repo="$HOME/work/record-sweep-named"
 init_repo "$repo" master
 printf 'changed\n' > "$repo/tracked.txt"
@@ -893,8 +885,6 @@ assert_status 0 "record commits a named file in a main checkout"
 assert_equal "$(git -C "$repo" log -1 --format=%s)" "sweep named" \
   "record --files commit uses the given message"
 
-# Inside a linked worktree the tree belongs to one agent by construction, so
-# the sweep refusal does not apply there and 'git add -u' stays the default.
 repo="$HOME/work/record-sweep-worktree"
 init_repo "$repo" master
 desc="${RUN_ID}-sweep-worktree"
@@ -1018,10 +1008,8 @@ assert_equal "$(git -C "$repo" rev-parse HEAD)" "$head_before" \
   "record commits nothing when an option is missing its value"
 
 # A bare '--' ends option parsing and names nothing. Unlike an option missing
-# its value, that is not an error: it leaves the 'git add -u' default in
-# force, exactly as omitting the file flags entirely would. That default only
-# survives in a worktree now that a main checkout refuses an unnamed sweep,
-# so this runs inside one.
+# its value, that is not an error: it leaves the 'git add -u' default in force,
+# exactly as omitting the file flags entirely would.
 repo="$HOME/work/record-bare-dashdash"
 init_repo "$repo" master
 desc="${RUN_ID}-bare-dashdash"
@@ -1054,9 +1042,6 @@ files=$(changed_files_in_head "$repo")
 assert_contains "$files" "file1.txt" "record keeps the --files list when -- follows it"
 assert_contains "$files" "-dash.txt" "record stages the path named after --"
 
-# The 'git add -u' default without --files only survives in a worktree, whose
-# tree belongs to one agent by construction; a main checkout now refuses the
-# same unnamed sweep (covered below), so this runs inside a worktree.
 repo="$HOME/work/record-add-u"
 init_repo "$repo" master
 desc="${RUN_ID}-add-u"

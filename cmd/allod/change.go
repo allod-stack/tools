@@ -418,10 +418,6 @@ func changeRecord(args []string) {
 	repo := resolveGitRepo("")
 	branch := currentBranch(repo)
 
-	// The handoff file 'begin' (and '--resume') write into the private
-	// git-dir names the branch it created there. Its absence means 'begin'
-	// was never called for this checkout, which is the in-place default-
-	// branch flow, so record proceeds exactly as it always has.
 	gitDir, ok := gitOutput(repo, "rev-parse", "--path-format=absolute", "--git-dir")
 	if !ok {
 		exit(1)
@@ -436,10 +432,7 @@ func changeRecord(args []string) {
 		die(2, "refusing to commit directly to protected branch '%s'; run 'allod change begin' first", branch)
 	}
 
-	// Staging a bare 'git add -u' sweeps every tracked modification, which is
-	// safe only inside a linked worktree, where the tree belongs to one
-	// agent by construction. In the main checkout, where a concurrent agent's
-	// edit could be swept, an unnamed tracked change is refused instead.
+	// Only a main checkout can hold another agent's edits; a linked worktree is one agent's.
 	if len(files) == 0 && mainRepoDir(repo) == repo {
 		if diff, ok := gitOutput(repo, "diff", "--name-only"); ok && diff != "" {
 			die(7, "refusing to stage unnamed tracked changes in a shared checkout: %s; use --files to name what to record", strings.ReplaceAll(diff, "\n", ", "))
