@@ -190,10 +190,7 @@ func currentBranch(dir string) string {
 	return branch
 }
 
-// defaultRemoteBranch resolves origin's default branch from its recorded
-// HEAD, or reports failure rather than guessing one. A caller that needs a
-// branch either way refuses, naming the repair: `git -C <repo> remote
-// set-head origin -a`.
+// Reports false when origin/HEAD does not resolve; callers name the repair, never guess.
 func defaultRemoteBranch(dir string) (string, bool) {
 	ref, ok := gitOutput(dir, "symbolic-ref", "refs/remotes/origin/HEAD")
 	if !ok {

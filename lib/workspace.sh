@@ -66,10 +66,7 @@ workspace_collect_worktrees() {
   done < <(git -C "$repo_dir" worktree list --porcelain 2>/dev/null; printf '\n')
 }
 
-# Print origin's default branch and exit 0, or print nothing and exit
-# non-zero when it cannot be resolved. A caller that needs an answer either
-# way must resolve one itself or refuse, naming the repair:
-# `git -C <repo> remote set-head origin -a`.
+# Prints origin's default branch, or prints nothing and fails; never guesses.
 workspace_repo_default_branch() {
   local dir="$1" ref
   ref=$(git -C "$dir" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null) || return 1

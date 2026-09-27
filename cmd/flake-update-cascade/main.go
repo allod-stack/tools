@@ -221,16 +221,14 @@ type cascade struct {
 	// boundary are entered: a pin of anything else is external.
 	identity   map[string]string
 	byIdentity map[string][]string
-	// pins holds each repository's workspace pins as read before anything
-	// is pulled: the graph the order is built from. defaults caches each
-	// repository's resolved default branch, defaultsFailed caches the ones
-	// that would not resolve so they are asked of git once each, and
-	// protected says whether the resolved branch is listed in
-	// protected-branches, in every mode.
-	pins           map[string][]pin
-	defaults       map[string]string
+	// pins holds each repository's workspace pins, the graph the order is built from.
+	pins map[string][]pin
+	// defaults caches each repository's resolved default branch.
+	defaults map[string]string
+	// defaultsFailed marks repositories whose default branch would not resolve.
 	defaultsFailed map[string]bool
-	protected      map[string]bool
+	// protected says whether the resolved default branch is listed in protected-branches.
+	protected map[string]bool
 
 	// heads caches the branch heads read this run, keyed by URL and ref; an
 	// empty value records a failed read so it is not retried. pushed holds,
@@ -573,8 +571,7 @@ func (c *cascade) execute() int {
 			say("  listed in active-pr-branches (GPG-signed commits required), skipping — handle manually")
 			continue
 		case skipProtect:
-			// Resolved during preflight — the whole run would have aborted
-			// there had this repo's default branch not resolved.
+			// Already resolved in preflight, or the run would have aborted there.
 			branch, _ := c.defaultBranchOf(repo)
 			say("  protected branch (%s) — re-run with --pr to create a PR", branch)
 			continue
@@ -587,7 +584,7 @@ func (c *cascade) execute() int {
 			continue
 		}
 
-		// Resolved during preflight, same as above.
+		// Already resolved in preflight, or the run would have aborted there.
 		defaultBranch, _ := c.defaultBranchOf(repo)
 
 		say("  pulling...")

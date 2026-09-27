@@ -79,13 +79,7 @@ func globDirs(dir string) []string {
 	return append(append(plain, dotted...), doubleDotted...)
 }
 
-// defaultBranch is workspace_repo_default_branch: origin's HEAD with the
-// remote prefix removed. It fails rather than guessing 'master' when origin's
-// HEAD does not resolve — a repo cloned with a limited fetch, or one whose
-// origin/HEAD was cleared by `git remote set-head origin -d` — since a
-// guessed base is exactly the wrong answer this tool cannot tell from a right
-// one (allod/tools#126). The repair is the same one workspace_repo_default_branch's
-// other callers name: `git -C <repo> remote set-head origin -a`.
+// defaultBranch is workspace_repo_default_branch; it reports false rather than guessing when origin/HEAD does not resolve.
 func defaultBranch(dir string) (string, bool) {
 	ref, ok := gitCapture(dir, "symbolic-ref", "refs/remotes/origin/HEAD")
 	if !ok {

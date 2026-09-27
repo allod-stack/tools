@@ -8,11 +8,7 @@ import (
 	"testing"
 )
 
-// workspaceTestGit runs one git command against dir for this file's own
-// fixtures, carrying a fixed identity so a commit needs no repo config. It is
-// deliberately self-contained rather than reusing secret_test.go's gitRun,
-// which sits behind the 'secret' build tag and so is not always in the
-// binary this test is part of.
+// Not secret_test.go's gitRun: that sits behind the 'secret' build tag.
 func workspaceTestGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
@@ -30,11 +26,6 @@ func workspaceTestGit(t *testing.T, dir string, args ...string) {
 	}
 }
 
-// TestDefaultRemoteBranchFailsWithoutGuessing is defaultRemoteBranch's
-// witness for allod/tools#126: a repo whose origin/HEAD does not resolve
-// must fail, not guess 'master'. The fixture reaches that state the way the
-// issue documents it — `git remote set-head origin -d` with no fetch since —
-// rather than by omitting the usual clone/fetch that sets origin/HEAD.
 func TestDefaultRemoteBranchFailsWithoutGuessing(t *testing.T) {
 	root := t.TempDir()
 	origin := filepath.Join(root, "origin.git")

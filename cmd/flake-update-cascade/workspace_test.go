@@ -8,8 +8,7 @@ import (
 	"testing"
 )
 
-// cascadeTestGit runs one git command against dir for this file's fixtures,
-// carrying a fixed identity so a commit needs no repo config.
+// cascadeTestGit runs one git command against dir with a fixed identity.
 func cascadeTestGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
@@ -27,11 +26,6 @@ func cascadeTestGit(t *testing.T, dir string, args ...string) {
 	}
 }
 
-// TestDefaultBranchFailsWithoutGuessing is this package's own copy of
-// workspace_repo_default_branch's contract (allod/tools#126): a repo whose
-// origin/HEAD does not resolve must fail, not guess 'master'. The fixture
-// reaches that state the way the issue documents it — `git remote set-head
-// origin -d` with no fetch since.
 func TestDefaultBranchFailsWithoutGuessing(t *testing.T) {
 	root := t.TempDir()
 	origin := filepath.Join(root, "origin.git")
@@ -59,11 +53,6 @@ func TestDefaultBranchFailsWithoutGuessing(t *testing.T) {
 	}
 }
 
-// TestDefaultBranchOfRefusesRatherThanGuess is the same contract through the
-// cascade's own cache, which is what preflight consults before deciding
-// whether a repository is eligible: defaultBranchOf must report failure (and
-// remember it, rather than re-asking git every time) instead of handing back
-// a guessed branch name.
 func TestDefaultBranchOfRefusesRatherThanGuess(t *testing.T) {
 	root := t.TempDir()
 	origin := filepath.Join(root, "origin.git")

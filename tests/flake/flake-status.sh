@@ -40,9 +40,7 @@ write_lock "$HOME/work/gamma" "$REV_A" false
 mkdir -p "$HOME/work/no-lock/.git"
 : > "$HOME/work/no-lock/.git/HEAD"
 
-# unheaded pins demo at the same revision as alpha and delta, so it never
-# changes which repo is "the" differing one — it only exercises the health
-# warning for a repo whose origin/HEAD cannot be resolved (allod/tools#126).
+# unheaded pins demo at the same revision as alpha and delta, so it stays out of the differing count.
 write_lock "$HOME/work/unheaded" "$REV_A" true
 
 # epsilon holds the pins --upstream must compare to the branch each lock

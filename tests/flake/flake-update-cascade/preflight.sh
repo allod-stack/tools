@@ -20,9 +20,7 @@ unset MOCK_FAIL_GIT
 assert_equal "$(grep -c '^nix' "$MOCK_LOG" || true)" "0" \
   "does not invoke Nix after combined preflight failures"
 
-# A repository whose origin/HEAD cannot be resolved is refused, not guessed
-# at as 'master' (allod/tools#126): the cascade names the repair rather than
-# picking a base branch that might not exist.
+# An unresolvable origin/HEAD is refused, naming the repair.
 new_home no-default-branch
 write_direct_lock "$HOME/work/app"
 export MOCK_FAIL_GIT='symbolic-ref refs/remotes/origin/HEAD'
