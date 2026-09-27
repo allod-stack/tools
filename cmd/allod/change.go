@@ -143,12 +143,6 @@ func changeBegin(args []string) {
 	} else {
 		start = protected
 		if !isProtected {
-			// defaultRemoteBranch now fails loudly on its own, so this
-			// assertion is redundant with the check below; it is kept for
-			// parity with the pre-existing behavior (allod/tools#126).
-			if !gitQuiet(repo, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD") {
-				die(1, "could not resolve the default branch of '%s'; run: git -C %s remote set-head origin -a", repo, repo)
-			}
 			resolved, ok := defaultRemoteBranch(repo)
 			if !ok {
 				die(1, "could not resolve the default branch of '%s'; run: git -C %s remote set-head origin -a", repo, repo)

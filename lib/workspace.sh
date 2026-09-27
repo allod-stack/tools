@@ -67,10 +67,8 @@ workspace_collect_worktrees() {
 }
 
 # Print origin's default branch and exit 0, or print nothing and exit
-# non-zero when it cannot be resolved — a repo cloned with a limited fetch,
-# or one whose origin/HEAD was cleared by `git remote set-head origin -d`.
-# It never guesses 'master' (allod/tools#126): a caller that needs an answer
-# either way must resolve one itself or refuse, naming the repair
+# non-zero when it cannot be resolved. A caller that needs an answer either
+# way must resolve one itself or refuse, naming the repair:
 # `git -C <repo> remote set-head origin -a`.
 workspace_repo_default_branch() {
   local dir="$1" ref

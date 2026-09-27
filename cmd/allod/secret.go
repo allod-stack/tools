@@ -247,12 +247,6 @@ type secretTarget struct {
 // too, and is named as such rather than silently swept into the landing.
 func requireLandingBranch(checkout string) string {
 	branch := currentBranch(checkout)
-	// defaultRemoteBranch now fails rather than guessing 'master'
-	// (allod/tools#126), so this assertion duplicates its own failure; kept
-	// for parity with change begin, which keeps the same redundant check.
-	if !gitQuiet(checkout, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD") {
-		die(1, "could not resolve the default branch of %s; run: git -C %s remote set-head origin -a", checkout, checkout)
-	}
 	defaultBranch, ok := defaultRemoteBranch(checkout)
 	if !ok {
 		die(1, "could not resolve the default branch of %s; run: git -C %s remote set-head origin -a", checkout, checkout)
