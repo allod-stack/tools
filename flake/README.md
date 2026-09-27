@@ -98,6 +98,7 @@ lock order: `flake.lock: update allod-tools, vm/nixpkgs`.
 | `--dry-run` | Show what would change without modifying anything. |
 
 **Pre-flight checks** (runs on all repos before any changes):
+- Origin's default branch cannot be resolved -> error naming the repair (`git -C <repo> remote set-head origin -a`); never guessed as `master`
 - Not on default branch -> error
 - Dirty working tree -> error
 - Unpushed commits -> error

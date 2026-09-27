@@ -146,20 +146,21 @@ func run(args []string) int {
 	}
 
 	c := &cascade{
-		options:       opts,
-		workDir:       workDir(),
-		activePRFile:  filepath.Join(homeDir(), ".config", "git", "active-pr-branches"),
-		allowedFile:   filepath.Join(homeDir(), ".config", "git", "allowed-external-remotes"),
-		protectedFile: filepath.Join(homeDir(), ".config", "git", "protected-branches"),
-		inputLabel:    strings.Join(opts.names, ", "),
-		inputSlug:     strings.Join(opts.names, "-"),
-		heads:         make(map[string]string),
-		pushed:        make(map[string]pushedHead),
-		defaults:      make(map[string]string),
-		protected:     make(map[string]bool),
-		prMoved:       make(map[string]string),
-		waiting:       make(map[string][]blocker),
-		wouldMove:     make(map[string]bool),
+		options:        opts,
+		workDir:        workDir(),
+		activePRFile:   filepath.Join(homeDir(), ".config", "git", "active-pr-branches"),
+		allowedFile:    filepath.Join(homeDir(), ".config", "git", "allowed-external-remotes"),
+		protectedFile:  filepath.Join(homeDir(), ".config", "git", "protected-branches"),
+		inputLabel:     strings.Join(opts.names, ", "),
+		inputSlug:      strings.Join(opts.names, "-"),
+		heads:          make(map[string]string),
+		pushed:         make(map[string]pushedHead),
+		defaults:       make(map[string]string),
+		defaultsFailed: make(map[string]bool),
+		protected:      make(map[string]bool),
+		prMoved:        make(map[string]string),
+		waiting:        make(map[string][]blocker),
+		wouldMove:      make(map[string]bool),
 	}
 	c.repos = collectRepos(c.workDir)
 	return c.runCombinedCycle()
@@ -222,11 +223,14 @@ type cascade struct {
 	byIdentity map[string][]string
 	// pins holds each repository's workspace pins as read before anything
 	// is pulled: the graph the order is built from. defaults caches each
-	// repository's default branch, and protected says whether that branch
-	// is listed in protected-branches, in every mode.
-	pins      map[string][]pin
-	defaults  map[string]string
-	protected map[string]bool
+	// repository's resolved default branch, defaultsFailed caches the ones
+	// that would not resolve so they are asked of git once each, and
+	// protected says whether the resolved branch is listed in
+	// protected-branches, in every mode.
+	pins           map[string][]pin
+	defaults       map[string]string
+	defaultsFailed map[string]bool
+	protected      map[string]bool
 
 	// heads caches the branch heads read this run, keyed by URL and ref; an
 	// empty value records a failed read so it is not retried. pushed holds,
@@ -406,7 +410,11 @@ func (c *cascade) preflight() {
 			continue
 		}
 
-		defaultBranch := c.defaultBranchOf(repo)
+		defaultBranch, ok := c.defaultBranchOf(repo)
+		if !ok {
+			c.addError(repo, fmt.Sprintf("could not resolve the default branch of origin; run: git -C %s remote set-head origin -a", dir))
+			continue
+		}
 		c.protected[repo] = fileHasLine(c.protectedFile, "work/"+repo+" "+defaultBranch)
 		if !c.prMode && !c.dryRun && c.protected[repo] {
 			c.status[repo] = skipProtect
@@ -476,13 +484,20 @@ func (c *cascade) preflight() {
 }
 
 // defaultBranchOf is defaultBranch for a repository, asked of git once.
-func (c *cascade) defaultBranchOf(repo string) string {
-	branch, ok := c.defaults[repo]
-	if !ok {
-		branch = defaultBranch(c.repoDir(repo))
-		c.defaults[repo] = branch
+func (c *cascade) defaultBranchOf(repo string) (string, bool) {
+	if branch, ok := c.defaults[repo]; ok {
+		return branch, true
 	}
-	return branch
+	if c.defaultsFailed[repo] {
+		return "", false
+	}
+	branch, ok := defaultBranch(c.repoDir(repo))
+	if !ok {
+		c.defaultsFailed[repo] = true
+		return "", false
+	}
+	c.defaults[repo] = branch
+	return branch, true
 }
 
 // addError records a preflight error against a repository, joining it to any
@@ -558,7 +573,10 @@ func (c *cascade) execute() int {
 			say("  listed in active-pr-branches (GPG-signed commits required), skipping — handle manually")
 			continue
 		case skipProtect:
-			say("  protected branch (%s) — re-run with --pr to create a PR", c.defaultBranchOf(repo))
+			// Resolved during preflight — the whole run would have aborted
+			// there had this repo's default branch not resolved.
+			branch, _ := c.defaultBranchOf(repo)
+			say("  protected branch (%s) — re-run with --pr to create a PR", branch)
 			continue
 		}
 
@@ -569,7 +587,8 @@ func (c *cascade) execute() int {
 			continue
 		}
 
-		defaultBranch := c.defaultBranchOf(repo)
+		// Resolved during preflight, same as above.
+		defaultBranch, _ := c.defaultBranchOf(repo)
 
 		say("  pulling...")
 		if !gitInherit(dir, "pull") {

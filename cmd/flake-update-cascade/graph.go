@@ -91,12 +91,17 @@ func (c *cascade) workspacePins(lock *flakelock.Lock) []pin {
 			continue
 		}
 		for _, target := range c.byIdentity[id] {
-			branch := c.defaultBranchOf(target)
+			// A target whose own default branch will not resolve is marked
+			// onDefault: false here rather than propagating the failure: the
+			// preflight pass over c.repos reaches every target on its own and
+			// aborts the whole run there if the target has a flake.lock,
+			// which is the only case a false negative here could matter.
+			branch, ok := c.defaultBranchOf(target)
 			pins = append(pins, pin{
 				input:     name,
 				target:    target,
 				ref:       src.Ref,
-				onDefault: src.Ref == "HEAD" || src.Ref == branch || src.Ref == "refs/heads/"+branch,
+				onDefault: ok && (src.Ref == "HEAD" || src.Ref == branch || src.Ref == "refs/heads/"+branch),
 			})
 		}
 	}

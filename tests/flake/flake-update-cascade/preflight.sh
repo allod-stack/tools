@@ -20,6 +20,21 @@ unset MOCK_FAIL_GIT
 assert_equal "$(grep -c '^nix' "$MOCK_LOG" || true)" "0" \
   "does not invoke Nix after combined preflight failures"
 
+# A repository whose origin/HEAD cannot be resolved is refused, not guessed
+# at as 'master' (allod/tools#126): the cascade names the repair rather than
+# picking a base branch that might not exist.
+new_home no-default-branch
+write_direct_lock "$HOME/work/app"
+export MOCK_FAIL_GIT='symbolic-ref refs/remotes/origin/HEAD'
+output=$(run_cascade demo 2>&1) && status=0 || status=$?
+assert_equal "$status" "1" "refuses when the default branch cannot be resolved"
+assert_contains "$output" \
+  "could not resolve the default branch of origin; run: git -C $HOME/work/app remote set-head origin -a" \
+  "names the origin/HEAD repair"
+unset MOCK_FAIL_GIT
+assert_equal "$(grep -c '^nix' "$MOCK_LOG" || true)" "0" \
+  "does not invoke Nix when the default branch cannot be resolved"
+
 new_home skips
 mkdir -p "$HOME/work/no-lock/.git"
 mkdir -p "$HOME/work/no-input/.git"
