@@ -247,40 +247,98 @@ write_branch_list() {
   done
 }
 
-# Builds one case and prints the directory the hook is to run in. One branch
-# cannot be checked out twice, so a worktree case keeps the branch under test out
-# of the main repository entirely.
-init_case_checkout() {
-  local home="$1" origin="$2" checkout="$3" worktree="$4" branch="$5" name="$6"
-  local main="$home/$checkout" run_dir
-  mkdir -p "$main"
-  git -C "$main" init -q --initial-branch=bootstrap >/dev/null
-  git -C "$main" config user.name "Test User"
-  git -C "$main" config user.email "test@example.invalid"
-  git -C "$main" commit -q --allow-empty -m initial >/dev/null
-  if [ "$origin" != "-" ]; then
-    git -C "$main" remote add origin "$origin"
+init_case_repo() {
+  local dir="$1" branch="$2"
+  mkdir -p "$dir"
+  git -C "$dir" init -q --initial-branch="$branch" >/dev/null
+  git -C "$dir" config user.name "Test User"
+  git -C "$dir" config user.email "test@example.invalid"
+  git -C "$dir" commit -q --allow-empty -m initial >/dev/null
+}
+
+set_case_origin() {
+  local dir="$1" origin="$2"
+  if git -C "$dir" remote get-url origin >/dev/null 2>&1; then
+    git -C "$dir" remote remove origin
   fi
-  if [ "$worktree" = "yes" ]; then
-    run_dir="$home/worktrees/$name"
-    mkdir -p "$home/worktrees"
-    git -C "$main" worktree add -q -b "$branch" "$run_dir" >/dev/null
+  if [ "$origin" != "-" ]; then
+    git -C "$dir" remote add origin "$origin"
+  fi
+}
+
+# Prints the $HOME the case runs under: git reports physical paths, so a
+# symlinked or slash-suffixed $HOME is a way for a correctly placed checkout to
+# read as misplaced.
+make_case_home() {
+  local root="$1" home_kind="$2"
+  case "$home_kind" in
+    plain) mkdir -p "$root/home"; printf '%s\n' "$root/home" ;;
+    trailing-slash) mkdir -p "$root/home"; printf '%s/\n' "$root/home" ;;
+    symlink)
+      mkdir -p "$root/real-home"
+      ln -s "$root/real-home" "$root/home"
+      printf '%s\n' "$root/home"
+      ;;
+    *) printf 'unknown home kind: %s\n' "$home_kind" >&2; return 1 ;;
+  esac
+}
+
+# Builds one case and prints the directory the hook is to run in.
+init_case_checkout() {
+  local home="$1" origin="$2" checkout="$3" layout="$4" branch="$5" name="$6"
+  local repo="${home%/}/$checkout" run_dir super source_repo git_dir
+  case "$layout" in
+    plain|worktree)
+      init_case_repo "$repo" bootstrap
+      ;;
+    submodule)
+      super="$(dirname "$repo")"
+      source_repo="${home%/}/submodule-sources/$name"
+      init_case_repo "$source_repo" bootstrap
+      init_case_repo "$super" bootstrap
+      git -C "$super" -c protocol.file.allow=always \
+        submodule add -q "$source_repo" "$(basename "$repo")" >/dev/null
+      git -C "$super" commit -q -m "add submodule" >/dev/null
+      git -C "$repo" config user.name "Test User"
+      git -C "$repo" config user.email "test@example.invalid"
+      ;;
+    separate-git-dir)
+      git_dir="${home%/}/gitdirs/$name"
+      mkdir -p "$(dirname "$git_dir")" "$repo"
+      git -C "$repo" init -q --separate-git-dir="$git_dir" \
+        --initial-branch=bootstrap >/dev/null
+      git -C "$repo" config user.name "Test User"
+      git -C "$repo" config user.email "test@example.invalid"
+      git -C "$repo" commit -q --allow-empty -m initial >/dev/null
+      ;;
+    *)
+      printf 'unknown layout: %s\n' "$layout" >&2
+      return 1
+      ;;
+  esac
+  set_case_origin "$repo" "$origin"
+  # One branch cannot be checked out twice, so a worktree case keeps the branch
+  # under test out of the repository it belongs to.
+  if [ "$layout" = "worktree" ]; then
+    run_dir="${home%/}/worktrees/$name"
+    mkdir -p "${home%/}/worktrees"
+    git -C "$repo" worktree add -q -b "$branch" "$run_dir" >/dev/null
   else
-    run_dir="$main"
-    git -C "$main" checkout -q -b "$branch" >/dev/null
+    run_dir="$repo"
+    git -C "$repo" checkout -q -b "$branch" >/dev/null
   fi
   printf '%s\n' "$run_dir"
 }
 
 case_count=0
-while IFS=$'\t' read -r -u 3 name entries origin checkout worktree branch verdict expected; do
+while IFS=$'\t' read -r -u 3 name entries origin checkout layout home_kind branch verdict expected; do
   case "$name" in ''|\#*) continue ;; esac
   case_count=$((case_count + 1))
-  case_home="$tmp/cases/$name/home"
-  mkdir -p "$case_home/.config/git"
-  write_branch_list "$case_home/.config/git/protected-branches" "$entries"
+  case_home="$(make_case_home "$tmp/cases/$name" "$home_kind")"
+  mkdir -p "${case_home%/}/.config/git"
+  write_branch_list "${case_home%/}/.config/git/protected-branches" "$entries"
   export HOME="$case_home"
-  run_dir="$(init_case_checkout "$case_home" "$origin" "$checkout" "$worktree" "$branch" "$name")"
+  run_dir="$(init_case_checkout "$case_home" "$origin" "$checkout" "$layout" "$branch" "$name")"
 
   set +e
   ( cd "$run_dir" && bash "$policy" pre-commit ) >"$test_stdout" 2>"$test_stderr" </dev/null

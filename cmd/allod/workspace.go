@@ -134,12 +134,24 @@ func resolvePatchSourceArg(sourceRepo string) string {
 	return ""
 }
 
+// mainRepoDir is the repository a checkout belongs to. The common dir is only
+// the repository's own .git in the ordinary layout: a submodule and
+// --separate-git-dir both put it elsewhere, so the parent of the common dir is
+// the answer for a linked worktree alone. Same rule as the hook's $main_repo.
 func mainRepoDir(dir string) string {
-	common, ok := gitOutput(dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	common, commonOK := gitOutput(dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	gitDir, gitDirOK := gitOutput(dir, "rev-parse", "--path-format=absolute", "--git-dir")
+	if !commonOK || !gitDirOK {
+		die(1, "not a git repository: %s", dir)
+	}
+	if gitDir != common {
+		return filepath.Dir(common)
+	}
+	top, ok := gitOutput(dir, "rev-parse", "--show-toplevel")
 	if !ok {
 		die(1, "not a git repository: %s", dir)
 	}
-	return filepath.Dir(common)
+	return top
 }
 
 func repoLookupKey(dir string) (string, bool) {

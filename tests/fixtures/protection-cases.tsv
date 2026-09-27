@@ -10,8 +10,12 @@
 #   name      case id, also the fixture directory name
 #   entries   ';'-separated '<path>=<branch>' lines of the list file, '-' for empty
 #   origin    origin remote URL, '-' for a repository with no origin
-#   checkout  $HOME-relative path of the MAIN repository
-#   worktree  'yes' when the branch under test lives in a linked worktree of it
+#   checkout  $HOME-relative path of the repository under test; under the
+#             'submodule' layout its last component is the submodule's path
+#             inside the superproject named by the rest
+#   layout    plain, worktree, submodule, or separate-git-dir
+#   home      plain, symlink ($HOME is a symlink to the real directory), or
+#             trailing-slash ($HOME ends in '/')
 #   branch    the branch under test
 #   verdict   unprotected, protected (an entry matches the checkout path), or
 #             mismatch (an entry matches the origin identity while none matches
@@ -21,25 +25,30 @@
 # The verdict is the branch-list answer, not what each rail then does with it:
 # 'allod change begin' and 'record' refuse a misplaced checkout on every branch,
 # while the hook blocks only the entry's branch.
-canonical-checkout	work/acme/widget=master	ssh://git@forge.example:2222/acme/widget.git	work/acme/widget	no	master	protected	-
-canonical-agent-branch	work/acme/widget=master	ssh://git@forge.example:2222/acme/widget.git	work/acme/widget	no	agent/x	unprotected	-
-flat-checkout	work/acme/widget=master	ssh://git@forge.example:2222/acme/widget.git	work/acme-widget	no	master	mismatch	work/acme/widget
-flat-checkout-agent-branch	work/acme/widget=master	ssh://git@forge.example:2222/acme/widget.git	work/acme-widget	no	agent/x	unprotected	-
-scp-origin	work/acme/widget=master	git@forge.example:acme/widget.git	elsewhere/widget	no	master	mismatch	work/acme/widget
-https-origin	work/acme/widget=master	https://forge.example/acme/widget	elsewhere/widget	no	master	mismatch	work/acme/widget
-trailing-slash-origin	work/acme/widget=master	https://forge.example/acme/widget.git/	elsewhere/widget	no	master	mismatch	work/acme/widget
-entry-is-bare-identity	acme/widget=master	https://forge.example/acme/widget.git	acme/widget	no	master	protected	-
-bare-identity-flat-checkout	acme/widget=master	https://forge.example/acme/widget.git	work/acme/widget	no	master	mismatch	acme/widget
-linked-worktree-protected	work/acme/widget=master	ssh://git@forge.example:2222/acme/widget.git	work/acme/widget	yes	master	protected	-
-linked-worktree-agent-branch	work/acme/widget=master	ssh://git@forge.example:2222/acme/widget.git	work/acme/widget	yes	agent/x	unprotected	-
-linked-worktree-flat-checkout	work/acme/widget=master	ssh://git@forge.example:2222/acme/widget.git	work/acme-widget	yes	master	mismatch	work/acme/widget
-no-origin	work/acme/widget=master	-	work/acme-widget	no	master	unprotected	-
-unlisted-origin	work/acme/widget=master	https://forge.example/other/gadget.git	work/other/gadget	no	master	unprotected	-
-unparseable-origin	work/acme/widget=master	widget	work/acme-widget	no	master	unprotected	-
-lookalike-other-owner	work/acme/widget=master	https://forge.example/otherowner/widget.git	work/otherowner/widget	no	master	unprotected	-
-lookalike-repo-suffix	work/acme/widget=master	https://forge.example/acme/widget-extra.git	work/acme/widget-extra	no	master	unprotected	-
-lookalike-owner-prefix	work/xacme/widget=master	https://forge.example/acme/widget.git	work/acme/widget	no	master	unprotected	-
-second-entry-remote-matches	work/other/gadget=main;work/acme/widget=master	https://forge.example/acme/widget.git	work/flat-widget	no	master	mismatch	work/acme/widget
-path-entry-wins	work/flat-widget=main;work/acme/widget=master	https://forge.example/acme/widget.git	work/flat-widget	no	main	protected	-
-path-entry-suppresses-remote	work/flat-widget=main;work/acme/widget=master	https://forge.example/acme/widget.git	work/flat-widget	no	master	unprotected	-
-empty-list	-	https://forge.example/acme/widget.git	work/acme/widget	no	master	unprotected	-
+canonical-checkout	work/acme/widget=master	ssh://git@forge.example:2222/acme/widget.git	work/acme/widget	plain	plain	master	protected	-
+canonical-agent-branch	work/acme/widget=master	ssh://git@forge.example:2222/acme/widget.git	work/acme/widget	plain	plain	agent/x	unprotected	-
+flat-checkout	work/acme/widget=master	ssh://git@forge.example:2222/acme/widget.git	work/acme-widget	plain	plain	master	mismatch	work/acme/widget
+flat-checkout-agent-branch	work/acme/widget=master	ssh://git@forge.example:2222/acme/widget.git	work/acme-widget	plain	plain	agent/x	unprotected	-
+scp-origin	work/acme/widget=master	git@forge.example:acme/widget.git	elsewhere/widget	plain	plain	master	mismatch	work/acme/widget
+https-origin	work/acme/widget=master	https://forge.example/acme/widget	elsewhere/widget	plain	plain	master	mismatch	work/acme/widget
+trailing-slash-origin	work/acme/widget=master	https://forge.example/acme/widget.git/	elsewhere/widget	plain	plain	master	mismatch	work/acme/widget
+entry-is-bare-identity	acme/widget=master	https://forge.example/acme/widget.git	acme/widget	plain	plain	master	protected	-
+bare-identity-flat-checkout	acme/widget=master	https://forge.example/acme/widget.git	work/acme/widget	plain	plain	master	mismatch	acme/widget
+linked-worktree-protected	work/acme/widget=master	ssh://git@forge.example:2222/acme/widget.git	work/acme/widget	worktree	plain	master	protected	-
+linked-worktree-agent-branch	work/acme/widget=master	ssh://git@forge.example:2222/acme/widget.git	work/acme/widget	worktree	plain	agent/x	unprotected	-
+linked-worktree-flat-checkout	work/acme/widget=master	ssh://git@forge.example:2222/acme/widget.git	work/acme-widget	worktree	plain	master	mismatch	work/acme/widget
+submodule-canonical	work/super/lib=master	https://forge.example/acme/lib.git	work/super/lib	submodule	plain	master	protected	-
+submodule-agent-branch	work/super/lib=master	https://forge.example/acme/lib.git	work/super/lib	submodule	plain	agent/x	unprotected	-
+submodule-flat-checkout	work/acme/lib=master	https://forge.example/acme/lib.git	work/super/lib	submodule	plain	master	mismatch	work/acme/lib
+separate-git-dir-canonical	work/acme/widget=master	https://forge.example/acme/widget.git	work/acme/widget	separate-git-dir	plain	master	protected	-
+separate-git-dir-agent-branch	work/acme/widget=master	https://forge.example/acme/widget.git	work/acme/widget	separate-git-dir	plain	agent/x	unprotected	-
+no-origin	work/acme/widget=master	-	work/acme-widget	plain	plain	master	unprotected	-
+unlisted-origin	work/acme/widget=master	https://forge.example/other/gadget.git	work/other/gadget	plain	plain	master	unprotected	-
+unparseable-origin	work/acme/widget=master	widget	work/acme-widget	plain	plain	master	unprotected	-
+lookalike-other-owner	work/acme/widget=master	https://forge.example/otherowner/widget.git	work/otherowner/widget	plain	plain	master	unprotected	-
+lookalike-repo-suffix	work/acme/widget=master	https://forge.example/acme/widget-extra.git	work/acme/widget-extra	plain	plain	master	unprotected	-
+lookalike-owner-prefix	work/xacme/widget=master	https://forge.example/acme/widget.git	work/acme/widget	plain	plain	master	unprotected	-
+second-entry-remote-matches	work/other/gadget=main;work/acme/widget=master	https://forge.example/acme/widget.git	work/flat-widget	plain	plain	master	mismatch	work/acme/widget
+path-entry-wins	work/flat-widget=main;work/acme/widget=master	https://forge.example/acme/widget.git	work/flat-widget	plain	plain	main	protected	-
+path-entry-suppresses-remote	work/flat-widget=main;work/acme/widget=master	https://forge.example/acme/widget.git	work/flat-widget	plain	plain	master	unprotected	-
+empty-list	-	https://forge.example/acme/widget.git	work/acme/widget	plain	plain	master	unprotected	-

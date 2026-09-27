@@ -12,12 +12,15 @@ import (
 // its header states the columns.
 var protectionCasesFile = filepath.Join("..", "..", "tests", "fixtures", "protection-cases.tsv")
 
+const protectionCaseFields = 9
+
 type protectionCase struct {
 	name     string
 	entries  string
 	origin   string
 	checkout string
-	worktree string
+	layout   string
+	home     string
 	branch   string
 	verdict  string
 	expected string
@@ -39,12 +42,14 @@ func loadProtectionCases(t *testing.T) []protectionCase {
 			continue
 		}
 		fields := strings.Split(line, "\t")
-		if len(fields) != 8 {
-			t.Fatalf("%s: want 8 tab-separated fields, got %d in %q", protectionCasesFile, len(fields), line)
+		if len(fields) != protectionCaseFields {
+			t.Fatalf("%s: want %d tab-separated fields, got %d in %q",
+				protectionCasesFile, protectionCaseFields, len(fields), line)
 		}
 		cases = append(cases, protectionCase{
 			name: fields[0], entries: fields[1], origin: fields[2], checkout: fields[3],
-			worktree: fields[4], branch: fields[5], verdict: fields[6], expected: fields[7],
+			layout: fields[4], home: fields[5], branch: fields[6], verdict: fields[7],
+			expected: fields[8],
 		})
 	}
 	if err := scanner.Err(); err != nil {
@@ -56,9 +61,37 @@ func loadProtectionCases(t *testing.T) []protectionCase {
 	return cases
 }
 
-// buildProtectionFixture lays one case out under home and returns the directory
-// the rails are pointed at: the main repository, or its linked worktree.
-func buildProtectionFixture(t *testing.T, home string, testCase protectionCase) string {
+// caseHome returns the $HOME a case runs under, which is not always a plain
+// directory: git reports physical paths, so a symlinked or slash-suffixed $HOME
+// is a way for a correctly placed checkout to read as misplaced.
+func caseHome(t *testing.T, testCase protectionCase) string {
+	t.Helper()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	switch testCase.home {
+	case "plain":
+		return root
+	case "trailing-slash":
+		return root + string(filepath.Separator)
+	case "symlink":
+		real := filepath.Join(root, "real-home")
+		link := filepath.Join(root, "home")
+		if err := os.MkdirAll(real, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(real, link); err != nil {
+			t.Fatal(err)
+		}
+		return link
+	default:
+		t.Fatalf("case %s: unknown home %q", testCase.name, testCase.home)
+		return ""
+	}
+}
+
+func writeCaseBranchList(t *testing.T, home string, testCase protectionCase) {
 	t.Helper()
 	config := filepath.Join(home, ".config", "git")
 	if err := os.MkdirAll(config, 0755); err != nil {
@@ -77,34 +110,79 @@ func buildProtectionFixture(t *testing.T, home string, testCase protectionCase) 
 	if err := os.WriteFile(filepath.Join(config, "protected-branches"), []byte(list.String()), 0644); err != nil {
 		t.Fatal(err)
 	}
+}
 
-	main := filepath.Join(home, filepath.FromSlash(testCase.checkout))
-	if err := os.MkdirAll(main, 0755); err != nil {
+func initCaseRepo(t *testing.T, dir, branch string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	workspaceTestGit(t, main, "init", "-q", "--initial-branch=bootstrap")
-	workspaceTestGit(t, main, "commit", "-q", "--allow-empty", "-m", "initial")
-	if testCase.origin != "-" {
-		workspaceTestGit(t, main, "remote", "add", "origin", testCase.origin)
+	workspaceTestGit(t, dir, "init", "-q", "--initial-branch="+branch)
+	workspaceTestGit(t, dir, "commit", "-q", "--allow-empty", "-m", "initial")
+}
+
+func setCaseOrigin(t *testing.T, dir, origin string) {
+	t.Helper()
+	if _, ok := gitOutput(dir, "remote", "get-url", "origin"); ok {
+		workspaceTestGit(t, dir, "remote", "remove", "origin")
 	}
-	// One branch cannot be checked out twice, so a worktree case leaves the main
-	// repository on the branch it was created with and never on the one tested.
-	if testCase.worktree == "yes" {
+	if origin != "-" {
+		workspaceTestGit(t, dir, "remote", "add", "origin", origin)
+	}
+}
+
+// buildProtectionFixture lays one case out under home and returns the directory
+// the rails are pointed at.
+func buildProtectionFixture(t *testing.T, home string, testCase protectionCase) string {
+	t.Helper()
+	writeCaseBranchList(t, home, testCase)
+	repo := filepath.Join(home, filepath.FromSlash(testCase.checkout))
+
+	switch testCase.layout {
+	case "plain":
+		initCaseRepo(t, repo, "bootstrap")
+	case "worktree":
+		initCaseRepo(t, repo, "bootstrap")
+	case "submodule":
+		super := filepath.Dir(repo)
+		source := filepath.Join(home, "submodule-sources", testCase.name)
+		initCaseRepo(t, source, "bootstrap")
+		initCaseRepo(t, super, "bootstrap")
+		workspaceTestGit(t, super, "-c", "protocol.file.allow=always",
+			"submodule", "add", "-q", source, filepath.Base(repo))
+		workspaceTestGit(t, super, "commit", "-q", "-m", "add submodule")
+	case "separate-git-dir":
+		gitDir := filepath.Join(home, "gitdirs", testCase.name)
+		if err := os.MkdirAll(filepath.Dir(gitDir), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(repo, 0755); err != nil {
+			t.Fatal(err)
+		}
+		workspaceTestGit(t, repo, "init", "-q", "--separate-git-dir="+gitDir,
+			"--initial-branch=bootstrap")
+		workspaceTestGit(t, repo, "commit", "-q", "--allow-empty", "-m", "initial")
+	default:
+		t.Fatalf("case %s: unknown layout %q", testCase.name, testCase.layout)
+	}
+
+	setCaseOrigin(t, repo, testCase.origin)
+
+	// One branch cannot be checked out twice, so a worktree case keeps the branch
+	// under test out of the repository it belongs to.
+	if testCase.layout == "worktree" {
 		linked := filepath.Join(home, "worktrees", testCase.name)
-		workspaceTestGit(t, main, "worktree", "add", "-q", "-b", testCase.branch, linked)
+		workspaceTestGit(t, repo, "worktree", "add", "-q", "-b", testCase.branch, linked)
 		return linked
 	}
-	workspaceTestGit(t, main, "checkout", "-q", "-b", testCase.branch)
-	return main
+	workspaceTestGit(t, repo, "checkout", "-q", "-b", testCase.branch)
+	return repo
 }
 
 func TestLookupProtectionSharedCases(t *testing.T) {
 	for _, testCase := range loadProtectionCases(t) {
 		t.Run(testCase.name, func(t *testing.T) {
-			home, err := filepath.EvalSymlinks(t.TempDir())
-			if err != nil {
-				t.Fatal(err)
-			}
+			home := caseHome(t, testCase)
 			t.Setenv("HOME", home)
 			dir := buildProtectionFixture(t, home, testCase)
 
@@ -139,19 +217,18 @@ func TestLookupProtectionSharedCases(t *testing.T) {
 // A misplaced checkout is misplaced whatever is checked out: the rails refuse it
 // on every branch, unlike the hook, which blocks only the entry's branch.
 func TestLookupProtectionMisplacedOnEveryBranch(t *testing.T) {
-	home, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("HOME", home)
-	dir := buildProtectionFixture(t, home, protectionCase{
+	testCase := protectionCase{
 		name:     "misplaced-on-agent-branch",
 		entries:  "work/acme/widget=master",
 		origin:   "ssh://git@forge.example:2222/acme/widget.git",
 		checkout: "work/acme-widget",
-		worktree: "no",
+		layout:   "plain",
+		home:     "plain",
 		branch:   "agent/x",
-	})
+	}
+	home := caseHome(t, testCase)
+	t.Setenv("HOME", home)
+	dir := buildProtectionFixture(t, home, testCase)
 
 	found, ok := lookupProtection(dir)
 	if !ok || !found.misplaced() {

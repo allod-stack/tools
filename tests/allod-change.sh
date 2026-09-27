@@ -1373,6 +1373,49 @@ capture record_in_repo "$worktree" -m "must be refused" -f tracked.txt
 assert_status 8 "record refuses from a worktree of a misplaced protected checkout"
 assert_names_both_paths "$CAPTURE_OUTPUT" "the worktree record refusal"
 
+# A populated submodule and a --separate-git-dir checkout are repositories whose
+# git directory does not sit beside the worktree.
+
+super="$HOME/work/super"
+init_repo "$super" master
+sub_source="$TMP/lib-source"
+git init -q -b master "$sub_source"
+git -C "$sub_source" config user.name "Test User"
+git -C "$sub_source" config user.email "test@example.invalid"
+printf 'lib\n' > "$sub_source/lib.txt"
+git -C "$sub_source" add lib.txt
+git -C "$sub_source" commit -qm "lib initial"
+git -C "$super" -c protocol.file.allow=always submodule add -q "$sub_source" lib
+git -C "$super" commit -qm "add submodule"
+sub="$super/lib"
+git -C "$sub" config user.name "Test User"
+git -C "$sub" config user.email "test@example.invalid"
+git -C "$sub" checkout -q -B master
+protect_repo "$sub" master
+printf 'edit\n' > "$sub/lib.txt"
+capture record_in_repo "$sub" -m "must be refused" -f lib.txt
+assert_status 2 "record refuses the protected branch of a populated submodule"
+assert_contains "$CAPTURE_OUTPUT" "protected branch 'master'" \
+  "the submodule refusal names the branch"
+
+repo="$HOME/work/separate-widget"
+mkdir -p "$repo"
+git init -q --separate-git-dir="$TMP/separate-gitdir" -b master "$repo"
+git -C "$repo" config user.name "Test User"
+git -C "$repo" config user.email "test@example.invalid"
+printf 'base\n' > "$repo/tracked.txt"
+git -C "$repo" add tracked.txt
+git -C "$repo" commit -qm initial
+git -C "$repo" remote add origin "https://forge.example/acme/separate.git"
+protect_repo "$repo" master
+capture "$ALLOD" change begin "$repo"
+assert_status 1 "begin requires -d in a --separate-git-dir protected repo"
+assert_contains "$CAPTURE_OUTPUT" "requires -d" \
+  "the separate-git-dir refusal explains the failure"
+printf 'edit\n' > "$repo/tracked.txt"
+capture record_in_repo "$repo" -m "must be refused" -f tracked.txt
+assert_status 2 "record refuses the protected branch of a --separate-git-dir repo"
+
 # The guard does not over-fire: an origin that matches no entry stays silent.
 repo="$HOME/work/other/gadget"
 init_repo_no_remote "$repo" master
