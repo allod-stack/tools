@@ -89,8 +89,12 @@ branch_listed() {
     branch_list_unreadable "$list_file"
   fi
 
+  # Through the environment, never -v: awk expands escape sequences in a -v
+  # value, so a path or branch containing a backslash would reach the comparison
+  # with it silently removed.
   status=0
-  awk -v repo="$main_relative" -v branch="$branch" '
+  PRP_REPO="$main_relative" PRP_BRANCH="$branch" awk '
+      BEGIN { repo = ENVIRON["PRP_REPO"]; branch = ENVIRON["PRP_BRANCH"] }
       /^[[:space:]]*(#|$)/ { next }
       { path = $1; sub(/\/+$/, "", path) }
       path == repo && $2 == branch { found = 1 }
@@ -106,7 +110,8 @@ branch_listed() {
   # An entry keyed on this very path settles the question: the checkout is where
   # its entry puts it, so there is no misplacement to report.
   status=0
-  awk -v repo="$main_relative" '
+  PRP_REPO="$main_relative" awk '
+      BEGIN { repo = ENVIRON["PRP_REPO"] }
       /^[[:space:]]*(#|$)/ { next }
       { path = $1; sub(/\/+$/, "", path) }
       path == repo { found = 1 }
@@ -127,8 +132,12 @@ branch_listed() {
   # work/acme/widget names. substr(), not a regex: an owner or repository name
   # may contain a dot.
   status=0
-  expected_path="$(awk -v identity="$identity" -v branch="$branch" '
-    BEGIN { wanted = tolower(identity); needle = "/" wanted }
+  expected_path="$(PRP_IDENTITY="$identity" PRP_BRANCH="$branch" awk '
+    BEGIN {
+      wanted = tolower(ENVIRON["PRP_IDENTITY"])
+      needle = "/" wanted
+      branch = ENVIRON["PRP_BRANCH"]
+    }
     /^[[:space:]]*(#|$)/ { next }
     {
       path = $1
