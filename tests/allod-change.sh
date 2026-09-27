@@ -519,6 +519,79 @@ assert_status 5 "begin rejects an existing remote agent branch in an unprotected
 assert_contains "$CAPTURE_OUTPUT" "already exists on origin" \
   "begin remote branch failure is actionable for an unprotected repo"
 
+# --resume: the remote agent branch is the start point, not a collision.
+
+repo="$HOME/work/begin-resume"
+init_repo "$repo" master
+protect_repo "$repo" master
+desc="${RUN_ID}-resume"
+# Push the agent branch from a throwaway clone so the shared checkout never
+# holds a local agent/* ref, matching a branch another session started.
+seed="$TMP/seed-resume"
+git clone -q "$(git -C "$repo" remote get-url origin)" "$seed"
+git -C "$seed" config user.name "Test User"
+git -C "$seed" config user.email "test@example.invalid"
+git -C "$seed" checkout -q -b "agent/$desc"
+printf 'resumed\n' > "$seed/tracked.txt"
+git -C "$seed" commit -qam "first commit on the agent branch"
+git -C "$seed" push -q origin "agent/$desc"
+seed_sha=$(git -C "$seed" rev-parse HEAD)
+capture "$ALLOD" change begin --resume "$desc" "$repo"
+assert_status 0 "begin --resume picks up an existing remote agent branch"
+path="$CAPTURE_OUTPUT"
+WORKTREES+=("$path")
+case "$path" in
+  "$HOME/changes/work-begin-resume-${desc}-"??????)
+    pass "begin --resume sites the worktree under ~/changes like -d" ;;
+  *) fail "begin --resume sites the worktree under ~/changes like -d" "actual path: $path" ;;
+esac
+assert_equal "$(git -C "$path" branch --show-current)" "agent/$desc" \
+  "begin --resume checks out the agent branch"
+assert_equal "$(git -C "$path" rev-parse HEAD)" "$seed_sha" \
+  "begin --resume starts from the remote agent branch, not the default branch"
+assert_equal "$(git -C "$path" rev-parse --abbrev-ref '@{upstream}')" "origin/agent/$desc" \
+  "begin --resume tracks the remote agent branch"
+git_dir=$(git -C "$path" rev-parse --path-format=absolute --git-dir)
+assert_equal "$(cat "$git_dir/allod-change-branch")" "agent/$desc" \
+  "begin --resume writes the branch handoff file"
+assert_equal "$(git -C "$repo" branch --show-current)" "master" \
+  "begin --resume leaves the shared checkout on its default branch"
+printf 'resumed twice\n' > "$path/tracked.txt"
+record_in_repo "$path" -m "second commit on the resumed branch" >/dev/null
+assert_equal "$(git -C "$repo" ls-remote origin "refs/heads/agent/$desc" | cut -f1)" \
+  "$(git -C "$path" rev-parse HEAD)" \
+  "record pushes a resumed branch additively"
+
+repo="$HOME/work/begin-resume-missing"
+init_repo "$repo" master
+capture "$ALLOD" change begin --resume "${RUN_ID}-resume-missing" "$repo"
+assert_status 5 "begin --resume refuses a branch that is missing on origin"
+assert_contains "$CAPTURE_OUTPUT" "does not exist on origin" "begin --resume names the missing remote branch"
+assert_contains "$CAPTURE_OUTPUT" "use -d" "begin --resume points at -d for a new change"
+assert_equal "$(changes_entries_for "${RUN_ID}-resume-missing")" "0" \
+  "begin --resume creates no worktree when the branch is missing on origin"
+
+repo="$HOME/work/begin-resume-local"
+init_repo "$repo" master
+desc="${RUN_ID}-resume-local"
+path=$(begin_worktree "$desc" "$repo")
+git -C "$path" push -q origin "agent/$desc"
+capture "$ALLOD" change begin --resume "$desc" "$repo"
+assert_status 5 "begin --resume refuses a branch already checked out locally"
+assert_contains "$CAPTURE_OUTPUT" "already exists locally" \
+  "begin --resume names the local branch collision"
+assert_equal "$(worktree_count "$repo")" "2" "begin --resume adds no second worktree for a local branch"
+
+repo="$HOME/work/begin-resume-both"
+init_repo "$repo" master
+capture "$ALLOD" change begin -d "${RUN_ID}-both" --resume "${RUN_ID}-both" "$repo"
+assert_status 1 "begin refuses -d and --resume together"
+assert_contains "$CAPTURE_OUTPUT" "not both" "begin names the -d/--resume conflict"
+capture "$ALLOD" change begin --resume "${RUN_ID}-both" -d "${RUN_ID}-both" "$repo"
+assert_status 1 "begin refuses --resume and -d together in either order"
+capture "$ALLOD" change begin --resume
+assert_status 1 "begin --resume requires a description"
+
 repo="$HOME/work/allod/tools"
 init_repo "$repo" master
 protect_repo "$repo" master

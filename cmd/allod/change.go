@@ -80,12 +80,22 @@ func rollbackWorktree(repo, path, branch string) {
 
 func changeBegin(args []string) {
 	description, repoArg := "", ""
-	descriptionSet := false
+	descriptionSet, resume := false, false
 	for len(args) > 0 {
 		switch args[0] {
 		case "-d":
 			requireValue(args, args[0])
+			if descriptionSet {
+				die(1, "change begin takes one of -d or --resume, not both")
+			}
 			description, descriptionSet = args[1], true
+			args = args[2:]
+		case "--resume":
+			requireValue(args, args[0])
+			if descriptionSet {
+				die(1, "change begin takes one of -d or --resume, not both")
+			}
+			description, descriptionSet, resume = args[1], true, true
 			args = args[2:]
 		case "-h", "--help":
 			fmt.Fprint(stdout, changeUsageText)
@@ -117,21 +127,36 @@ func changeBegin(args []string) {
 	if !gitQuiet(repo, "remote", "get-url", "origin") {
 		die(1, "repository '%s' has no 'origin' remote; an isolated change needs one", repo)
 	}
-	base := protected
-	if !isProtected {
-		if !gitQuiet(repo, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD") {
+	// The worktree starts from a remote-tracking ref: the default branch for a
+	// new change, or the agent branch itself when resuming one that already
+	// exists on origin. Either way the local branch is created here, so an
+	// existing local one is a collision in both modes.
+	start := ""
+	if resume {
+		start = branch
+		if localRefExists(repo, branch) {
+			die(5, "branch '%s' already exists locally; resume creates it from origin, so use that checkout or clean it up", branch)
+		}
+		if !remoteRefExists(repo, branch) {
+			die(5, "branch '%s' does not exist on origin; use -d to start a new change", branch)
+		}
+	} else {
+		start = protected
+		if !isProtected {
+			if !gitQuiet(repo, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD") {
+				die(1, "could not resolve the default branch of '%s'; run: git -C %s remote set-head origin -a", repo, repo)
+			}
+			start = defaultRemoteBranch(repo)
+		}
+		if start == "" {
 			die(1, "could not resolve the default branch of '%s'; run: git -C %s remote set-head origin -a", repo, repo)
 		}
-		base = defaultRemoteBranch(repo)
-	}
-	if base == "" {
-		die(1, "could not resolve the default branch of '%s'; run: git -C %s remote set-head origin -a", repo, repo)
-	}
-	if localRefExists(repo, branch) {
-		die(5, "branch '%s' already exists locally; use a different -d or clean it up", branch)
-	}
-	if remoteRefExists(repo, branch) {
-		die(5, "branch '%s' already exists on origin; use a different -d or clean it up", branch)
+		if localRefExists(repo, branch) {
+			die(5, "branch '%s' already exists locally; use a different -d or clean it up", branch)
+		}
+		if remoteRefExists(repo, branch) {
+			die(5, "branch '%s' already exists on origin; use a different -d or clean it up", branch)
+		}
 	}
 	if output, status := captureCommand(repo, nil, true, "git", "fetch", "origin"); status != 0 {
 		if output != "" {
@@ -139,8 +164,8 @@ func changeBegin(args []string) {
 		}
 		exit(status)
 	}
-	if !gitQuiet(repo, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/"+base+"^{commit}") {
-		die(1, "'origin/%s' does not exist in '%s' after fetching origin; check the branch name", base, repo)
+	if !gitQuiet(repo, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/"+start+"^{commit}") {
+		die(1, "'origin/%s' does not exist in '%s' after fetching origin; check the branch name", start, repo)
 	}
 
 	changes := filepath.Join(homeDir(), "changes")
@@ -151,7 +176,7 @@ func changeBegin(args []string) {
 	if err != nil {
 		die(1, "could not create worktree directory")
 	}
-	if output, status := captureCommand(repo, nil, true, "git", "worktree", "add", path, "-b", branch, "origin/"+base); status != 0 {
+	if output, status := captureCommand(repo, nil, true, "git", "worktree", "add", path, "-b", branch, "origin/"+start); status != 0 {
 		if output != "" {
 			fmt.Fprintln(stderr, output)
 		}

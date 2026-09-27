@@ -115,7 +115,7 @@ func usageText() string {
 }
 
 const changeUsageText = `Usage:
-  allod change begin [-d <description>] [<repo-path>]
+  allod change begin [-d <description> | --resume <description>] [<repo-path>]
   allod change list [<repo-path>]
   allod change record -m <message> [--files <file>...]
   allod change record -M <file|-> [--files <file>...]
@@ -126,6 +126,11 @@ const changeUsageText = `Usage:
 creates a worktree under ~/changes on a new agent/<description> branch.
 Without it, begin prints the shared checkout path and creates nothing, which
 is the in-place flow for committing to a repo's default branch.
+
+'--resume' picks up an agent/<description> branch that already exists on
+origin: the same worktree under ~/changes, on a local branch tracking the
+remote one, so record and submit continue it. It refuses a branch that is
+missing on origin or already present locally, and cannot be combined with -d.
 
 'list' prints one tab-separated row per linked worktree — repo, path, branch,
 state — where the state is the one thing standing between that worktree and

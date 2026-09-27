@@ -146,6 +146,16 @@ Worktrees land under `~/changes/<slug>-<description>-XXXXXX`, outside `~/work`
 so the workspace stays exactly the checkouts the registry declares. Nothing may
 depend on that path — enumerate with `git worktree list` or `allod change list`.
 
+`--resume` picks up a branch another session already pushed. It creates the
+same worktree, on a local `agent/<description>` that tracks the one on origin,
+so `record` and `submit` continue the branch instead of starting a new one. It
+refuses when the branch is missing on origin, when a local branch of that name
+already exists (another worktree may hold it), or when `-d` is also given:
+
+```bash
+path=$(allod change begin --resume fix-thing ~/work/allod/tools)
+```
+
 Without `-d`, `begin` prints the shared checkout path and creates nothing. That
 is the in-place flow for committing to a repo's default branch, which git cannot
 isolate anyway since one branch cannot be checked out in two worktrees. A
