@@ -66,3 +66,6 @@ trailing-slash-home-canonical	work/acme/widget=master	https://forge.example/acme
 trailing-slash-home-flat-checkout	work/acme/widget=master	https://forge.example/acme/widget.git	work/acme-widget	plain	trailing-slash	master	mismatch	work/acme/widget
 entry-trailing-slash	work/acme/widget/=master	https://forge.example/acme/widget.git	work/acme/widget	plain	plain	master	protected	-
 entry-trailing-slash-flat-checkout	work/acme/widget/=master	https://forge.example/acme/widget.git	work/acme-widget	plain	plain	master	mismatch	work/acme/widget
+uppercase-origin-identity	work/acme/widget=master	https://forge.example/Acme/Widget.git	work/acme-widget	plain	plain	master	mismatch	work/acme/widget
+uppercase-entry-path	work/Acme/Widget=master	https://forge.example/acme/widget.git	work/acme-widget	plain	plain	master	mismatch	work/Acme/Widget
+path-match-stays-case-sensitive	work/Acme/Widget=master	-	work/acme/widget	plain	plain	master	unprotected	-

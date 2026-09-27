@@ -122,17 +122,20 @@ branch_listed() {
   identity="$(remote_identity)" || return 1
 
   # Every entry naming the identity is consulted, not just the first: a
-  # repository may have one entry per protected branch. index(), not a regex:
-  # an owner or repository name may contain a dot.
+  # repository may have one entry per protected branch. Compared without case,
+  # because the forge is: origin Acme/Widget is the repository the entry
+  # work/acme/widget names. substr(), not a regex: an owner or repository name
+  # may contain a dot.
   status=0
   expected_path="$(awk -v identity="$identity" -v branch="$branch" '
+    BEGIN { wanted = tolower(identity); needle = "/" wanted }
     /^[[:space:]]*(#|$)/ { next }
     {
       path = $1
       sub(/\/+$/, "", path)
-      needle = "/" identity
-      n = length(path) - length(needle)
-      if (path == identity || (n >= 0 && substr(path, n + 1) == needle)) {
+      lower = tolower(path)
+      n = length(lower) - length(needle)
+      if (lower == wanted || (n >= 0 && substr(lower, n + 1) == needle)) {
         if ($2 == branch) {
           print path
           exit

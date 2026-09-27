@@ -282,8 +282,11 @@ func (p protection) start() string {
 
 // remoteMatches reports whether an entry path names the repository identity:
 // the whole path, or its final owner/repo components. A '/' is required before
-// the identity so that work/xacme/widget does not answer for acme/widget.
+// the identity so that work/xacme/widget does not answer for acme/widget, and
+// the comparison ignores case because the forge does: origin Acme/Widget is the
+// repository the entry work/acme/widget names. The path match stays exact.
 func remoteMatches(entryPath, identity string) bool {
+	entryPath, identity = strings.ToLower(entryPath), strings.ToLower(identity)
 	return entryPath == identity || strings.HasSuffix(entryPath, "/"+identity)
 }
 
