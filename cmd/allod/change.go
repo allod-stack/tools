@@ -127,10 +127,7 @@ func changeBegin(args []string) {
 	if !gitQuiet(repo, "remote", "get-url", "origin") {
 		die(1, "repository '%s' has no 'origin' remote; an isolated change needs one", repo)
 	}
-	// The worktree starts from a remote-tracking ref: the default branch for a
-	// new change, or the agent branch itself when resuming one that already
-	// exists on origin. Either way the local branch is created here, so an
-	// existing local one is a collision in both modes.
+	// Both modes create the local branch here, so one that already exists is a collision in both.
 	start := ""
 	if resume {
 		start = branch
