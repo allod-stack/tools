@@ -37,8 +37,6 @@ func changeMain(args []string) {
 // 'change record', so a caller can tell this one apart.
 const exitMisplacedCheckout = 8
 
-// requireCanonicalCheckout stops a rail that cannot do its job: the checkout is
-// a repository protected-branches names, sitting somewhere its entry does not.
 func requireCanonicalCheckout(found protection) {
 	if !found.misplaced() {
 		return

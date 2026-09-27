@@ -224,11 +224,10 @@ cd "$nohook_repo"
 assert_allows "tracked hook: succeeds silently when no .hookspath or .hooks/" \
   bash "$policy" pre-commit
 
-# --- Repository identity: the cases shared with the Go rails ---
+# --- Cases shared with the Go rails ---
 #
-# tests/fixtures/protection-cases.tsv is the one table both implementations of
-# the rule answer to; its header states the columns. Each row gets its own $HOME
-# because the branch list is part of the case.
+# tests/fixtures/protection-cases.tsv states the columns. Each row gets its own
+# $HOME, because the branch list is part of the case.
 
 cases_file="$repo_root/tests/fixtures/protection-cases.tsv"
 if [ ! -r "$cases_file" ]; then
@@ -424,14 +423,13 @@ assert_names_both_paths() {
   pass "$description"
 }
 
-# A fixture hooks directory, so the cases below witness the hook the way git
-# invokes it and not only the script called by hand.
+# Lets a case witness the hook the way git invokes it, not only called by hand.
 hooks_fixture="$tmp/hooks-fixture"
 mkdir -p "$hooks_fixture"
 printf '%s\nexec bash %q pre-commit "$@"\n' "$hook_shebang" "$policy" > "$hooks_fixture/pre-commit"
 chmod +x "$hooks_fixture/pre-commit"
 
-# --- Near miss: a protected repo checked out where no entry names ---
+# --- Near miss ---
 
 export HOME="$tmp/near-miss-home"
 mkdir -p "$HOME/.config/git"
@@ -498,7 +496,6 @@ else
 fi
 rm -f "$HOME/.config/git/signing-required-branches"
 
-# Driven through core.hooksPath, as git would.
 git -C "$near_repo" config core.hooksPath "$hooks_fixture"
 printf 'edit\n' > "$near_repo/file.txt"
 git -C "$near_repo" add file.txt
@@ -510,8 +507,7 @@ assert_names_both_paths "near miss: the refused commit names both paths" \
 assert_same_commit "near miss: the refused commit left HEAD where it was" \
   "$(git -C "$near_repo" rev-parse HEAD)" "$near_sha"
 
-# The same fixture hooks directory over a repository nothing lists, so the
-# refusal above cannot be core.hooksPath breaking every commit.
+# Proves the refusal is the policy and not core.hooksPath breaking every commit.
 unlisted_repo="$HOME/work/other/gadget"
 mkdir -p "$unlisted_repo"
 git -C "$unlisted_repo" init -q --initial-branch=master
@@ -525,7 +521,7 @@ git -C "$unlisted_repo" add file.txt
 assert_allows "unlisted repo: git commit succeeds through the same core.hooksPath" \
   git -C "$unlisted_repo" commit -m "allowed"
 
-# --- Linked worktree of a canonically placed protected repo ---
+# --- Linked worktree ---
 
 export HOME="$tmp/worktree-home"
 mkdir -p "$HOME/.config/git"
@@ -579,7 +575,7 @@ git -C "$wt_agent" add file.txt
 assert_allows "worktree: git commit on an agent branch succeeds through core.hooksPath" \
   git -C "$wt_agent" commit -m "allowed"
 
-# --- Repo-local hook dispatch from a linked worktree ---
+# --- Repo-local hook dispatch ---
 #
 # .git is a file in a worktree, so this only works through the common git dir.
 

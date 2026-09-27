@@ -12,9 +12,8 @@ if [ "$git_dir" = "$common_dir" ]; then
 else
   main_repo="$(dirname "$common_dir")"
 fi
-# Resolved once, because git reports physical paths: a $HOME that is a symlink,
-# or one carrying a trailing slash, would otherwise fail to prefix them and turn
-# a correctly placed checkout into a misplaced one.
+# git reports physical paths, so an unresolved $HOME would fail to prefix them
+# and turn a correctly placed checkout into a misplaced one.
 home_physical="$HOME"
 while [ "${home_physical%/}" != "$home_physical" ]; do home_physical="${home_physical%/}"; done
 if home_resolved="$(cd "$HOME" 2>/dev/null && pwd -P)"; then
@@ -78,12 +77,10 @@ branch_listed() {
   protection_detail=""
 
   [ -n "$branch" ] || return 1
-  # An absent list is no policy on this machine. A list that is there and cannot
-  # be read is a failure, and awk cannot report it: gawk skips an unreadable or
-  # non-regular argument with a warning and still exits on its END status, so a
-  # directory in place of the file would read as "not listed". Every caller of
-  # this function sits in an 'if' condition or a command substitution, where
-  # errexit is suspended, so the status checks below are explicit too.
+  # An absent list is no policy; an unreadable one is a failure, and awk cannot
+  # report it: gawk skips an unreadable or non-regular argument with a warning
+  # and still exits on its END status. Every caller sits where errexit is
+  # suspended, so awk's status is read explicitly below too.
   [ -e "$list_file" ] || return 1
   if [ ! -f "$list_file" ] || [ ! -r "$list_file" ]; then
     branch_list_unreadable "$list_file"
@@ -126,11 +123,9 @@ branch_listed() {
 
   identity="$(remote_identity)" || return 1
 
-  # Every entry naming the identity is consulted, not just the first: a
-  # repository may have one entry per protected branch. Compared without case,
-  # because the forge is: origin Acme/Widget is the repository the entry
-  # work/acme/widget names. substr(), not a regex: an owner or repository name
-  # may contain a dot.
+  # Every entry naming the identity, not just the first: a repository may have
+  # one per protected branch. Matched without case, because the forge is.
+  # substr(), not a regex: an owner or repository name may contain a dot.
   status=0
   expected_path="$(PRP_IDENTITY="$identity" PRP_BRANCH="$branch" awk '
     BEGIN {

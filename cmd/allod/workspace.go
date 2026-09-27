@@ -136,10 +136,9 @@ func resolvePatchSourceArg(sourceRepo string) string {
 	return ""
 }
 
-// mainRepoDir is the repository a checkout belongs to. The common dir is only
-// the repository's own .git in the ordinary layout: a submodule and
-// --separate-git-dir both put it elsewhere, so the parent of the common dir is
-// the answer for a linked worktree alone. Same rule as the hook's $main_repo.
+// The common dir is the repository's own .git in the ordinary layout only: a
+// submodule and --separate-git-dir put it elsewhere, so its parent is the answer
+// for a linked worktree alone. Same rule as the hook's $main_repo.
 func mainRepoDir(dir string) string {
 	common, commonOK := gitOutput(dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
 	gitDir, gitDirOK := gitOutput(dir, "rev-parse", "--path-format=absolute", "--git-dir")
@@ -156,9 +155,8 @@ func mainRepoDir(dir string) string {
 	return top
 }
 
-// physicalDir resolves symlinks, so that a $HOME which is one still prefixes the
-// paths git reports: git resolves them, and comparing the two as text turns a
-// correctly placed checkout into a misplaced one.
+// git reports resolved paths, so an unresolved $HOME would fail to prefix them
+// and turn a correctly placed checkout into a misplaced one.
 func physicalDir(path string) string {
 	if resolved, err := filepath.EvalSymlinks(path); err == nil {
 		return resolved
@@ -175,14 +173,10 @@ func repoLookupKey(dir string) (string, bool) {
 	return filepath.ToSlash(rel), true
 }
 
-// branchListEntry is one line of a branch list under ~/.config/git: the
-// repository the line is about, and the branch it constrains.
 type branchListEntry struct{ path, branch string }
 
-// branchListLineLimit bounds one line of a branch list. bufio.Scanner's default
-// is 64 KiB, and a line over the limit ends the scan: without this and the
-// scanner.Err check below, a long line would hide every entry behind it while
-// the hook's awk went on reading them.
+// bufio.Scanner default of 64 KiB ends the scan at a longer line, which with
+// the scanner.Err check below would hide every entry behind it.
 const branchListLineLimit = 1 << 20
 
 func readBranchList(path string) ([]branchListEntry, error) {
@@ -216,8 +210,8 @@ func readBranchList(path string) ([]branchListEntry, error) {
 	return entries, nil
 }
 
-// branchList is readBranchList for a rail: an absent list is no policy on this
-// machine, but one that is present and unreadable is never an absence of policy.
+// An absent list is no policy on this machine; a present unreadable one is never
+// an absence of policy.
 func branchList(path string) []branchListEntry {
 	entries, err := readBranchList(path)
 	if err != nil {

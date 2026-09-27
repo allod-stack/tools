@@ -1312,10 +1312,6 @@ assert_contains "$CAPTURE_OUTPUT" "regular repository" "cleanup regular repo fai
   pass "cleanup regular repo refusal leaves branch intact" ||
   fail "cleanup regular repo refusal leaves branch intact"
 
-# Misplaced protected checkout: origin names a repo protected-branches lists,
-# and the checkout is not where that entry puts it. Both rails refuse before
-# touching anything, whatever branch is checked out.
-
 misplace_repo() {
   local repo="$1" entry="$2" branch="${3:-master}"
   init_repo_no_remote "$repo" "$branch"
@@ -1356,25 +1352,18 @@ assert_equal "$(git -C "$repo" diff --cached --name-only)" "" \
 assert_equal "$(git -C "$repo" log -1 --format=%s)" "initial" \
   "the refused record committed nothing"
 
-# On an agent branch too: the checkout is in the wrong place whatever is
-# checked out, which is where this differs from the hook.
 git -C "$repo" checkout -q -b "agent/${RUN_ID}-misplaced-branch"
 capture record_in_repo "$repo" -m "must be refused" -f tracked.txt
 assert_status 8 "record refuses a misplaced protected checkout on an agent branch"
 git -C "$repo" checkout -q master
 git -C "$repo" checkout -q -- tracked.txt
 
-# A linked worktree of a misplaced checkout is misplaced too: identity is the
-# repository, not the directory the worktree happens to sit in.
 worktree="$TMP/misplaced-worktree"
 git -C "$repo" worktree add -q -b "agent/${RUN_ID}-misplaced-wt" "$worktree"
 WORKTREES+=("$worktree")
 capture record_in_repo "$worktree" -m "must be refused" -f tracked.txt
 assert_status 8 "record refuses from a worktree of a misplaced protected checkout"
 assert_names_both_paths "$CAPTURE_OUTPUT" "the worktree record refusal"
-
-# Several entries for one repository: every branch they name is protected, and
-# begin branches from the first.
 
 repo="$HOME/work/two-entries"
 init_repo "$repo" master
@@ -1395,9 +1384,6 @@ assert_contains "$CAPTURE_OUTPUT" "protected branch 'release'" \
   "the second-entry refusal names that branch"
 git -C "$repo" checkout -q -- tracked.txt
 git -C "$repo" checkout -q master
-
-# A populated submodule and a --separate-git-dir checkout are repositories whose
-# git directory does not sit beside the worktree.
 
 super="$HOME/work/super"
 init_repo "$super" master
@@ -1439,7 +1425,6 @@ printf 'edit\n' > "$repo/tracked.txt"
 capture record_in_repo "$repo" -m "must be refused" -f tracked.txt
 assert_status 2 "record refuses the protected branch of a --separate-git-dir repo"
 
-# The guard does not over-fire: an origin that matches no entry stays silent.
 repo="$HOME/work/other/gadget"
 init_repo_no_remote "$repo" master
 git -C "$repo" remote add origin "https://forge.example/other/gadget.git"

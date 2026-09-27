@@ -74,7 +74,6 @@ func TestRepoFromURL(t *testing.T) {
 		{"https://forge.example/acme/widget", "acme/widget"},
 		{"https://forge.example/a/b/acme/widget.git", "acme/widget"},
 		{"/srv/git/acme/widget.git", "acme/widget"},
-		// Where this parts company with InferRepo.
 		{"https://forge.example/acme/widget.git/", "acme/widget"},
 		{"https://forge.example/acme/widget/", "acme/widget"},
 		{"widget", ""},

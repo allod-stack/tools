@@ -9,8 +9,6 @@ import (
 	"testing"
 )
 
-// protectionCasesFile is read by tests/git-hooks/protected-refs-policy.sh too;
-// its header states the columns.
 var protectionCasesFile = filepath.Join("..", "..", "tests", "fixtures", "protection-cases.tsv")
 
 const protectionCaseFields = 9
@@ -62,9 +60,8 @@ func loadProtectionCases(t *testing.T) []protectionCase {
 	return cases
 }
 
-// caseHome returns the $HOME a case runs under, which is not always a plain
-// directory: git reports physical paths, so a symlinked or slash-suffixed $HOME
-// is a way for a correctly placed checkout to read as misplaced.
+// git reports physical paths, so a symlinked or slash-suffixed $HOME is a way
+// for a correctly placed checkout to read as misplaced.
 func caseHome(t *testing.T, testCase protectionCase) string {
 	t.Helper()
 	root, err := filepath.EvalSymlinks(t.TempDir())
@@ -120,8 +117,6 @@ func writeCaseBranchList(t *testing.T, home string, testCase protectionCase) {
 	}
 }
 
-// captureCliExit runs a rail helper that ends the program through die and reports
-// the exit code it asked for and what it wrote to stderr.
 func captureCliExit(t *testing.T, run func()) (int, string) {
 	t.Helper()
 	var buffer bytes.Buffer
@@ -166,8 +161,6 @@ func setCaseOrigin(t *testing.T, dir, origin string) {
 	}
 }
 
-// buildProtectionFixture lays one case out under home and returns the directory
-// the rails are pointed at.
 func buildProtectionFixture(t *testing.T, home string, testCase protectionCase) string {
 	t.Helper()
 	writeCaseBranchList(t, home, testCase)
@@ -260,8 +253,8 @@ func TestLookupProtectionSharedCases(t *testing.T) {
 	}
 }
 
-// A line longer than bufio.Scanner's default token must not swallow the entries
-// behind it: the rail would read a shorter list than the hook's awk does.
+// A long line must not swallow the entries behind it: the rail would then read a
+// shorter list than the hook's awk does.
 func TestReadBranchListKeepsEntriesBehindALongLine(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "protected-branches")
 	content := "# " + strings.Repeat("x", 200*1024) + "\nwork/acme/widget master\n"
@@ -295,8 +288,6 @@ func TestReadBranchListUnreadableFileIsAnError(t *testing.T) {
 	}
 }
 
-// A misplaced checkout is misplaced whatever is checked out: the rails refuse it
-// on every branch, unlike the hook, which blocks only the entry's branch.
 func TestLookupProtectionMisplacedOnEveryBranch(t *testing.T) {
 	testCase := protectionCase{
 		name:     "misplaced-on-agent-branch",

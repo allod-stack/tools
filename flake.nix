@@ -229,9 +229,8 @@
         touch "$out"
       '';
 
-      # tests/fixtures/protection-cases.tsv only holds the Go and bash
-      # implementations of the branch-list rule together while both suites run.
-      # goChecks runs the Go half; nothing ran the bash half.
+      # The bash half of tests/fixtures/protection-cases.tsv; goChecks runs the
+      # Go half. Both must run, or the table stops holding them together.
       gitHookSuites = pkgs.runCommand "git-hook-suites"
         {
           nativeBuildInputs = [
