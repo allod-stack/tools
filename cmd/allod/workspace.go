@@ -237,13 +237,32 @@ func originRepo(dir string) string {
 // somewhere else: the checkout is misplaced, and no rail may read that as
 // "unprotected".
 type protection struct {
-	branch   string
+	branches []string
 	expected string
 	actual   string
 	identity string
 }
 
 func (p protection) misplaced() bool { return p.expected != "" }
+
+// covers reports whether the list constrains this branch. A repository may have
+// several entries, and every branch they name is listed, not only the first.
+func (p protection) covers(branch string) bool {
+	for _, listed := range p.branches {
+		if listed == branch {
+			return true
+		}
+	}
+	return false
+}
+
+// start is the branch 'change begin' branches from: the first the list names.
+func (p protection) start() string {
+	if len(p.branches) == 0 {
+		return ""
+	}
+	return p.branches[0]
+}
 
 // remoteMatches reports whether an entry path names the repository identity:
 // the whole path, or its final owner/repo components. A '/' is required before
@@ -258,26 +277,35 @@ func remoteMatches(entryPath, identity string) bool {
 func lookupProtection(dir string) (protection, bool) {
 	actual := identityPath(dir)
 	entries := branchList(filepath.Join(homeDir(), ".config", "git", "protected-branches"))
+
+	var branches []string
 	for _, entry := range entries {
 		if entry.path == actual {
-			return protection{branch: entry.branch, actual: actual}, true
+			branches = append(branches, entry.branch)
 		}
 	}
+	if len(branches) > 0 {
+		return protection{branches: branches, actual: actual}, true
+	}
+
 	identity := originRepo(dir)
 	if identity == "" {
 		return protection{}, false
 	}
+	expected := ""
 	for _, entry := range entries {
-		if remoteMatches(entry.path, identity) {
-			return protection{
-				branch:   entry.branch,
-				expected: entry.path,
-				actual:   actual,
-				identity: identity,
-			}, true
+		if !remoteMatches(entry.path, identity) {
+			continue
 		}
+		if expected == "" {
+			expected = entry.path
+		}
+		branches = append(branches, entry.branch)
 	}
-	return protection{}, false
+	if len(branches) == 0 {
+		return protection{}, false
+	}
+	return protection{branches: branches, expected: expected, actual: actual, identity: identity}, true
 }
 
 var unsafeSlug = regexp.MustCompile(`[^a-zA-Z0-9._-]`)

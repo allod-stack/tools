@@ -484,6 +484,20 @@ printf '%s %s %s %s\n' \
   | assert_allows "near miss: allows an agent branch push" \
     bash "$policy" pre-push origin "$near_origin"
 
+printf 'work/acme/widget agent/one\nwork/acme/widget agent/two\n' \
+  > "$HOME/.config/git/signing-required-branches"
+
+printf '%s %s %s %s\n' \
+  refs/heads/agent/two "$near_sha" refs/heads/agent/two "$zero" \
+  | assert_blocks "near miss: signing is required by every entry, not only the first" \
+    bash "$policy" pre-push origin "$near_origin"
+if grep -q "must be GPG-signed" "$test_stderr"; then
+  pass "near miss: the signing block names the requirement"
+else
+  fail "near miss: the signing block names the requirement" "stderr:" "$(cat "$test_stderr")"
+fi
+rm -f "$HOME/.config/git/signing-required-branches"
+
 # Driven through core.hooksPath, as git would.
 git -C "$near_repo" config core.hooksPath "$hooks_fixture"
 printf 'edit\n' > "$near_repo/file.txt"

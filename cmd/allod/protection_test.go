@@ -234,7 +234,7 @@ func TestLookupProtectionSharedCases(t *testing.T) {
 
 			found, ok := lookupProtection(dir)
 			verdict := "unprotected"
-			if ok && found.branch == testCase.branch {
+			if ok && found.covers(testCase.branch) {
 				verdict = "protected"
 				if found.misplaced() {
 					verdict = "mismatch"

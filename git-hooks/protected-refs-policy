@@ -65,7 +65,7 @@ branch_list_unreadable() {
 branch_listed() {
   local list_file="$1" branch="$2"
   local main_relative="${main_repo#"$HOME"/}"
-  local identity entry expected_path expected_branch status
+  local identity expected_path status
 
   protection_detail=""
 
@@ -111,27 +111,27 @@ branch_listed() {
 
   identity="$(remote_identity)" || return 1
 
-  # index(), not a regex: an owner or repository name may contain a dot.
+  # Every entry naming the identity is consulted, not just the first: a
+  # repository may have one entry per protected branch. index(), not a regex:
+  # an owner or repository name may contain a dot.
   status=0
-  entry="$(awk -v identity="$identity" '
+  expected_path="$(awk -v identity="$identity" -v branch="$branch" '
     /^[[:space:]]*(#|$)/ { next }
     {
       needle = "/" identity
       n = length($1) - length(needle)
       if ($1 == identity || (n >= 0 && substr($1, n + 1) == needle)) {
-        print $1 "\t" $2
-        exit
+        if ($2 == branch) {
+          print $1
+          exit
+        }
       }
     }
   ' "$list_file")" || status=$?
   if [ "$status" -gt 1 ]; then
     branch_list_unreadable "$list_file"
   fi
-  [ -n "$entry" ] || return 1
-
-  expected_path="${entry%%$'\t'*}"
-  expected_branch="${entry#*$'\t'}"
-  [ "$expected_branch" = "$branch" ] || return 1
+  [ -n "$expected_path" ] || return 1
 
   protection_detail="Origin identifies this repository as '$identity', whose entry expects the checkout at '$expected_path'; it is at '$main_relative'. Move the checkout to '$expected_path'."
   return 0

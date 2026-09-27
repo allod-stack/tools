@@ -129,7 +129,7 @@ func changeBegin(args []string) {
 	repo := resolveGitRepo(repoArg)
 	found, isProtected := lookupProtection(repo)
 	requireCanonicalCheckout(found)
-	protected := found.branch
+	protected := found.start()
 	if !descriptionSet {
 		if isProtected {
 			die(1, "change begin requires -d <description> to branch in protected repo '%s'", repo)
@@ -445,7 +445,7 @@ func changeRecord(args []string) {
 		}
 	}
 
-	if isProtected && branch == found.branch {
+	if isProtected && found.covers(branch) {
 		die(2, "refusing to commit directly to protected branch '%s'; run 'allod change begin' first", branch)
 	}
 

@@ -1373,6 +1373,29 @@ capture record_in_repo "$worktree" -m "must be refused" -f tracked.txt
 assert_status 8 "record refuses from a worktree of a misplaced protected checkout"
 assert_names_both_paths "$CAPTURE_OUTPUT" "the worktree record refusal"
 
+# Several entries for one repository: every branch they name is protected, and
+# begin branches from the first.
+
+repo="$HOME/work/two-entries"
+init_repo "$repo" master
+git -C "$repo" push -q origin master:release
+git -C "$repo" fetch -q origin
+protect_repo "$repo" master
+protect_repo "$repo" release
+desc="${RUN_ID}-two-entries"
+path=$(begin_worktree "$desc" "$repo")
+git -C "$path" merge-base --is-ancestor origin/master HEAD &&
+  pass "begin starts from the first listed branch when a repo has several" ||
+  fail "begin starts from the first listed branch when a repo has several"
+git -C "$repo" checkout -q -b release origin/release
+printf 'edit\n' > "$repo/tracked.txt"
+capture record_in_repo "$repo" -m "must be refused" -f tracked.txt
+assert_status 2 "record refuses the second listed branch of a repo with several entries"
+assert_contains "$CAPTURE_OUTPUT" "protected branch 'release'" \
+  "the second-entry refusal names that branch"
+git -C "$repo" checkout -q -- tracked.txt
+git -C "$repo" checkout -q master
+
 # A populated submodule and a --separate-git-dir checkout are repositories whose
 # git directory does not sit beside the worktree.
 

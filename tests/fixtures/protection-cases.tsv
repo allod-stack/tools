@@ -55,3 +55,8 @@ path-entry-wins	work/flat-widget=main;work/acme/widget=master	https://forge.exam
 path-entry-suppresses-remote	work/flat-widget=main;work/acme/widget=master	https://forge.example/acme/widget.git	work/flat-widget	plain	plain	master	unprotected	-
 empty-list	-	https://forge.example/acme/widget.git	work/acme/widget	plain	plain	master	unprotected	-
 unreadable-list	@directory	https://forge.example/acme/widget.git	work/acme/widget	plain	plain	master	error	-
+two-entries-first-branch	work/acme/widget=master;work/acme/widget=release	https://forge.example/acme/widget.git	work/acme/widget	plain	plain	master	protected	-
+two-entries-second-branch	work/acme/widget=master;work/acme/widget=release	https://forge.example/acme/widget.git	work/acme/widget	plain	plain	release	protected	-
+two-entries-misplaced-first-branch	work/acme/widget=master;work/acme/widget=release	https://forge.example/acme/widget.git	work/acme-widget	plain	plain	master	mismatch	work/acme/widget
+two-entries-misplaced-second-branch	work/acme/widget=master;work/acme/widget=release	https://forge.example/acme/widget.git	work/acme-widget	plain	plain	release	mismatch	work/acme/widget
+two-entries-unlisted-branch	work/acme/widget=master;work/acme/widget=release	https://forge.example/acme/widget.git	work/acme/widget	plain	plain	agent/x	unprotected	-
