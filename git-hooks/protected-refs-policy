@@ -12,6 +12,14 @@ if [ "$git_dir" = "$common_dir" ]; then
 else
   main_repo="$(dirname "$common_dir")"
 fi
+# Resolved once, because git reports physical paths: a $HOME that is a symlink,
+# or one carrying a trailing slash, would otherwise fail to prefix them and turn
+# a correctly placed checkout into a misplaced one.
+home_physical="$HOME"
+while [ "${home_physical%/}" != "$home_physical" ]; do home_physical="${home_physical%/}"; done
+if home_resolved="$(cd "$HOME" 2>/dev/null && pwd -P)"; then
+  home_physical="$home_resolved"
+fi
 hook="${1:?missing hook name}"
 shift
 protected_branches_file="$HOME/.config/git/protected-branches"
@@ -64,7 +72,7 @@ branch_list_unreadable() {
 # tests/fixtures/protection-cases.tsv.
 branch_listed() {
   local list_file="$1" branch="$2"
-  local main_relative="${main_repo#"$HOME"/}"
+  local main_relative="${main_repo#"$home_physical"/}"
   local identity expected_path status
 
   protection_detail=""
@@ -84,7 +92,8 @@ branch_listed() {
   status=0
   awk -v repo="$main_relative" -v branch="$branch" '
       /^[[:space:]]*(#|$)/ { next }
-      $1 == repo && $2 == branch { found = 1 }
+      { path = $1; sub(/\/+$/, "", path) }
+      path == repo && $2 == branch { found = 1 }
       END { exit found ? 0 : 1 }
     ' "$list_file" || status=$?
   if [ "$status" -gt 1 ]; then
@@ -99,7 +108,8 @@ branch_listed() {
   status=0
   awk -v repo="$main_relative" '
       /^[[:space:]]*(#|$)/ { next }
-      $1 == repo { found = 1 }
+      { path = $1; sub(/\/+$/, "", path) }
+      path == repo { found = 1 }
       END { exit found ? 0 : 1 }
     ' "$list_file" || status=$?
   if [ "$status" -gt 1 ]; then
@@ -118,11 +128,13 @@ branch_listed() {
   expected_path="$(awk -v identity="$identity" -v branch="$branch" '
     /^[[:space:]]*(#|$)/ { next }
     {
+      path = $1
+      sub(/\/+$/, "", path)
       needle = "/" identity
-      n = length($1) - length(needle)
-      if ($1 == identity || (n >= 0 && substr($1, n + 1) == needle)) {
+      n = length(path) - length(needle)
+      if (path == identity || (n >= 0 && substr(path, n + 1) == needle)) {
         if ($2 == branch) {
-          print $1
+          print path
           exit
         }
       }

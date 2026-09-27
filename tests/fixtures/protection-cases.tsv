@@ -60,3 +60,9 @@ two-entries-second-branch	work/acme/widget=master;work/acme/widget=release	https
 two-entries-misplaced-first-branch	work/acme/widget=master;work/acme/widget=release	https://forge.example/acme/widget.git	work/acme-widget	plain	plain	master	mismatch	work/acme/widget
 two-entries-misplaced-second-branch	work/acme/widget=master;work/acme/widget=release	https://forge.example/acme/widget.git	work/acme-widget	plain	plain	release	mismatch	work/acme/widget
 two-entries-unlisted-branch	work/acme/widget=master;work/acme/widget=release	https://forge.example/acme/widget.git	work/acme/widget	plain	plain	agent/x	unprotected	-
+symlinked-home-canonical	work/acme/widget=master	https://forge.example/acme/widget.git	work/acme/widget	plain	symlink	master	protected	-
+symlinked-home-flat-checkout	work/acme/widget=master	https://forge.example/acme/widget.git	work/acme-widget	plain	symlink	master	mismatch	work/acme/widget
+trailing-slash-home-canonical	work/acme/widget=master	https://forge.example/acme/widget.git	work/acme/widget	plain	trailing-slash	master	protected	-
+trailing-slash-home-flat-checkout	work/acme/widget=master	https://forge.example/acme/widget.git	work/acme-widget	plain	trailing-slash	master	mismatch	work/acme/widget
+entry-trailing-slash	work/acme/widget/=master	https://forge.example/acme/widget.git	work/acme/widget	plain	plain	master	protected	-
+entry-trailing-slash-flat-checkout	work/acme/widget/=master	https://forge.example/acme/widget.git	work/acme-widget	plain	plain	master	mismatch	work/acme/widget

@@ -156,9 +156,19 @@ func mainRepoDir(dir string) string {
 	return top
 }
 
+// physicalDir resolves symlinks, so that a $HOME which is one still prefixes the
+// paths git reports: git resolves them, and comparing the two as text turns a
+// correctly placed checkout into a misplaced one.
+func physicalDir(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	return filepath.Clean(path)
+}
+
 func repoLookupKey(dir string) (string, bool) {
 	main := mainRepoDir(dir)
-	rel, err := filepath.Rel(homeDir(), main)
+	rel, err := filepath.Rel(physicalDir(homeDir()), main)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", false
 	}
@@ -192,7 +202,13 @@ func readBranchList(path string) ([]branchListEntry, error) {
 		if len(fields) < 2 || strings.HasPrefix(fields[0], "#") {
 			continue
 		}
-		entries = append(entries, branchListEntry{path: fields[0], branch: fields[1]})
+		// A trailing slash names the same directory, and leaving it on would
+		// defeat both the path match and the remote suffix match.
+		path := strings.TrimRight(fields[0], "/")
+		if path == "" {
+			continue
+		}
+		entries = append(entries, branchListEntry{path: path, branch: fields[1]})
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
