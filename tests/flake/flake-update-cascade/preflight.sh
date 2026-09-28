@@ -57,4 +57,34 @@ assert_contains "$output" "listed in active-pr-branches (GPG-signed commits requ
 assert_equal "$(grep -c '^nix' "$MOCK_LOG" || true)" "0" \
   "does not invoke Nix when every repository is skipped"
 
+# The list is read by the rule 'allod change' and the hook use, not by matching
+# a whole line: spacing does not decide protection, an unreadable list is not an
+# absence of policy, and a checkout the list places elsewhere is refused.
+new_home protected-two-spaces
+write_direct_lock "$HOME/work/protected"
+printf '%s\n' "work/protected  master" > "$HOME/.config/git/protected-branches"
+output=$(run_cascade demo)
+assert_contains "$output" "protected branch (master)" \
+  "skips a repository whose entry is written with two spaces"
+
+new_home unreadable-list
+write_direct_lock "$HOME/work/app"
+rm "$HOME/.config/git/protected-branches"
+mkdir "$HOME/.config/git/protected-branches"
+output=$(run_cascade demo 2>&1) && status=0 || status=$?
+assert_equal "$status" "1" "refuses to run when the protected list cannot be read"
+assert_contains "$output" "$HOME/.config/git/protected-branches" \
+  "names the unreadable protected list"
+
+new_home misplaced-checkout
+write_direct_lock "$HOME/work/widget"
+printf '%s\n' "work/acme/widget master" > "$HOME/.config/git/protected-branches"
+output=$(run_cascade demo 2>&1) && status=0 || status=$?
+assert_equal "$status" "1" "refuses a misplaced checkout of a protected repository"
+assert_contains "$output" \
+  "protected repository 'acme/widget' is checked out at 'work/widget', but its protected-branches entry is 'work/acme/widget'" \
+  "names the repository and both paths"
+output=$(run_cascade demo --pr 2>&1) && status=0 || status=$?
+assert_equal "$status" "1" "refuses a misplaced checkout in --pr mode too"
+
 finish_tests "flake-update-cascade preflight"

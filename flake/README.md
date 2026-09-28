@@ -114,8 +114,15 @@ lock order: `flake.lock: update allod-tools, vm/nixpkgs`.
 - Listed in `~/.config/git/active-pr-branches` -> skip with notice (GPG-signed commits required)
 - `origin` outside the forge and not matched by `~/.config/git/allowed-external-remotes` -> skip with notice, in every mode; the repo is never pulled, updated, committed to or pushed
 - No `origin` remote -> skip with notice
+- `~/.config/git/protected-branches` present but unreadable -> error naming the file; an absent list still means nothing is protected here
+- `origin` names a repo the list places at another path -> error naming the repo and both paths, in every mode
 
 If any repo fails pre-flight, the cascade aborts before touching anything.
+
+The protected list is read by the rule `allod change` and the
+`protected-refs-policy` hook use: the checkout path first, then the `owner/repo`
+that `origin` names, so spacing and a trailing slash in an entry do not decide
+whether a branch is protected.
 
 **`--pr` mode details:**
 

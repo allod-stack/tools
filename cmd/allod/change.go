@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"forge.anarch.diy/allod/tools/internal/protection"
 )
 
 func changeMain(args []string) {
@@ -37,13 +39,13 @@ func changeMain(args []string) {
 // 'change record', so a caller can tell this one apart.
 const exitMisplacedCheckout = 8
 
-func requireCanonicalCheckout(found protection) {
-	if !found.misplaced() {
+func requireCanonicalCheckout(found protection.Status) {
+	if !found.Misplaced() {
 		return
 	}
 	die(exitMisplacedCheckout,
 		"protected repository '%s' is checked out at '%s', but its protected-branches entry is '%s'; move the checkout to '%s' so its branch protections apply",
-		found.identity, found.actual, found.expected, found.expected)
+		found.Identity, found.Actual, found.Expected, found.Expected)
 }
 
 func validDescription(description string) bool {
@@ -127,7 +129,7 @@ func changeBegin(args []string) {
 	repo := resolveGitRepo(repoArg)
 	found, isProtected := lookupProtection(repo)
 	requireCanonicalCheckout(found)
-	protected := found.start()
+	protected := found.Start()
 	if !descriptionSet {
 		if isProtected {
 			die(1, "change begin requires -d <description> to branch in protected repo '%s'", repo)
@@ -443,7 +445,7 @@ func changeRecord(args []string) {
 		}
 	}
 
-	if isProtected && found.covers(branch) {
+	if isProtected && found.Covers(branch) {
 		die(2, "refusing to commit directly to protected branch '%s'; run 'allod change begin' first", branch)
 	}
 

@@ -52,6 +52,12 @@ case "$command" in
     [[ -f "$dir/.git/HEAD" ]] || exit 1
     printf '%s\n' "$dir"
     ;;
+  # The protection rule asks these of every repository: a fixture is always the
+  # ordinary layout, where both answer the checkout's own .git.
+  "rev-parse --path-format=absolute --git-common-dir"|"rev-parse --path-format=absolute --git-dir")
+    [[ -d "$dir/.git" ]] || exit 1
+    printf '%s\n' "$dir/.git"
+    ;;
   "symbolic-ref refs/remotes/origin/HEAD")
     printf 'refs/remotes/origin/master\n'
     ;;

@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"forge.anarch.diy/allod/tools/internal/flakelock"
+	"forge.anarch.diy/allod/tools/internal/protection"
 )
 
 const usageText = `Usage: flake-update-cascade <input-name>... [--dry-run] [--pr]
@@ -150,7 +151,6 @@ func run(args []string) int {
 		workDir:        workDir(),
 		activePRFile:   filepath.Join(homeDir(), ".config", "git", "active-pr-branches"),
 		allowedFile:    filepath.Join(homeDir(), ".config", "git", "allowed-external-remotes"),
-		protectedFile:  filepath.Join(homeDir(), ".config", "git", "protected-branches"),
 		inputLabel:     strings.Join(opts.names, ", "),
 		inputSlug:      strings.Join(opts.names, "-"),
 		heads:          make(map[string]string),
@@ -201,14 +201,13 @@ type blocker struct {
 
 type cascade struct {
 	options
-	workDir       string
-	activePRFile  string
-	allowedFile   string
-	protectedFile string
-	inputLabel    string
-	inputSlug     string
-	repos         []string // in directory order
-	order         []string // in dependency order
+	workDir      string
+	activePRFile string
+	allowedFile  string
+	inputLabel   string
+	inputSlug    string
+	repos        []string // in directory order
+	order        []string // in dependency order
 
 	status     map[string]repoStatus
 	errorMsg   map[string]string
@@ -413,7 +412,17 @@ func (c *cascade) preflight() {
 			c.addError(repo, fmt.Sprintf("could not resolve the default branch of origin; run: git -C %s remote set-head origin -a", dir))
 			continue
 		}
-		c.protected[repo] = fileHasLine(c.protectedFile, "work/"+repo+" "+defaultBranch)
+		found, listed, err := protection.Lookup(dir)
+		if err != nil {
+			c.addError(repo, fmt.Sprintf("cannot resolve protected branches: %v; fix or remove that file before continuing", err))
+			continue
+		}
+		if listed && found.Misplaced() {
+			c.addError(repo, fmt.Sprintf("protected repository '%s' is checked out at '%s', but its protected-branches entry is '%s'; move the checkout to '%s' so its branch protections apply",
+				found.Identity, found.Actual, found.Expected, found.Expected))
+			continue
+		}
+		c.protected[repo] = listed && found.Covers(defaultBranch)
 		if !c.prMode && !c.dryRun && c.protected[repo] {
 			c.status[repo] = skipProtect
 			continue

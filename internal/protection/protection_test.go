@@ -1,13 +1,30 @@
-package main
+package protection
 
 import (
 	"bufio"
-	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func testGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=fixture", "GIT_AUTHOR_EMAIL=fixture@example.com",
+		"GIT_COMMITTER_NAME=fixture", "GIT_COMMITTER_EMAIL=fixture@example.com",
+		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %s in %s: %v\n%s", strings.Join(args, " "), dir, err, out)
+	}
+}
 
 var protectionCasesFile = filepath.Join("..", "..", "tests", "fixtures", "protection-cases.tsv")
 
@@ -117,47 +134,22 @@ func writeCaseBranchList(t *testing.T, home string, testCase protectionCase) {
 	}
 }
 
-func captureCliExit(t *testing.T, run func()) (int, string) {
-	t.Helper()
-	var buffer bytes.Buffer
-	previous := stderr
-	stderr = &buffer
-	defer func() { stderr = previous }()
-
-	code := 0
-	func() {
-		defer func() {
-			recovered := recover()
-			if recovered == nil {
-				return
-			}
-			if wanted, ok := recovered.(cliExit); ok {
-				code = wanted.code
-				return
-			}
-			panic(recovered)
-		}()
-		run()
-	}()
-	return code, buffer.String()
-}
-
 func initCaseRepo(t *testing.T, dir, branch string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	workspaceTestGit(t, dir, "init", "-q", "--initial-branch="+branch)
-	workspaceTestGit(t, dir, "commit", "-q", "--allow-empty", "-m", "initial")
+	testGit(t, dir, "init", "-q", "--initial-branch="+branch)
+	testGit(t, dir, "commit", "-q", "--allow-empty", "-m", "initial")
 }
 
 func setCaseOrigin(t *testing.T, dir, origin string) {
 	t.Helper()
 	if _, ok := gitOutput(dir, "remote", "get-url", "origin"); ok {
-		workspaceTestGit(t, dir, "remote", "remove", "origin")
+		testGit(t, dir, "remote", "remove", "origin")
 	}
 	if origin != "-" {
-		workspaceTestGit(t, dir, "remote", "add", "origin", origin)
+		testGit(t, dir, "remote", "add", "origin", origin)
 	}
 }
 
@@ -176,9 +168,9 @@ func buildProtectionFixture(t *testing.T, home string, testCase protectionCase) 
 		source := filepath.Join(home, "submodule-sources", testCase.name)
 		initCaseRepo(t, source, "bootstrap")
 		initCaseRepo(t, super, "bootstrap")
-		workspaceTestGit(t, super, "-c", "protocol.file.allow=always",
+		testGit(t, super, "-c", "protocol.file.allow=always",
 			"submodule", "add", "-q", source, filepath.Base(repo))
-		workspaceTestGit(t, super, "commit", "-q", "-m", "add submodule")
+		testGit(t, super, "commit", "-q", "-m", "add submodule")
 	case "separate-git-dir":
 		gitDir := filepath.Join(home, "gitdirs", testCase.name)
 		if err := os.MkdirAll(filepath.Dir(gitDir), 0755); err != nil {
@@ -187,9 +179,9 @@ func buildProtectionFixture(t *testing.T, home string, testCase protectionCase) 
 		if err := os.MkdirAll(repo, 0755); err != nil {
 			t.Fatal(err)
 		}
-		workspaceTestGit(t, repo, "init", "-q", "--separate-git-dir="+gitDir,
+		testGit(t, repo, "init", "-q", "--separate-git-dir="+gitDir,
 			"--initial-branch=bootstrap")
-		workspaceTestGit(t, repo, "commit", "-q", "--allow-empty", "-m", "initial")
+		testGit(t, repo, "commit", "-q", "--allow-empty", "-m", "initial")
 	default:
 		t.Fatalf("case %s: unknown layout %q", testCase.name, testCase.layout)
 	}
@@ -200,36 +192,38 @@ func buildProtectionFixture(t *testing.T, home string, testCase protectionCase) 
 	// under test out of the repository it belongs to.
 	if testCase.layout == "worktree" {
 		linked := filepath.Join(home, "worktrees", testCase.name)
-		workspaceTestGit(t, repo, "worktree", "add", "-q", "-b", testCase.branch, linked)
+		testGit(t, repo, "worktree", "add", "-q", "-b", testCase.branch, linked)
 		return linked
 	}
-	workspaceTestGit(t, repo, "checkout", "-q", "-b", testCase.branch)
+	testGit(t, repo, "checkout", "-q", "-b", testCase.branch)
 	return repo
 }
 
-func TestLookupProtectionSharedCases(t *testing.T) {
+func TestLookupSharedCases(t *testing.T) {
 	for _, testCase := range loadProtectionCases(t) {
 		t.Run(testCase.name, func(t *testing.T) {
 			home := caseHome(t, testCase)
 			t.Setenv("HOME", home)
 			dir := buildProtectionFixture(t, home, testCase)
 
+			found, ok, err := Lookup(dir)
 			if testCase.verdict == "error" {
-				code, message := captureCliExit(t, func() { lookupProtection(dir) })
-				if code == 0 {
-					t.Fatalf("lookupProtection returned instead of failing; stderr %q", message)
+				if err == nil {
+					t.Fatalf("Lookup returned (%+v, %v, nil) instead of an error", found, ok)
 				}
-				if !strings.Contains(message, "protected-branches") {
-					t.Fatalf("failure does not name the branch list: %q", message)
+				if !strings.Contains(err.Error(), "protected-branches") {
+					t.Fatalf("failure does not name the branch list: %v", err)
 				}
 				return
 			}
+			if err != nil {
+				t.Fatalf("Lookup: %v", err)
+			}
 
-			found, ok := lookupProtection(dir)
 			verdict := "unprotected"
-			if ok && found.covers(testCase.branch) {
+			if ok && found.Covers(testCase.branch) {
 				verdict = "protected"
-				if found.misplaced() {
+				if found.Misplaced() {
 					verdict = "mismatch"
 				}
 			}
@@ -240,13 +234,13 @@ func TestLookupProtectionSharedCases(t *testing.T) {
 			if testCase.verdict != "mismatch" {
 				return
 			}
-			if found.expected != testCase.expected {
-				t.Errorf("expected path = %q, want %q", found.expected, testCase.expected)
+			if found.Expected != testCase.expected {
+				t.Errorf("expected path = %q, want %q", found.Expected, testCase.expected)
 			}
-			if found.actual != testCase.checkout {
-				t.Errorf("actual path = %q, want %q", found.actual, testCase.checkout)
+			if found.Actual != testCase.checkout {
+				t.Errorf("actual path = %q, want %q", found.Actual, testCase.checkout)
 			}
-			if found.identity == "" {
+			if found.Identity == "" {
 				t.Error("identity is empty; the refusal cannot name the repository")
 			}
 		})
@@ -288,7 +282,7 @@ func TestReadBranchListUnreadableFileIsAnError(t *testing.T) {
 	}
 }
 
-func TestLookupProtectionMisplacedOnEveryBranch(t *testing.T) {
+func TestLookupMisplacedOnEveryBranch(t *testing.T) {
 	testCase := protectionCase{
 		name:     "misplaced-on-agent-branch",
 		entries:  "work/acme/widget=master",
@@ -302,12 +296,15 @@ func TestLookupProtectionMisplacedOnEveryBranch(t *testing.T) {
 	t.Setenv("HOME", home)
 	dir := buildProtectionFixture(t, home, testCase)
 
-	found, ok := lookupProtection(dir)
-	if !ok || !found.misplaced() {
-		t.Fatalf("lookupProtection = (%+v, %v), want a misplaced checkout", found, ok)
+	found, ok, err := Lookup(dir)
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
 	}
-	if found.expected != "work/acme/widget" || found.actual != "work/acme-widget" {
+	if !ok || !found.Misplaced() {
+		t.Fatalf("Lookup = (%+v, %v), want a misplaced checkout", found, ok)
+	}
+	if found.Expected != "work/acme/widget" || found.Actual != "work/acme-widget" {
 		t.Fatalf("paths = (%q, %q), want (\"work/acme/widget\", \"work/acme-widget\")",
-			found.expected, found.actual)
+			found.Expected, found.Actual)
 	}
 }

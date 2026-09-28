@@ -95,6 +95,9 @@ case "$*" in
     [[ -f "$dir/.git/HEAD" ]] || exit 1
     printf '%s\n' "$dir"
     ;;
+  "rev-parse --path-format=absolute --git-common-dir"|"rev-parse --path-format=absolute --git-dir")
+    printf '%s\n' "$dir/.git"
+    ;;
   "symbolic-ref refs/remotes/origin/HEAD")
     printf 'refs/remotes/origin/master\n'
     ;;

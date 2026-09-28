@@ -1,10 +1,8 @@
 package main
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,7 +10,7 @@ import (
 	"strings"
 	"syscall"
 
-	"forge.anarch.diy/allod/tools/internal/gitremote"
+	"forge.anarch.diy/allod/tools/internal/protection"
 )
 
 func isRepoRoot(dir string) bool {
@@ -136,189 +134,31 @@ func resolvePatchSourceArg(sourceRepo string) string {
 	return ""
 }
 
-// The common dir is the repository's own .git in the ordinary layout only: a
-// submodule and --separate-git-dir put it elsewhere, so its parent is the answer
-// for a linked worktree alone. Same rule as the hook's $main_repo.
 func mainRepoDir(dir string) string {
-	common, commonOK := gitOutput(dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
-	gitDir, gitDirOK := gitOutput(dir, "rev-parse", "--path-format=absolute", "--git-dir")
-	if !commonOK || !gitDirOK {
-		die(1, "not a git repository: %s", dir)
+	main, err := protection.MainRepoDir(dir)
+	if err != nil {
+		die(1, "%v", err)
 	}
-	if gitDir != common {
-		return filepath.Dir(common)
-	}
-	top, ok := gitOutput(dir, "rev-parse", "--show-toplevel")
-	if !ok {
-		die(1, "not a git repository: %s", dir)
-	}
-	return top
-}
-
-// git reports resolved paths, so an unresolved $HOME would fail to prefix them
-// and turn a correctly placed checkout into a misplaced one.
-func physicalDir(path string) string {
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		return resolved
-	}
-	return filepath.Clean(path)
+	return main
 }
 
 func repoLookupKey(dir string) (string, bool) {
-	main := mainRepoDir(dir)
-	rel, err := filepath.Rel(physicalDir(homeDir()), main)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", false
+	key, ok, err := protection.RepoKey(dir)
+	if err != nil {
+		die(1, "%v", err)
 	}
-	return filepath.ToSlash(rel), true
+	return key, ok
 }
 
-type branchListEntry struct{ path, branch string }
-
-// bufio.Scanner default of 64 KiB ends the scan at a longer line, which with
-// the scanner.Err check below would hide every entry behind it.
-const branchListLineLimit = 1 << 20
-
-func readBranchList(path string) ([]branchListEntry, error) {
-	file, err := os.Open(path)
+func lookupProtection(dir string) (protection.Status, bool) {
+	found, listed, err := protection.Lookup(dir)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil
+		if errors.Is(err, protection.ErrNotRepo) {
+			die(1, "%v", err)
 		}
-		return nil, err
-	}
-	defer file.Close()
-	var entries []branchListEntry
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(nil, branchListLineLimit)
-	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) < 2 || strings.HasPrefix(fields[0], "#") {
-			continue
-		}
-		// A trailing slash names the same directory, and leaving it on would
-		// defeat both the path match and the remote suffix match.
-		path := strings.TrimRight(fields[0], "/")
-		if path == "" {
-			continue
-		}
-		entries = append(entries, branchListEntry{path: path, branch: fields[1]})
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
-	}
-	return entries, nil
-}
-
-// An absent list is no policy on this machine; a present unreadable one is never
-// an absence of policy.
-func branchList(path string) []branchListEntry {
-	entries, err := readBranchList(path)
-	if err != nil {
 		die(1, "cannot read the branch list: %v; fix or remove that file before continuing", err)
 	}
-	return entries
-}
-
-// identityPath is the $HOME-relative path of the repository a checkout belongs
-// to — the main repository, never a linked worktree's own directory. A checkout
-// outside $HOME gets its absolute path, which matches no entry: entries are
-// $HOME-relative, so such a checkout can only ever be misplaced.
-func identityPath(dir string) string {
-	if key, ok := repoLookupKey(dir); ok {
-		return key
-	}
-	return mainRepoDir(dir)
-}
-
-// originRepo is the owner/repo a checkout's origin names, or "" when there is no
-// origin or its URL carries no such tail. Not patch.go's remoteIdentity, which
-// keeps the host so that two remote URLs can be compared.
-func originRepo(dir string) string {
-	url, ok := gitOutput(dir, "remote", "get-url", "origin")
-	if !ok {
-		return ""
-	}
-	return gitremote.RepoFromURL(url)
-}
-
-// protection is how one checkout resolves against a branch list. A non-empty
-// expected means the list recognises the repository by its origin but places it
-// somewhere else: the checkout is misplaced, and no rail may read that as
-// "unprotected".
-type protection struct {
-	branches []string
-	expected string
-	actual   string
-	identity string
-}
-
-func (p protection) misplaced() bool { return p.expected != "" }
-
-// covers reports whether the list constrains this branch. A repository may have
-// several entries, and every branch they name is listed, not only the first.
-func (p protection) covers(branch string) bool {
-	for _, listed := range p.branches {
-		if listed == branch {
-			return true
-		}
-	}
-	return false
-}
-
-// start is the branch 'change begin' branches from: the first the list names.
-func (p protection) start() string {
-	if len(p.branches) == 0 {
-		return ""
-	}
-	return p.branches[0]
-}
-
-// remoteMatches reports whether an entry path names the repository identity:
-// the whole path, or its final owner/repo components. A '/' is required before
-// the identity so that work/xacme/widget does not answer for acme/widget, and
-// the comparison ignores case because the forge does: origin Acme/Widget is the
-// repository the entry work/acme/widget names. The path match stays exact.
-func remoteMatches(entryPath, identity string) bool {
-	entryPath, identity = strings.ToLower(entryPath), strings.ToLower(identity)
-	return entryPath == identity || strings.HasSuffix(entryPath, "/"+identity)
-}
-
-// lookupProtection resolves a checkout against the protected-branches list.
-// Its bash twin is branch_listed in git-hooks/protected-refs-policy, and
-// tests/fixtures/protection-cases.tsv is what keeps the two agreeing.
-func lookupProtection(dir string) (protection, bool) {
-	actual := identityPath(dir)
-	entries := branchList(filepath.Join(homeDir(), ".config", "git", "protected-branches"))
-
-	var branches []string
-	for _, entry := range entries {
-		if entry.path == actual {
-			branches = append(branches, entry.branch)
-		}
-	}
-	if len(branches) > 0 {
-		return protection{branches: branches, actual: actual}, true
-	}
-
-	identity := originRepo(dir)
-	if identity == "" {
-		return protection{}, false
-	}
-	expected := ""
-	for _, entry := range entries {
-		if !remoteMatches(entry.path, identity) {
-			continue
-		}
-		if expected == "" {
-			expected = entry.path
-		}
-		branches = append(branches, entry.branch)
-	}
-	if len(branches) == 0 {
-		return protection{}, false
-	}
-	return protection{branches: branches, expected: expected, actual: actual, identity: identity}, true
+	return found, listed
 }
 
 var unsafeSlug = regexp.MustCompile(`[^a-zA-Z0-9._-]`)
