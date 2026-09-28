@@ -5,32 +5,25 @@ import (
 	"io"
 	"net"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 )
 
-// sitePreviewRun is the test seam, at the exec boundary rather than around
-// argument construction: it is handed a program, the whole argument list
-// production code built, and where that program's stdout goes. Its stderr
-// passes through, so nix's and systemd's own diagnostics are not reworded.
+// The test seam is the exec boundary, never the argument lists it is handed.
 var sitePreviewRun = func(name string, args []string, out io.Writer) int {
 	return runCommand("", nil, out, stderr, name, args...)
 }
 
-// Variables so a test reaches every branch of the wait below without sleeping.
-var (
-	sitePreviewTimeout = 60 * time.Second
-	sitePreviewPoll    = 250 * time.Millisecond
-)
+var sitePreviewTimeout = 60 * time.Second
+var sitePreviewPoll = 250 * time.Millisecond
 
-// sitePreviewAppExpr answers with the empty string when the flake at the root
-// given exposes apps.<system>.preview and with the missing attribute path when
-// it does not, so one evaluation both decides and names. currentSystem under
-// '--impure' spares a map from Go's architecture spelling to Nix's; the two
-// 'or {}' fallbacks make a flake with no apps an answer, not an error.
+// The 'or {}' fallbacks answer for a flake with no apps rather than failing.
 const sitePreviewAppExpr = `let flake = builtins.getFlake "%s"; system = builtins.currentSystem; ` +
 	`in if ((flake.apps or {}).${system} or {}) ? preview then "" else "apps.${system}.preview"`
+
+// A checkout path reaches nix quoted in a Nix string and again in a flake
+// reference, where '"', '${', '#' and '?' all mean something.
+const sitePreviewPlain = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
 
 func sitePreview(args []string) {
 	port, stop, site := 0, false, ""
@@ -40,8 +33,8 @@ func sitePreview(args []string) {
 			if len(args) < 2 || strings.HasPrefix(args[1], "-") {
 				siteCommandUsageError("preview", "--port requires a value")
 			}
-			number, err := strconv.Atoi(args[1])
-			if err != nil || number < 1024 || number > 65535 {
+			number, ok := previewPortValue(args[1])
+			if !ok || number == 0 {
 				siteCommandUsageError("preview", "--port must be a whole number from 1024 to 65535, not %s", args[1])
 			}
 			port, args = number, args[2:]
@@ -60,11 +53,19 @@ func sitePreview(args []string) {
 			site, args = args[0], args[1:]
 		}
 	}
-	root, name, registryPort := sitePreviewSite(site)
+	root, name, portText := sitePreviewSite(site)
+	registryPort, ok := previewPortValue(portText)
+	if !ok {
+		die(1, "preview_port %s for %s in %s is not a whole number from 1024 to 65535", portText, name, registryPath())
+	}
+	for _, character := range root {
+		if !strings.ContainsRune(sitePreviewPlain+"/+", character) {
+			die(1, "the checkout path %s cannot be given to nix: it contains %q", root, character)
+		}
+	}
 	unit := "allod-preview-" + sitePreviewSlug(name)
 	if stop {
-		// 'systemctl --user stop' exits 5 on a unit that was never loaded, so
-		// the stop alone cannot tell that from a stop that was refused.
+		// A stop alone cannot report this: it exits 5 on a unit never loaded.
 		if !sitePreviewActive(unit) {
 			fmt.Fprintf(stdout, "%s is not running\n", unit)
 		} else if sitePreviewRun("systemctl", []string{"--user", "stop", unit}, stderr) != 0 {
@@ -94,33 +95,31 @@ func sitePreview(args []string) {
 	sitePreviewWait(unit, port)
 }
 
-// sitePreviewSite resolves the site: its checkout root, the name it is refused
-// and reported by, and its registry preview_port, zero when it has none. A
-// site found from the current directory is looked back up in the registry, so
-// standing in it and naming it by id reach one name, and so one unit name,
-// which is what lets a '--stop' issued elsewhere name this unit.
-func sitePreviewSite(site string) (root, name string, port int) {
+// A site found from the current directory is looked back up in the registry, so
+// both routes to it reach one unit name, which is what lets a '--stop' elsewhere
+// name the unit this machine started.
+func sitePreviewSite(site string) (root, name, port string) {
 	entries := registryEntries()
 	if site != "" {
 		entry, found := entries[site]
 		if !found || entry.Checkout == "" {
 			die(1, "unknown site: %s has no entry in %s", site, registryPath())
 		}
-		return filepath.Join(workDir(), entry.Checkout), site, entry.PreviewPort
+		return filepath.Join(workDir(), entry.Checkout), site, string(entry.PreviewPort)
 	}
 	root = resolveSiteRoot()
 	for id, entry := range entries {
 		if entry.Checkout != "" && filepath.Join(workDir(), entry.Checkout) == root {
-			return root, id, entry.PreviewPort
+			return root, id, string(entry.PreviewPort)
 		}
 	}
-	return root, strings.TrimPrefix(root, homeDir()+"/"), 0
+	return root, strings.TrimPrefix(root, homeDir()+"/"), ""
 }
 
 func sitePreviewSlug(name string) string {
-	return strings.Map(func(c rune) rune {
-		if c >= '0' && c <= '9' || c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || strings.ContainsRune("._-", c) {
-			return c
+	return strings.Map(func(character rune) rune {
+		if strings.ContainsRune(sitePreviewPlain, character) {
+			return character
 		}
 		return '-'
 	}, name)
@@ -130,14 +129,11 @@ func sitePreviewActive(unit string) bool {
 	return sitePreviewRun("systemctl", []string{"--user", "is-active", "--quiet", unit}, io.Discard) == 0
 }
 
-// sitePreviewWait reports which of three things happened. The connection is
-// attempted before the unit is asked about, so a server that answered in the
-// instant its unit ended is still reported as serving; a unit that is up with
-// a silent port is still starting, whether this run started it or found it.
+// The connection comes before the question about the unit, so a server that
+// answered in the instant its unit ended still counts as serving.
 func sitePreviewWait(unit string, port int) {
 	address := fmt.Sprintf("127.0.0.1:%d", port)
-	deadline := time.Now().Add(sitePreviewTimeout)
-	for {
+	for deadline := time.Now().Add(sitePreviewTimeout); ; time.Sleep(sitePreviewPoll) {
 		if connection, err := net.DialTimeout("tcp", address, time.Second); err == nil {
 			connection.Close()
 			fmt.Fprintf(stdout, "http://%s\n", address)
@@ -151,35 +147,29 @@ func sitePreviewWait(unit string, port int) {
 			fmt.Fprintf(stderr, "allod: %s is still starting; follow it with: journalctl --user -f -u %s\n", unit, unit)
 			exit(3)
 		}
-		time.Sleep(sitePreviewPoll)
 	}
 }
 
 const sitePreviewDetail = `'preview' hands the site's own 'preview' flake app to the user systemd manager
-as the unit 'allod-preview-<slug>', waits up to 60 seconds for its port to
-answer, then exits; the server keeps running under systemd until '--stop'.
-A flake with no 'apps.<system>.preview' is refused, and nothing here knows
-which tool builds the site.
+as the unit 'allod-preview-<slug>', waits up to 60 seconds for its port to answer,
+then exits; the server keeps running under systemd until '--stop'. A flake with no
+'apps.<system>.preview', or a checkout path nix could not be given as written, is
+refused: nothing here knows which tool builds a site. <site> is an id in the
+repository registry, and without it the site is the checkout the current directory
+sits in; the port is that entry's 'preview_port', which '--port <n>' overrides,
+and <slug> is that id, or the checkout path under $HOME, with every character
+outside [A-Za-z0-9._-] replaced by '-'.
 
-The site is what <site> names, an id in the repository registry, or else the
-checkout the current directory sits in; its port is that entry's
-'preview_port', which '--port <n>' overrides, and a site with neither is
-refused by name. <slug> is that id, or the checkout path relative to $HOME when
-the registry has no entry for it, with every character outside [A-Za-z0-9._-]
-replaced by '-'.
+The server listens on 127.0.0.1 alone, and its output is in the journal:
+'journalctl --user -u allod-preview-<slug>', with '-f' to follow it.
 
-The server listens on 127.0.0.1 alone, so nothing off this machine reaches it;
-'journalctl --user -u allod-preview-<slug>' shows its output, '-f' follows it.
-Exit 0 prints the address, whether this run started the server or found one
-already up; exit 1 means the unit is no longer running and its last log lines
-are on standard error; exit 3 means the unit is up with the port still silent,
-which is what a first build inside it looks like. '--stop' reports a preview
-that is not running as such, not as an error.
+Exit 0 prints the address, whether this run started the server or found one up;
+exit 1 means the unit has stopped, and its last log lines are on standard error;
+exit 3 means the unit is up with the port still silent, as a first build looks.
 `
 
-// init registers the 'site' namespace and 'preview' in every build: this file
-// carries no build tag. siteCommands in site_common.go says why the entry is
-// added from here rather than a var literal, and why it prepends.
+// This file carries no build tag, so preview is in every build; siteCommands in
+// site_common.go says why the entry is added from an init().
 func init() {
 	registerNamespace(namespace{name: "site", summary: "Preview a static site; deploy, check, config are present in site-tagged builds", main: siteMain})
 	siteCommands = append([]siteCommand{{

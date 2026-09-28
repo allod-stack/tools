@@ -4,22 +4,30 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
-// registryEntry is the subset of a repository's registry entry this program
-// reads. PreviewPort is zero when the repository is not a previewable site;
-// allod/inventory's registry validation, not this program, holds a stated one
-// to 1024-65535 and to one repository each.
+// registryEntry is what this program reads of a repository's registry entry.
+// PreviewPort stays undecoded: as an int, one entry with a string or a fraction
+// there would fail the whole file for every lookup, site or not.
 type registryEntry struct {
-	Checkout    string `json:"checkout"`
-	PreviewPort int    `json:"preview_port"`
+	Checkout    string          `json:"checkout"`
+	PreviewPort json.RawMessage `json:"preview_port"`
 }
 
-// registryEntries reads the whole repository registry (registryPath()), keyed
-// by id, for example "allod/memory". A missing or malformed file yields no
-// entries; that is not an error by itself. A caller looking a repository up by
-// its checkout rather than its id iterates this.
+// previewPortValue reads a preview_port, or a '--port' value: zero and ok for an
+// absent one, ok false outside the range allod/inventory's validation enforces.
+func previewPortValue(text string) (port int, ok bool) {
+	if text = strings.TrimSpace(text); text == "" || text == "null" {
+		return 0, true
+	}
+	port, err := strconv.Atoi(text)
+	return port, err == nil && port >= 1024 && port <= 65535
+}
+
+// registryEntries reads the whole registry (registryPath()), keyed by id; a
+// missing or malformed file yields no entries, which is not an error by itself.
 func registryEntries() map[string]registryEntry {
 	data, err := os.ReadFile(registryPath())
 	if err != nil {
