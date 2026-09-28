@@ -57,9 +57,6 @@ assert_contains "$output" "listed in active-pr-branches (GPG-signed commits requ
 assert_equal "$(grep -c '^nix' "$MOCK_LOG" || true)" "0" \
   "does not invoke Nix when every repository is skipped"
 
-# The list is read by the rule 'allod change' and the hook use, not by matching
-# a whole line: spacing does not decide protection, an unreadable list is not an
-# absence of policy, and a checkout the list places elsewhere is refused.
 new_home protected-two-spaces
 write_direct_lock "$HOME/work/protected"
 printf '%s\n' "work/protected  master" > "$HOME/.config/git/protected-branches"
@@ -86,5 +83,25 @@ assert_contains "$output" \
   "names the repository and both paths"
 output=$(run_cascade demo --pr 2>&1) && status=0 || status=$?
 assert_equal "$status" "1" "refuses a misplaced checkout in --pr mode too"
+
+new_home misplaced-other-branch
+write_direct_lock "$HOME/work/widget"
+printf '%s\n' "work/acme/widget release" > "$HOME/.config/git/protected-branches"
+output=$(run_cascade demo --dry-run 2>&1) && status=0 || status=$?
+assert_equal "$status" "1" "refuses a misplaced checkout in a dry run"
+assert_contains "$output" \
+  "checked out at 'work/widget', but its protected-branches entry is 'work/acme/widget'" \
+  "names both paths for an entry naming a branch that is not the default"
+
+# The list has only ever named repositories as work/<name>, so that key holds
+# wherever WORK_DIR puts the workspace.
+new_home elsewhere-work-dir
+export WORK_DIR="$HOME/elsewhere"
+write_direct_lock "$WORK_DIR/protected"
+printf '%s\n' "work/protected master" > "$HOME/.config/git/protected-branches"
+output=$(run_cascade demo)
+assert_contains "$output" "protected branch (master)" \
+  "skips a protected repository in a workspace outside \$HOME/work"
+unset WORK_DIR
 
 finish_tests "flake-update-cascade preflight"

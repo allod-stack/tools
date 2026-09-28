@@ -1,9 +1,5 @@
-// Package protection resolves a checkout against
-// ~/.config/git/protected-branches, the one rule every Go program that must
-// not write to a protected branch reads that list by.
-//
-// It returns errors, never exits and never prints: the message and the exit
-// code belong to the command. Like internal/gitremote it runs git itself.
+// Package protection answers whether ~/.config/git/protected-branches covers a
+// checkout's branch.
 package protection
 
 import (
@@ -14,14 +10,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"forge.anarch.diy/allod/tools/internal/gitremote"
 )
 
-// ErrNotRepo reports that git would not answer for the directory, so the
-// checkout cannot be resolved at all. A caller that renders its own message
-// for an unreadable list tells the two apart with errors.Is.
+// ErrNotRepo reports that git would not answer for the directory.
 var ErrNotRepo = errors.New("not a git repository")
 
 func gitOutput(dir string, args ...string) (string, bool) {
@@ -66,8 +61,6 @@ func physicalDir(path string) string {
 	return filepath.Clean(path)
 }
 
-// RepoKey is the $HOME-relative path of the repository a checkout belongs to,
-// and false for a checkout outside $HOME.
 func RepoKey(dir string) (string, bool, error) {
 	main, err := MainRepoDir(dir)
 	if err != nil {
@@ -185,13 +178,13 @@ func remoteMatches(entryPath, identity string) bool {
 	return entryPath == identity || strings.HasSuffix(entryPath, "/"+identity)
 }
 
-// Lookup resolves a checkout against the protected-branches list. An absent
-// list is no policy on this machine; a present unreadable one is never an
-// absence of policy, and comes back as an error.
+// Lookup resolves a checkout against the protected-branches list. alsoNamed
+// are further list paths that name this repository, matched like its own and so
+// never a misplaced checkout.
 //
 // Its bash twin is branch_listed in git-hooks/protected-refs-policy, and
 // tests/fixtures/protection-cases.tsv is what keeps the two agreeing.
-func Lookup(dir string) (Status, bool, error) {
+func Lookup(dir string, alsoNamed ...string) (Status, bool, error) {
 	actual, err := identityPath(dir)
 	if err != nil {
 		return Status{}, false, err
@@ -201,9 +194,10 @@ func Lookup(dir string) (Status, bool, error) {
 		return Status{}, false, err
 	}
 
+	paths := append([]string{actual}, alsoNamed...)
 	var branches []string
 	for _, entry := range entries {
-		if entry.path == actual {
+		if slices.Contains(paths, entry.path) {
 			branches = append(branches, entry.branch)
 		}
 	}

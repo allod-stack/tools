@@ -104,7 +104,7 @@ lock order: `flake.lock: update allod-tools, vm/nixpkgs`.
 | `--pr` | Create/update a PR branch (`agent/flake-update-<input>`) for each repo. Works on protected repos. |
 | `--dry-run` | Show what would change without modifying anything. |
 
-**Pre-flight checks** (runs on all repos before any changes):
+**Pre-flight checks** (before any changes, on every repo the run would touch):
 - Origin's default branch cannot be resolved -> error naming the repair (`git -C <repo> remote set-head origin -a`); never guessed as `master`
 - Not on default branch -> error
 - Dirty working tree -> error

@@ -412,7 +412,9 @@ func (c *cascade) preflight() {
 			c.addError(repo, fmt.Sprintf("could not resolve the default branch of origin; run: git -C %s remote set-head origin -a", dir))
 			continue
 		}
-		found, listed, err := protection.Lookup(dir)
+		// work/<repo> is the only key the list ever had here, and it holds
+		// wherever WORK_DIR puts the workspace.
+		found, listed, err := protection.Lookup(dir, "work/"+repo)
 		if err != nil {
 			c.addError(repo, fmt.Sprintf("cannot resolve protected branches: %v; fix or remove that file before continuing", err))
 			continue
