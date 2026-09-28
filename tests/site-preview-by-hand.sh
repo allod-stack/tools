@@ -14,10 +14,13 @@ TMP=$(mktemp -d)
 PORT_SERVES=18611
 PORT_FAILS=18612
 PORT_APPLESS=18613
+PORT_WORKTREE=18614
 UNIT_SERVES=allod-preview-fixture-preview-serves
 UNIT_FAILS=allod-preview-fixture-preview-fails
 UNIT_APPLESS=allod-preview-fixture-preview-appless
+UNIT_WORKTREE=allod-preview-fixture-preview-worktree
 PAGE_MARK="fixture page $$"
+WORKTREE_MARK="worktree page $$"
 LOG_MARK="fixture preview app refused to start $$"
 FAILURES=0
 STEPS=0
@@ -26,7 +29,7 @@ STATUS=0
 
 cleanup() {
   local unit
-  for unit in "$UNIT_SERVES" "$UNIT_FAILS" "$UNIT_APPLESS"; do
+  for unit in "$UNIT_SERVES" "$UNIT_FAILS" "$UNIT_APPLESS" "$UNIT_WORKTREE"; do
     systemctl --user stop "$unit" >/dev/null 2>&1 || true
     systemctl --user reset-failed "$unit" >/dev/null 2>&1 || true
   done
@@ -34,7 +37,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for tool in nix systemctl systemd-run journalctl curl nc ss; do
+for tool in nix systemctl systemd-run journalctl curl nc ss git; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     printf 'this script needs %s on PATH, and it is not there\n' "$tool" >&2
     exit 2
@@ -100,12 +103,34 @@ chmod +x "$ROOT_FAILS/serve.sh"
 ROOT_APPLESS=$(new_site appless)
 printf '{\n  outputs = { self }: { };\n}\n' > "$ROOT_APPLESS/flake.nix"
 
+fixture_commit() {
+  git -C "$1" add -A
+  git -C "$1" -c user.email=fixture@example.invalid -c user.name=Fixture commit -q -m "$2"
+}
+
+# The worktree fixture is a repository whose registered checkout has no preview
+# app at all, on a branch that has one and its own page. Only the worktree can
+# serve, and only the registry knows the port and the name.
+ROOT_WORKTREE=$(new_site worktree-main)
+git -C "$ROOT_WORKTREE" init -q -b master
+printf '{\n  outputs = { self }: { };\n}\n' > "$ROOT_WORKTREE/flake.nix"
+fixture_commit "$ROOT_WORKTREE" 'a checkout with no preview app'
+git -C "$ROOT_WORKTREE" checkout -q -b preview-app
+shell_app_flake "$ROOT_WORKTREE"
+printf '<h1>%s</h1>\n' "$WORKTREE_MARK" > "$ROOT_WORKTREE/index.html"
+cp "$ROOT_SERVES/serve.sh" "$ROOT_WORKTREE/serve.sh"
+fixture_commit "$ROOT_WORKTREE" 'the preview app and the page it serves'
+git -C "$ROOT_WORKTREE" checkout -q master
+WORKTREE="$WORK_DIR/changes/example-branch"
+git -C "$ROOT_WORKTREE" worktree add -q "$WORKTREE" preview-app
+
 cat > "$INVENTORY/scripts/repositories.json" <<EOF
 {
   "repositories": {
-    "fixture/preview-serves":  { "checkout": "sites/serves",  "preview_port": $PORT_SERVES },
-    "fixture/preview-fails":   { "checkout": "sites/fails",   "preview_port": $PORT_FAILS },
-    "fixture/preview-appless": { "checkout": "sites/appless", "preview_port": $PORT_APPLESS }
+    "fixture/preview-serves":   { "checkout": "sites/serves",        "preview_port": $PORT_SERVES },
+    "fixture/preview-fails":    { "checkout": "sites/fails",         "preview_port": $PORT_FAILS },
+    "fixture/preview-appless":  { "checkout": "sites/appless",       "preview_port": $PORT_APPLESS },
+    "fixture/preview-worktree": { "checkout": "sites/worktree-main", "preview_port": $PORT_WORKTREE }
   }
 }
 EOF
@@ -249,12 +274,57 @@ a_flake_without_the_app_is_refused() {
   fi
 }
 
+a_worktree_previews_as_its_site() {
+  cd "$WORKTREE"
+  preview
+  assert_status 0 "$STATUS" "start from inside a worktree"
+  assert_contains "$OUTPUT" "http://127.0.0.1:$PORT_WORKTREE" "the port is the registry entry's"
+  state=$(unit_state "$UNIT_WORKTREE")
+  if [ "$state" != "active" ]; then
+    fail_step "the unit is not named after the registered site: $UNIT_WORKTREE is $state"
+  fi
+  page=$(curl --silent --show-error --retry 2 --retry-connrefused \
+    --max-time 5 "http://127.0.0.1:$PORT_WORKTREE/")
+  assert_contains "$page" "$WORKTREE_MARK" "the page served is the worktree's"
+}
+
+by_id_finds_the_worktree_preview() {
+  before=$(unit_main_pid "$UNIT_WORKTREE")
+  if [ "$before" = "0" ]; then
+    fail_step "the unit has no main process, so this step would prove nothing"
+  fi
+  preview fixture/preview-worktree
+  assert_status 0 "$STATUS" "start by id while the worktree's preview runs"
+  assert_contains "$OUTPUT" "http://127.0.0.1:$PORT_WORKTREE" "the address is printed again"
+  assert_absent "$OUTPUT" "apps.$SYSTEM.preview" "the registered checkout is never asked for the app it has not got"
+  after=$(unit_main_pid "$UNIT_WORKTREE")
+  if [ "$before" != "$after" ]; then
+    fail_step "the start by id replaced the server: main process $before became $after"
+  fi
+}
+
+stop_by_id_stops_the_worktree_preview() {
+  preview --stop fixture/preview-worktree
+  assert_status 0 "$STATUS" "stop by id"
+  state=$(unit_state "$UNIT_WORKTREE")
+  if [ "$state" = "active" ]; then
+    fail_step "the unit is still active after the stop: $state"
+  fi
+  left=$(listening_on "$PORT_WORKTREE")
+  if [ -n "$left" ]; then
+    fail_step "something is still listening on $PORT_WORKTREE after the stop" "$left"
+  fi
+}
+
 step 'start serves the fixture page' start_serves_a_page
 step 'start again starts no second server' start_again_starts_no_second_server
 step 'stop leaves no process and frees the port' stop_frees_the_port
 step 'stop again says not running and exits 0' stop_again_is_not_an_error
 step 'an app that exits at once is reported as failed' an_app_that_exits_is_reported_as_failed
 step 'a flake without the app is refused' a_flake_without_the_app_is_refused
+step 'a worktree previews under its site id and port' a_worktree_previews_as_its_site
+step 'the same site by id finds that preview' by_id_finds_the_worktree_preview
+step 'stop by id stops it' stop_by_id_stops_the_worktree_preview
 
 if [ "$FAILURES" -ne 0 ]; then
   printf '%d of %d steps failed\n' "$FAILURES" "$STEPS" >&2

@@ -28,9 +28,13 @@ type previewStub struct {
 	// calls holds each command run, the program first. active answers the is-active
 	// calls in turn, 'A' for active, its last character over again once they run
 	// out. absent is what the nix eval prints.
-	calls  [][]string
-	active string
-	absent string
+	// gitCommon is what the git rev-parse prints, and remote the status an ssh
+	// returns.
+	calls     [][]string
+	active    string
+	absent    string
+	gitCommon string
+	remote    int
 }
 
 func usePreviewStub(t *testing.T, stub *previewStub) {
@@ -45,6 +49,10 @@ func usePreviewStub(t *testing.T, stub *previewStub) {
 			fmt.Fprint(out, stub.absent)
 		case name == "journalctl":
 			fmt.Fprint(out, previewLogTail+"\n")
+		case name == "git":
+			fmt.Fprintln(out, stub.gitCommon)
+		case name == "ssh":
+			return stub.remote
 		case name == "systemctl" && args[1] == "is-active":
 			answer := stub.active[0]
 			if len(stub.active) > 1 {
@@ -117,9 +125,9 @@ func previewWrite(t *testing.T, path, text string) {
 	}
 }
 
-// previewPort returns a loopback port, with a listener on it when serving is true
+// previewListener returns a loopback port, with a listener on it when serving is true
 // so the wait connects, and nothing on it when serving is false so it is refused.
-func previewPort(t *testing.T, serving bool) int {
+func previewListener(t *testing.T, serving bool) int {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -141,7 +149,7 @@ func previewPort(t *testing.T, serving bool) int {
 func TestSitePreviewStart(t *testing.T) {
 	byID := &previewStub{active: "N"}
 	usePreviewStub(t, byID)
-	port := previewPort(t, true)
+	port := previewListener(t, true)
 	root := usePreviewRegistry(t, previewCheckout, fmt.Sprint(port))
 
 	out, errText, code := runAllod(t, "site", "preview", previewSiteID)
@@ -171,6 +179,68 @@ func TestSitePreviewStart(t *testing.T) {
 	}
 }
 
+// TestSitePreviewVM pins the command '--vm' runs, that nothing is resolved on
+// this machine, and the quoting: ssh hands the words after the host to a shell,
+// so a site id with a space or a quote must arrive there as one argument.
+func TestSitePreviewVM(t *testing.T) {
+	tests := []struct {
+		name   string
+		args   []string
+		remote []string
+	}{
+		{"by id", []string{previewSiteID}, []string{"'" + previewSiteID + "'"}},
+		{"with a port and a stop", []string{"--port", "18601", "--stop", previewSiteID},
+			[]string{"--port", "'18601'", "--stop", "'" + previewSiteID + "'"}},
+		{"a site id with a space", []string{"a site"}, []string{"'a site'"}},
+		{"a site id with a single quote", []string{"it's"}, []string{`'it'\''s'`}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stub := &previewStub{active: "N"}
+			usePreviewStub(t, stub)
+			usePreviewRegistry(t, previewCheckout, "18601")
+
+			args := append([]string{"site", "preview", "--vm", "vm-one"}, test.args...)
+			if _, errText, code := runAllod(t, args...); code != 0 {
+				t.Fatalf("exit code = %d, want 0; stderr: %q", code, errText)
+			}
+			want := []string{"ssh", "-o", "ControlMaster=no", "-o", "ControlPath=none", "--", "vm-one",
+				"allod", "site", "preview"}
+			stub.pinCommand(t, append(want, test.remote...)...)
+			if local := len(stub.calls) - 1; local != 0 {
+				t.Errorf("%d commands ran on this machine, want 0: %v", local, stub.calls)
+			}
+		})
+	}
+}
+
+// TestSitePreviewWorktree pins that a git worktree of a site previews as that
+// site: its own directory is in no registry, so the repository it belongs to
+// supplies the id, the port and the unit name, while the working directory and
+// the flake stay the worktree's.
+func TestSitePreviewWorktree(t *testing.T) {
+	stub := &previewStub{active: "N"}
+	usePreviewStub(t, stub)
+	port := previewListener(t, true)
+	repository := usePreviewRegistry(t, previewCheckout, fmt.Sprint(port))
+	worktree := filepath.Join(filepath.Dir(filepath.Dir(repository)), "changes", "example-branch")
+	previewWrite(t, filepath.Join(worktree, siteConfigName), "domain = \"example.invalid\"\n")
+	stub.gitCommon = filepath.Join(repository, ".git")
+	t.Chdir(worktree)
+
+	out, errText, code := runAllod(t, "site", "preview")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr: %q", code, errText)
+	}
+	if want := fmt.Sprintf("http://127.0.0.1:%d\n", port); out != want {
+		t.Errorf("stdout = %q, want %q: the port is the registry entry's", out, want)
+	}
+	stub.pinCommand(t, "git", "-C", worktree, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	stub.pinCommand(t, "systemd-run", "--user", "--collect", "--quiet", "--unit", previewUnit,
+		"--working-directory", worktree, "-E", fmt.Sprintf("ALLOD_PREVIEW_PORT=%d", port),
+		"-E", "ALLOD_PREVIEW_INTERFACE=127.0.0.1", "--", "nix", "run", worktree+"#preview")
+}
+
 // TestSitePreviewOutcomes pins what the wait reports and whether anything is
 // started, each row against a real loopback port. The false green to avoid is the
 // "unit gone" row reporting success.
@@ -193,7 +263,7 @@ func TestSitePreviewOutcomes(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			stub := &previewStub{active: test.active}
 			usePreviewStub(t, stub)
-			port := previewPort(t, test.serving)
+			port := previewListener(t, test.serving)
 			usePreviewRegistry(t, previewCheckout, fmt.Sprint(port))
 
 			out, errText, code := runAllod(t, "site", "preview", previewSiteID)
@@ -212,6 +282,12 @@ func TestSitePreviewOutcomes(t *testing.T) {
 			}
 			if started := len(stub.matching("systemd-run")) != 0; started != test.starts {
 				t.Errorf("started = %v, want %v: %v", started, test.starts, stub.calls)
+			}
+			// The flake is asked for its app only when a start is about to happen:
+			// an active unit may be serving a worktree the named site's own
+			// checkout knows nothing about.
+			if asked := len(stub.matching("nix")) != 0; asked != test.starts {
+				t.Errorf("the nix eval ran = %v, want %v", asked, test.starts)
 			}
 			if test.code == 1 {
 				stub.pinCommand(t, "journalctl", "--user", "-u", previewUnit, "-n", "20", "--no-pager")
@@ -264,6 +340,8 @@ func TestSitePreviewRefusals(t *testing.T) {
 		{name: "port outside the range", args: []string{"--port", "65536"}, code: 1, says: "1024 to 65535, not 65536"},
 		{name: "stop when not running", args: []string{"--stop", previewSiteID}, says: previewUnit + " is not running"},
 		{name: "site id begins with a dash", args: []string{"-x"}, code: 1, says: "unknown option for site preview: -x"},
+		{name: "--vm with no site", args: []string{"--vm", "vm-one"}, code: 1, says: "--vm needs a site id"},
+		{name: "vm name begins with a dash", args: []string{"--vm", "-x", previewSiteID}, code: 1, says: "--vm requires a value"},
 		{name: "second positional", args: []string{previewSiteID, "extra"}, code: 1, says: "unexpected argument for site preview: extra"},
 		{name: "preview_port that is not a number", args: []string{"--stop", previewSiteID}, port: `"18650"`, code: 1,
 			says: `preview_port "18650" for ` + previewSiteID, sibling: true},
@@ -310,7 +388,7 @@ func TestSitePreviewHelp(t *testing.T) {
 	if code != 0 || errText != "" {
 		t.Fatalf("exit=%d stderr=%q, want success with empty stderr", code, errText)
 	}
-	for _, want := range []string{"allod site preview [--port <n>] [--stop] [<site>]",
+	for _, want := range []string{"allod site preview [--port <n>] [--stop] [--vm <name>] [<site>]",
 		"journalctl --user -u allod-preview-<slug>", "127.0.0.1", "'preview_port'"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("help does not contain %q\ngot: %q", want, out)

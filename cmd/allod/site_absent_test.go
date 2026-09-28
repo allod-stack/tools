@@ -3,8 +3,8 @@
 package main
 
 // The other half of the build-tag proof. site_test.go asserts that a build
-// made with -tags site carries all four site commands; this file asserts
-// that a build without it carries 'preview' alone — not that 'deploy',
+// made with -tags site carries every site command; this file asserts that a
+// build without it carries 'preview' and 'view' alone — not that 'deploy',
 // 'check', and 'config' fail, but that those three words mean nothing, which
 // is the difference between a machine that cannot deploy and a machine that
 // can deploy badly.
@@ -18,19 +18,23 @@ import (
 	"testing"
 )
 
-// TestSiteNamespaceExistsWithPreviewOnly pins the shape an untagged build
+// TestUntaggedSiteCarriesPreviewAndView pins the shape an untagged build
 // carries: the 'site' namespace is registered — unlike before preview
-// existed, when an untagged build had no 'site' word at all — but its
-// command table holds exactly 'preview'.
-func TestSiteNamespaceExistsWithPreviewOnly(t *testing.T) {
+// existed, when an untagged build had no 'site' word at all — and its
+// command table holds exactly the two commands that need no hosting
+// credential, 'preview' in the VM and 'view' on the hypervisor.
+func TestUntaggedSiteCarriesPreviewAndView(t *testing.T) {
 	if _, ok := lookupNamespace("site"); !ok {
 		t.Fatal("the site namespace is not registered in an untagged build")
 	}
-	if got := len(siteCommands); got != 1 {
-		t.Fatalf("siteCommands has %d entries in an untagged build, want 1: %+v", got, siteCommands)
+	want := []string{"preview", "view"}
+	if got := len(siteCommands); got != len(want) {
+		t.Fatalf("siteCommands has %d entries in an untagged build, want %d: %+v", got, len(want), siteCommands)
 	}
-	if siteCommands[0].name != "preview" {
-		t.Errorf("the one untagged site command is %q, want %q", siteCommands[0].name, "preview")
+	for index, name := range want {
+		if siteCommands[index].name != name {
+			t.Errorf("untagged site command %d is %q, want %q", index, siteCommands[index].name, name)
+		}
 	}
 }
 
@@ -74,18 +78,20 @@ func TestUntaggedSiteDeployWithArgsIsStillUnknown(t *testing.T) {
 	}
 }
 
-// TestUntaggedSiteUsageListsOnlyPreview pins that an untagged build's own
+// TestUntaggedSiteUsageListsWhatItCarries pins that an untagged build's own
 // 'allod site' usage advertises exactly what it carries: the deploy, check,
-// and config usage lines and summaries are absent, and the preview ones are
-// present.
-func TestUntaggedSiteUsageListsOnlyPreview(t *testing.T) {
+// and config usage lines and summaries are absent, and preview's and view's
+// are present.
+func TestUntaggedSiteUsageListsWhatItCarries(t *testing.T) {
 	for _, args := range [][]string{{"site"}, {"site", "--help"}, {"site", "-h"}} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			stdoutText, stderrText, _ := runAllod(t, args...)
 			out := stdoutText + stderrText
 			for _, want := range []string{
 				"allod site preview ",
+				"allod site view ",
 				"preview  Serve a site locally",
+				"view     Forward a site previewed in a VM",
 			} {
 				if !strings.Contains(out, want) {
 					t.Errorf("usage does not contain %q\ngot: %q", want, out)
@@ -108,8 +114,8 @@ func TestUntaggedSiteUsageListsOnlyPreview(t *testing.T) {
 }
 
 // TestUntaggedSiteBareInvocationHasNoDetailProse pins the short-usage
-// contract in the build that carries only 'preview': a bare 'allod site'
-// stays short even with one command registered, and '--help' still carries
+// contract in the build that has no hosting credential: a bare 'allod site'
+// stays short with the two commands it carries, and '--help' still carries
 // the detail prose the bare form omits.
 func TestUntaggedSiteBareInvocationHasNoDetailProse(t *testing.T) {
 	const detailOnly = "keeps running under systemd until '--stop'"
@@ -135,8 +141,8 @@ func TestUntaggedSiteBareInvocationHasNoDetailProse(t *testing.T) {
 }
 
 // TestUntaggedSitePreviewArgumentErrorPrintsOwnUsageOnly pins the
-// per-command argument-error contract in the build that carries only
-// 'preview': an unknown option prints the one-line message, preview's own
+// per-command argument-error contract in the build that has no hosting
+// credential: an unknown option prints the one-line message, preview's own
 // Usage: line, and the pointer to preview's own '--help', but none of
 // preview's detail prose — that stays behind '--help', the same way it does
 // for the namespace itself.

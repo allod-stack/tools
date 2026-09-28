@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -24,6 +25,42 @@ func previewPortValue(text string) (port int, ok bool) {
 	}
 	port, err := strconv.Atoi(text)
 	return port, err == nil && port >= 1024 && port <= 65535
+}
+
+// previewPort is the port id's entry states, zero for none, and a refusal that
+// names both when it states one outside the range.
+func previewPort(id string, entry registryEntry) int {
+	port, ok := previewPortValue(string(entry.PreviewPort))
+	if !ok {
+		die(1, "preview_port %s for %s in %s is not a whole number from 1024 to 65535",
+			strings.TrimSpace(string(entry.PreviewPort)), id, registryPath())
+	}
+	return port
+}
+
+func vmSpecsPath() string { return filepath.Join(filepath.Dir(registryPath()), "vm-specs.json") }
+
+// vmsWithRepo names every machine whose repository list holds id, in order, so a
+// refusal that lists them reads the same twice.
+func vmsWithRepo(id string) []string {
+	data, err := os.ReadFile(vmSpecsPath())
+	if err != nil {
+		return nil
+	}
+	var specs map[string]struct {
+		Repos []string `json:"repos"`
+	}
+	if json.Unmarshal(data, &specs) != nil {
+		return nil
+	}
+	var found []string
+	for name, spec := range specs {
+		if slices.Contains(spec.Repos, id) {
+			found = append(found, name)
+		}
+	}
+	slices.Sort(found)
+	return found
 }
 
 // registryEntries reads the whole registry (registryPath()), keyed by id; a

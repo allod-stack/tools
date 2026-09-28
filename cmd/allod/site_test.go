@@ -187,11 +187,11 @@ func deployRuns(t *testing.T, stub *deployStub, want [][]string) {
 
 // --- Dispatch and usage ---
 
-// TestSiteTaggedBuildCarriesAllFourCommands pins the shape a site-tagged
-// build carries: 'preview' from the untagged files plus the three this
+// TestSiteTaggedBuildCarriesEveryCommand pins the shape a site-tagged build
+// carries: 'preview' and 'view' from the untagged files plus the three this
 // file's init() adds, and nothing else.
-func TestSiteTaggedBuildCarriesAllFourCommands(t *testing.T) {
-	want := []string{"preview", "deploy", "check", "config"}
+func TestSiteTaggedBuildCarriesEveryCommand(t *testing.T) {
+	want := []string{"preview", "view", "deploy", "check", "config"}
 	if got := len(siteCommands); got != len(want) {
 		t.Fatalf("siteCommands has %d entries in a tagged build, want %d: %+v", got, len(want), siteCommands)
 	}
@@ -258,6 +258,7 @@ var siteDetailOnlySentences = map[string]string{
 	"check":   "A rejected FTP login can identify only the username or password",
 	"config":  "Passwords are not echoed as they are typed",
 	"preview": "keeps running under systemd until '--stop'",
+	"view":    "ends the forward and nothing else",
 }
 
 // TestSiteBareInvocationHasNoDetailProse pins the short-usage contract: a
@@ -306,7 +307,8 @@ func TestSiteHelpIncludesDetailProse(t *testing.T) {
 // naming 'allod site config update user'.
 func TestSiteCommandHelpMentionsOnlyItsOwnCommand(t *testing.T) {
 	ownUsage := map[string]string{
-		"preview": "allod site preview [--port <n>] [--stop] [<site>]",
+		"preview": "allod site preview [--port <n>] [--stop] [--vm <name>] [<site>]",
+		"view":    "allod site view [--vm <name>] [--port <n>] <site>",
 		"deploy":  "allod site deploy [--config <path>] [--dry-run]",
 		"check":   "allod site check [--config <path>]",
 		"config":  "allod site config [--config <path>] [--force]",

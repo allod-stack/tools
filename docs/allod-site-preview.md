@@ -1,6 +1,6 @@
 # allod site preview
 
-An agent working in a dev VM can serve the site it is editing and look at the pages while it changes them. The site's own flake says how to serve it: `allod` runs that and knows nothing about zola, Vite or any other tool. The server listens on 127.0.0.1 only, under a systemd unit named after the site, and keeps running until it is stopped.
+An agent working in a dev VM can serve the site it is editing, and the owner can look at those pages in a browser on the hypervisor with one command. The site's own flake says how to serve it: `allod` runs that and knows nothing about zola, Vite or any other tool. In the VM, `allod site preview` starts the server as a systemd unit named after the site, listening on 127.0.0.1 only, which keeps running until it is stopped. On the hypervisor, `allod site view <site>` makes sure that server is up and forwards its one port until Ctrl-C.
 
 ## The contract with a site repository
 
@@ -70,10 +70,12 @@ What each asks of the site's owner:
 ## Using it in the VM
 
 ```
-allod site preview [--port <n>] [--stop] [<site>]
+allod site preview [--port <n>] [--stop] [--vm <name>] [<site>]
 ```
 
 `<site>` is a repository id in the registry. Without it, the site is the checkout the current directory sits in, found by walking up to its `site.toml`. The port is that repository's `preview_port` in the inventory's `scripts/repositories.json`, which `--port <n>` overrides; a site with neither is refused by name, as is a `preview_port` that is not a whole number from 1024 to 65535.
+
+A git worktree of a site previews as that site: the worktree's own directory is in no registry, so the repository it belongs to supplies the id, the port and the unit name, while the server's working directory and the flake it runs stay the worktree's. So a site being edited on a branch previews on its usual port, and `--stop <site>` from anywhere stops it.
 
 The unit is `allod-preview-<slug>`, where `<slug>` is the registry id, or the checkout path relative to `$HOME` when the registry does not list the site, with every character outside `[A-Za-z0-9._-]` replaced by `-`. Both ways of naming a site reach the same slug, so a preview started from inside a checkout can be stopped by id.
 
@@ -86,3 +88,27 @@ journalctl --user -u allod-preview-<slug>
 Add `-f` to follow it. `--stop` stops the unit and every process it started; a preview that is not running is reported as such and is not an error.
 
 A start exits 0 and prints `http://127.0.0.1:<port>` once the port accepts a connection, whether this run started the server or found one already up. It exits 1 when the unit is no longer running, with the last 20 lines of its log on standard error. It exits 3 when 60 seconds pass with the unit up and the port still silent, which is what a first build inside the unit looks like; that message names the `journalctl` line to watch. `allod site preview --help` says the same in brief.
+
+## From the hypervisor
+
+```
+allod site view [--vm <name>] [--port <n>] <site>
+```
+
+`view` makes sure the preview is running in the VM, prints `http://127.0.0.1:<port>`, and then becomes the `ssh` that forwards that port from the VM to the same port here, so a browser on this machine opens the page at that address. The port comes from this machine's registry, and the VM from `vm-specs.json` beside it: the one machine whose repository list holds the site, or `--vm <name>` when none or several do. The VM must run a build of `allod` that has `site preview`; an older one there fails as an unknown command and `view` stops with its exit code.
+
+`allod site preview --stop --vm <name> <site>` stops that server from here. `--vm` resolves nothing locally — it runs the same command in the VM over a connection of its own, with every value quoted for the shell there — so `<site>` is required with it.
+
+Ctrl-C on `view` ends the forward and nothing else, deliberately: the agent in the VM uses that same server to fetch pages and check its own work, and the owner closing a browser window must not break a task in progress. What a site owner can therefore expect:
+
+| Event | Result |
+| --- | --- |
+| Ctrl-C on `view`, or its terminal closes | `ssh` exits and the port here closes. The server is unaffected |
+| `ssh` is killed outright | The same; the kernel closes the port |
+| `--stop`, from either machine | systemd stops the unit and every process in its control group |
+| The server crashes | The unit goes inactive, the forward stays up, and the browser shows a connection error until the preview is started again |
+| The VM shuts down | The unit goes with it, and `ssh` here exits once its keepalives go unanswered (`ServerAliveInterval=5`, `ServerAliveCountMax=3`) |
+
+What becomes of the unit when the last login session in the VM ends is not measured. A preview started from the hypervisor while no agent is logged in may not outlive that command; if it matters, start it from a session in the VM.
+
+The connection is never a shared one: a forward added to a shared connection outlives the command that asked for it, and releasing it closes every other session riding that connection. `view` never starts a VM and never checks whether the local port is free — `ssh` refuses a taken port or an unreachable VM in its own words.

@@ -10,7 +10,7 @@ host install them through their Nix composition, with no manual installation aft
 ## Layout
 
 ```
-cmd/allod/                Go main CLI (change, patch, pr, trace, site preview; deploy/check/config and secret opt-in)
+cmd/allod/                Go main CLI (change, patch, pr, trace, site preview and view; deploy/check/config and secret opt-in)
 cmd/flake-update-cascade/ flake input update cascade Go command
 cmd/forge/                Forgejo CLI Go command
 internal/flakelock/       flake.lock graph walking for the cascade
@@ -43,18 +43,19 @@ lib/                      shared shell libraries
 
 ### Optional namespaces
 
-`allod site preview` is compiled into every build: it runs the `preview` app a
-site repository's own flake exposes, as a user systemd unit on loopback, and is
-meant for exactly the machines where a site is edited. Those machines carry no
-hosting credential and no rclone configuration, and preview reads neither. See
+`allod site preview` and `allod site view` are compiled into every build:
+preview runs the `preview` app a site repository's own flake exposes, as a user
+systemd unit on loopback in a dev VM, and view forwards that port to a browser
+on the hypervisor. Neither machine needs a hosting credential or an rclone
+configuration, and neither command reads one. See
 [allod site preview](docs/allod-site-preview.md).
 
 `allod site deploy`, `check`, and `config` are behind the `site` build tag. A
 machine that publishes no site has no rclone remote to publish through, so it
 does not carry these three at all: `allod site deploy` there fails as
 "unknown site command", exactly the way a typo would, and `allod site` on
-its own lists `preview` only. A machine that does deploy opts in when it
-builds:
+its own lists `preview` and `view` only. A machine that does deploy opts in when
+it builds:
 
 ```nix
 buildGoModule {
@@ -105,7 +106,7 @@ namespace present, and each untagged run asserts it absent.
   comprehension-first HTML report
 - [Report components](docs/components.md) — semantic visual vocabulary and
   authoring contracts
-- [allod site preview](docs/allod-site-preview.md) — serve a site in a dev VM from the `preview` app in its own flake
+- [allod site preview](docs/allod-site-preview.md) — serve a site in a dev VM from the `preview` app in its own flake, and view it from the hypervisor
 - [Git hooks](git-hooks/README.md) — `protected-refs-policy`, `setup-tracked-hooks`
 - [allod trace](docs/allod-trace.md) — distill local Claude, Codex, and Pi session logs into redacted markdown traces
 
