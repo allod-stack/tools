@@ -13,11 +13,11 @@ import (
 )
 
 // An untagged build carries the two commands that need no hosting credential.
-func TestUntaggedSiteCarriesPreviewAndView(t *testing.T) {
+func TestUntaggedSiteCarriesServeAndView(t *testing.T) {
 	if _, ok := lookupNamespace("site"); !ok {
 		t.Fatal("the site namespace is not registered in an untagged build")
 	}
-	want := []string{"preview", "view"}
+	want := []string{"serve", "view"}
 	if got := len(siteCommands); got != len(want) {
 		t.Fatalf("siteCommands has %d entries in an untagged build, want %d: %+v", got, len(want), siteCommands)
 	}
@@ -75,10 +75,10 @@ func TestUntaggedSiteUsageListsWhatItCarries(t *testing.T) {
 			stdoutText, stderrText, _ := runAllod(t, args...)
 			out := stdoutText + stderrText
 			for _, want := range []string{
-				"allod site preview ",
+				"allod site serve ",
 				"allod site view ",
-				"preview  Serve a site locally",
-				"view     Forward a site previewed in a VM",
+				"serve    Serve a site locally",
+				"view     Forward a site served in a VM",
 			} {
 				if !strings.Contains(out, want) {
 					t.Errorf("usage does not contain %q\ngot: %q", want, out)
@@ -109,7 +109,7 @@ func TestUntaggedSiteBareInvocationHasNoDetailProse(t *testing.T) {
 		t.Errorf("exit code = %d, want 1", code)
 	}
 	if strings.Contains(errText, detailOnly) {
-		t.Errorf("bare invocation printed preview's detail prose %q\ngot: %q", detailOnly, errText)
+		t.Errorf("bare invocation printed serve's detail prose %q\ngot: %q", detailOnly, errText)
 	}
 	if want := "\nRun 'allod site --help' for details.\n"; !strings.HasSuffix(errText, want) {
 		t.Errorf("bare invocation stderr does not end with %q\ngot: %q", want, errText)
@@ -120,28 +120,28 @@ func TestUntaggedSiteBareInvocationHasNoDetailProse(t *testing.T) {
 		t.Fatalf("exit=%d stderr=%q, want success with empty stderr", code, errText)
 	}
 	if !strings.Contains(out, detailOnly) {
-		t.Errorf("'site --help' is missing preview's detail prose %q\ngot: %q", detailOnly, out)
+		t.Errorf("'site --help' is missing serve's detail prose %q\ngot: %q", detailOnly, out)
 	}
 }
 
 // An argument error prints the one-line message, the command's own Usage: line and
 // the pointer to its '--help', but none of its detail prose.
-func TestUntaggedSitePreviewArgumentErrorPrintsOwnUsageOnly(t *testing.T) {
-	_, errText, code := runAllod(t, "site", "preview", "--bogus")
+func TestUntaggedSiteServeArgumentErrorPrintsOwnUsageOnly(t *testing.T) {
+	_, errText, code := runAllod(t, "site", "serve", "--bogus")
 	if code != 1 {
 		t.Errorf("exit code = %d, want 1", code)
 	}
 	for _, want := range []string{
-		"allod: unknown option for site preview: --bogus\n",
-		"Usage:\n  allod site preview ",
-		"\nRun 'allod site preview --help' for details.\n",
+		"allod: unknown option for site serve: --bogus\n",
+		"Usage:\n  allod site serve ",
+		"\nRun 'allod site serve --help' for details.\n",
 	} {
 		if !strings.Contains(errText, want) {
 			t.Errorf("argument error does not contain %q\ngot: %q", want, errText)
 		}
 	}
 	if detailOnly := "keeps running under systemd until '--stop'"; strings.Contains(errText, detailOnly) {
-		t.Errorf("argument error printed preview's detail prose %q\ngot: %q", detailOnly, errText)
+		t.Errorf("argument error printed serve's detail prose %q\ngot: %q", detailOnly, errText)
 	}
 }
 

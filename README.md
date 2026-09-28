@@ -10,7 +10,7 @@ host install them through their Nix composition, with no manual installation aft
 ## Layout
 
 ```
-cmd/allod/                Go main CLI (change, patch, pr, trace, site preview and view; deploy/check/config and secret opt-in)
+cmd/allod/                Go main CLI (change, patch, pr, trace, site serve and view; deploy/check/config and secret opt-in)
 cmd/flake-update-cascade/ flake input update cascade Go command
 cmd/forge/                Forgejo CLI Go command
 internal/flakelock/       flake.lock graph walking for the cascade
@@ -43,12 +43,12 @@ lib/                      shared shell libraries
 
 ### Optional namespaces
 
-`allod site preview` and `allod site view` are compiled into every build:
+`allod site serve` and `allod site view` are compiled into every build:
 preview runs the `preview` app a site repository's own flake exposes, as a user
 systemd unit on loopback in a dev VM, and view forwards that port to a browser
 on the hypervisor. Neither machine needs a hosting credential or an rclone
 configuration, and neither command reads one. See
-[allod site preview](docs/allod-site-preview.md).
+[allod site serve and view](docs/allod-site-preview.md).
 
 `allod site deploy`, `check`, and `config` are behind the `site` build tag. A
 machine that publishes no site has no rclone remote to publish through, so it
@@ -106,7 +106,7 @@ namespace present, and each untagged run asserts it absent.
   comprehension-first HTML report
 - [Report components](docs/components.md) — semantic visual vocabulary and
   authoring contracts
-- [allod site preview](docs/allod-site-preview.md) — serve a site in a dev VM from the `preview` app in its own flake, and view it from the hypervisor
+- [allod site serve and view](docs/allod-site-preview.md) — serve a site in a dev VM from the `preview` app in its own flake, and view it from the hypervisor
 - [Git hooks](git-hooks/README.md) — `protected-refs-policy`, `setup-tracked-hooks`
 - [allod trace](docs/allod-trace.md) — distill local Claude, Codex, and Pi session logs into redacted markdown traces
 

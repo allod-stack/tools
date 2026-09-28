@@ -5,15 +5,15 @@ package main
 // that select one of its subcommands. None of this carries the 'site' build
 // tag.
 //
-// 'preview' (site_preview.go) needs none of that tag's effects — it never
+// 'serve' (site_serve.go) needs none of that tag's effects — it never
 // touches rclone or shared hosting — which is why it lives outside it: sites
 // are edited on dev machines, and those machines carry neither a hosting
-// credential nor rclone. site_preview.go's init() registers the 'site'
-// namespace itself and adds the 'preview' entry to siteCommands; site.go,
+// credential nor rclone. site_serve.go's init() registers the 'site'
+// namespace itself and adds the 'serve' entry to siteCommands; site.go,
 // which does carry the tag, extends the same namespace with 'deploy',
 // 'check', and 'config' rather than registering a second one —
 // registerNamespace panics on a duplicate word, so only one file may call
-// it, and site_preview.go is that file.
+// it, and site_serve.go is that file.
 
 import (
 	"fmt"
@@ -217,21 +217,21 @@ type siteCommand struct {
 // siteCommands is the site namespace's own dispatch table, parallel to
 // namespaces in main.go: a build carries exactly the entries this slice
 // holds once every init() function has run. It is declared with no
-// initializer, and every entry — 'preview' included — is added from an
+// initializer, and every entry — 'serve' included — is added from an
 // init() rather than a var literal: a siteCommand's run field holds a
-// function (sitePreview, siteDeploy, ...) whose body calls siteCommandHelp,
+// function (siteServe, siteDeploy, ...) whose body calls siteCommandHelp,
 // which reads siteCommands, so a var initializer that built a siteCommand
 // value directly would be a compile-time initialization cycle. init()
 // function bodies are not part of that dependency analysis, only var
 // initializer expressions are, which is why population moves there instead.
-// site_preview.go's init() prepends 'preview' rather than appending it, so it
+// site_serve.go's init() prepends 'serve' rather than appending it, so it
 // stays first in the table regardless of whether it or site.go's init() runs
 // first.
 var siteCommands []siteCommand
 
 // siteMain dispatches 'allod site <command>' to whichever entry in
 // siteCommands matches, so a build advertises and runs exactly the commands
-// it carries. On an untagged build that is 'preview' alone: 'deploy',
+// it carries. On an untagged build that is 'serve' and 'view' alone: 'deploy',
 // 'check', and 'config' fall through to the same "unknown site command" a
 // typo would, because in that build they are exactly as absent as a typo.
 //
@@ -337,8 +337,8 @@ func siteCommandEntry(name string) (siteCommand, bool) {
 // declared here so the long-form and per-command generators can read them
 // unconditionally, but the slice starts empty and only a build's own init()
 // (site.go's, behind the 'site' build tag) appends to it. An untagged build,
-// carrying only 'preview', which takes no '--config', appends nothing, so
-// preview's help never gains a paragraph about a flag it does not accept.
+// carrying serve and view, which take no '--config', appends nothing, so
+// their help never gains a paragraph about a flag they do not accept.
 type siteSharedDetail struct {
 	// intro introduces the block and names the commands it applies to, e.g.
 	// "'--config <path>', accepted by deploy, check, and config:".

@@ -82,7 +82,7 @@ func stubTools(t *testing.T, names ...string) string {
 
 // useSiteRepo creates a site repository with the given site.toml and makes it
 // the current directory. It lives here, not in site_test.go, because
-// site_preview_test.go needs it in an untagged build too.
+// site_serve_test.go needs it in an untagged build too.
 func useSiteRepo(t *testing.T, config string) string {
 	t.Helper()
 	root := t.TempDir()

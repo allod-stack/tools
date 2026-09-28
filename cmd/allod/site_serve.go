@@ -26,7 +26,7 @@ const sitePreviewAppExpr = `let flake = builtins.getFlake "%s"; system = builtin
 // reference, where '"', '${', '#' and '?' all mean something.
 const sitePreviewPlain = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
 
-// '--stop' is preview's alone; view refuses it by name.
+// '--stop' is serve's alone; view refuses it by name.
 func siteFlags(command string, args []string) (port int, vm, site string, stop bool) {
 	for len(args) > 0 {
 		switch option := args[0]; option {
@@ -43,7 +43,7 @@ func siteFlags(command string, args []string) (port int, vm, site string, stop b
 			}
 			args = args[2:]
 		case "--stop":
-			if command != "preview" {
+			if command != "serve" {
 				siteCommandUsageError(command, "unknown option for site %s: --stop", command)
 			}
 			stop, args = true, args[1:]
@@ -72,7 +72,7 @@ func shellQuote(value string) string {
 // The connection is never a shared one: a forward on a shared connection outlives
 // the command that asked for it.
 func sitePreviewRemote(vm, site string, port int, stop bool, out io.Writer) int {
-	remote := []string{"-o", "ControlMaster=no", "-o", "ControlPath=none", "--", vm, "allod", "site", "preview"}
+	remote := []string{"-o", "ControlMaster=no", "-o", "ControlPath=none", "--", vm, "allod", "site", "serve"}
 	if port != 0 {
 		remote = append(remote, "--port", shellQuote(fmt.Sprint(port)))
 	}
@@ -82,11 +82,11 @@ func sitePreviewRemote(vm, site string, port int, stop bool, out io.Writer) int 
 	return sitePreviewRun("ssh", append(remote, shellQuote(site)), out)
 }
 
-func sitePreview(args []string) {
-	port, vm, site, stop := siteFlags("preview", args)
+func siteServe(args []string) {
+	port, vm, site, stop := siteFlags("serve", args)
 	if vm != "" {
 		if site == "" {
-			siteCommandUsageError("preview", "--vm needs a site id: nothing is resolved on this machine")
+			siteCommandUsageError("serve", "--vm needs a site id: nothing is resolved on this machine")
 		}
 		exit(sitePreviewRemote(vm, site, port, stop, stdout))
 	}
@@ -221,8 +221,8 @@ func sitePreviewWait(unit string, port int) {
 	}
 }
 
-const sitePreviewDetail = `'preview' hands the site's own 'preview' flake app to the user systemd manager
-as the unit 'allod-preview-<slug>', waits up to 60 seconds for its port to answer,
+const siteServeDetail = `'serve' hands the site's own 'preview' flake app to the user systemd manager as
+the unit 'allod-preview-<slug>', waits up to 60 seconds for its port to answer,
 then exits; the server keeps running under systemd until '--stop'. A flake with no
 'apps.<system>.preview', or a checkout path nix could not be given as written, is
 refused: nothing here knows which tool builds a site. <site> is an id in the
@@ -245,12 +245,12 @@ stopped, in which case its last log lines are on standard error.
 
 // siteCommands in site_common.go says why the entry is added from an init().
 func init() {
-	registerNamespace(namespace{name: "site", summary: "Preview a static site; deploy, check, config are present in site-tagged builds", main: siteMain})
+	registerNamespace(namespace{name: "site", summary: "Serve and view a static site; deploy, check, config are present in site-tagged builds", main: siteMain})
 	siteCommands = append([]siteCommand{{
-		name:    "preview",
+		name:    "serve",
 		summary: "Serve a site locally from the 'preview' app in its own flake",
-		usage:   []string{"allod site preview [--port <n>] [--stop] [--vm <name>] [<site>]"},
-		detail:  sitePreviewDetail,
-		run:     sitePreview,
+		usage:   []string{"allod site serve [--port <n>] [--stop] [--vm <name>] [<site>]"},
+		detail:  siteServeDetail,
+		run:     siteServe,
 	}}, siteCommands...)
 }

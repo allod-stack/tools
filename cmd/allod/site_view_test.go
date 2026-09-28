@@ -1,6 +1,6 @@
 package main
 
-// These use site_preview_test.go's stub and fixtures, and one more seam: the
+// These use site_serve_test.go's stub and fixtures, and one more seam: the
 // process replacing itself with ssh.
 
 import (
@@ -57,7 +57,7 @@ func TestSiteViewForwardsThePort(t *testing.T) {
 		t.Errorf("stdout = %q, want %q", out, want)
 	}
 	stub.pinCommand(t, "ssh", "-o", "ControlMaster=no", "-o", "ControlPath=none", "--", "vm-one",
-		"allod", "site", "preview", "--port", "'18601'", "'"+previewSiteID+"'")
+		"allod", "site", "serve", "--port", "'18601'", "'"+previewSiteID+"'")
 	if want := wantSiteViewForward("vm-one", 18601); fmt.Sprint(forward) != fmt.Sprint(want) {
 		t.Errorf("forward =\n%v\nwant\n%v", forward, want)
 	}
@@ -107,7 +107,7 @@ func TestSiteViewVMLookup(t *testing.T) {
 				t.Fatalf("exit code = %d, want 0; stderr: %q", code, errText)
 			}
 			stub.pinCommand(t, "ssh", "-o", "ControlMaster=no", "-o", "ControlPath=none", "--", test.vm,
-				"allod", "site", "preview", "--port", "'18601'", "'"+previewSiteID+"'")
+				"allod", "site", "serve", "--port", "'18601'", "'"+previewSiteID+"'")
 			if want := wantSiteViewForward(test.vm, 18601); fmt.Sprint(forward) != fmt.Sprint(want) {
 				t.Errorf("forward =\n%v\nwant\n%v", forward, want)
 			}
@@ -207,7 +207,7 @@ func TestSiteViewHelp(t *testing.T) {
 		t.Fatalf("exit=%d stderr=%q, want success with empty stderr", code, errText)
 	}
 	for _, want := range []string{"allod site view [--vm <name>] [--port <n>] <site>",
-		"Ctrl-C", "keeps running", "allod site preview --stop --vm <name> <site>"} {
+		"Ctrl-C", "keeps running", "allod site serve --stop --vm <name> <site>"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("help does not contain %q\ngot: %q", want, out)
 		}

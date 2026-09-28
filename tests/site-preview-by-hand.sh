@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 'allod site preview' against real Nix and a real systemd user manager, which
+# 'allod site serve' against real Nix and a real systemd user manager, which
 # the flake's checks have neither of, so this is run by hand (or by an agent) in
 # a dev VM and is not wired into 'nix flake check'. The binary comes from
 # ALLOD_UNDER_TEST, as in the other scripts here.
@@ -178,9 +178,9 @@ assert_absent() {
   esac
 }
 
-preview() {
+serve() {
   set +e
-  OUTPUT=$("$ALLOD" site preview "$@" 2>&1)
+  OUTPUT=$("$ALLOD" site serve "$@" 2>&1)
   STATUS=$?
   set -e
 }
@@ -200,7 +200,7 @@ listening_on() {
 # --- Steps ---
 
 start_serves_a_page() {
-  preview fixture/preview-serves
+  serve fixture/preview-serves
   assert_status 0 "$STATUS" "start"
   assert_contains "$OUTPUT" "http://127.0.0.1:$PORT_SERVES" "start prints the address"
   # One retry covers the moment the fixture server is re-listening between
@@ -216,7 +216,7 @@ start_again_starts_no_second_server() {
   if [ "$before" = "0" ]; then
     fail_step "the unit has no main process, so this step would prove nothing"
   fi
-  preview fixture/preview-serves
+  serve fixture/preview-serves
   assert_status 0 "$STATUS" "second start"
   after=$(unit_main_pid "$UNIT_SERVES")
   if [ "$before" != "$after" ]; then
@@ -225,7 +225,7 @@ start_again_starts_no_second_server() {
 }
 
 stop_frees_the_port() {
-  preview --stop fixture/preview-serves
+  serve --stop fixture/preview-serves
   assert_status 0 "$STATUS" "stop"
   state=$(unit_state "$UNIT_SERVES")
   if [ "$state" = "active" ]; then
@@ -247,20 +247,20 @@ stop_frees_the_port() {
 }
 
 stop_again_is_not_an_error() {
-  preview --stop fixture/preview-serves
+  serve --stop fixture/preview-serves
   assert_status 0 "$STATUS" "second stop"
   assert_contains "$OUTPUT" "is not running" "the second stop says the preview is not running"
 }
 
 an_app_that_exits_is_reported_as_failed() {
-  preview fixture/preview-fails
+  serve fixture/preview-fails
   assert_status 1 "$STATUS" "start of an app that exits at once"
   assert_contains "$OUTPUT" "$LOG_MARK" "the failure carries the unit's own log"
   assert_absent "$OUTPUT" "http://127.0.0.1:$PORT_FAILS" "a failed start prints no address"
 }
 
 a_flake_without_the_app_is_refused() {
-  preview fixture/preview-appless
+  serve fixture/preview-appless
   assert_status 1 "$STATUS" "start of a flake with no preview app"
   assert_contains "$OUTPUT" "apps.$SYSTEM.preview" "the refusal names the missing app"
   # No '|| true': a probe that cannot run must fail this step, not report nothing.
@@ -270,9 +270,9 @@ a_flake_without_the_app_is_refused() {
   fi
 }
 
-a_worktree_previews_as_its_site() {
+a_worktree_is_served_as_its_site() {
   cd "$WORKTREE"
-  preview
+  serve
   assert_status 0 "$STATUS" "start from inside a worktree"
   assert_contains "$OUTPUT" "http://127.0.0.1:$PORT_WORKTREE" "the port is the registry entry's"
   state=$(unit_state "$UNIT_WORKTREE")
@@ -289,7 +289,7 @@ by_id_finds_the_worktree_preview() {
   if [ "$before" = "0" ]; then
     fail_step "the unit has no main process, so this step would prove nothing"
   fi
-  preview fixture/preview-worktree
+  serve fixture/preview-worktree
   assert_status 0 "$STATUS" "start by id while the worktree's preview runs"
   assert_contains "$OUTPUT" "http://127.0.0.1:$PORT_WORKTREE" "the address is printed again"
   assert_absent "$OUTPUT" "apps.$SYSTEM.preview" "the registered checkout is never asked for the app it has not got"
@@ -300,7 +300,7 @@ by_id_finds_the_worktree_preview() {
 }
 
 stop_by_id_stops_the_worktree_preview() {
-  preview --stop fixture/preview-worktree
+  serve --stop fixture/preview-worktree
   assert_status 0 "$STATUS" "stop by id"
   state=$(unit_state "$UNIT_WORKTREE")
   if [ "$state" = "active" ]; then
@@ -318,7 +318,7 @@ step 'stop leaves no process and frees the port' stop_frees_the_port
 step 'stop again says not running and exits 0' stop_again_is_not_an_error
 step 'an app that exits at once is reported as failed' an_app_that_exits_is_reported_as_failed
 step 'a flake without the app is refused' a_flake_without_the_app_is_refused
-step 'a worktree previews under its site id and port' a_worktree_previews_as_its_site
+step 'a worktree is served under its site id and port' a_worktree_is_served_as_its_site
 step 'the same site by id finds that preview' by_id_finds_the_worktree_preview
 step 'stop by id stops it' stop_by_id_stops_the_worktree_preview
 

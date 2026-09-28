@@ -55,11 +55,10 @@ func siteView(args []string) {
 		"-L", forward, "--", vm})
 }
 
-const siteViewDetail = `'view' opens a site being previewed in a VM in this machine's browser. It makes
-sure the preview is started there, prints the address, and then becomes the ssh
-that forwards the VM's port to the same port here, so the browser reaches
-http://127.0.0.1:<port>. The VM must run a build of allod that has 'site
-preview'.
+const siteViewDetail = `'view' opens a site being served in a VM in this machine's browser. It makes sure
+the server is started there, prints the address, and then becomes the ssh that
+forwards the VM's port to the same port here, so the browser reaches
+http://127.0.0.1:<port>. The VM must run a build of allod that has 'site serve'.
 
 The port and the VM both come from the inventory beside this machine: the site's
 'preview_port', which '--port <n>' overrides, and the one machine in
@@ -68,13 +67,13 @@ and which must be given when none or several do.
 
 Ctrl-C, or closing the terminal, ends the forward and nothing else: the port here
 closes and the server in the VM keeps running. Stop that server with
-'allod site preview --stop --vm <name> <site>'.
+'allod site serve --stop --vm <name> <site>'.
 `
 
 func init() {
 	siteCommands = append(siteCommands, siteCommand{
 		name:    "view",
-		summary: "Forward a site previewed in a VM to this machine's browser",
+		summary: "Forward a site served in a VM to this machine's browser",
 		usage:   []string{"allod site view [--vm <name>] [--port <n>] <site>"},
 		detail:  siteViewDetail,
 		run:     siteView,

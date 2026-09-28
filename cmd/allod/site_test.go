@@ -110,10 +110,10 @@ func cloneSiteHostingProfiles(profiles []siteHostingProfile) []siteHostingProfil
 }
 
 // stubTools lives in main_test.go: it is not specific to the tagged
-// commands, and site_preview_test.go needs it in an untagged build too.
+// commands, and site_serve_test.go needs it in an untagged build too.
 
 // useSiteRepo lives in main_test.go: it is not specific to the tagged
-// commands, and site_preview_test.go needs it in an untagged build too.
+// commands, and site_serve_test.go needs it in an untagged build too.
 
 // argAfter returns the value following flag in args.
 func argAfter(t *testing.T, args []string, flag string) string {
@@ -190,7 +190,7 @@ func deployRuns(t *testing.T, stub *deployStub, want [][]string) {
 // A site-tagged build carries the untagged files' commands plus this file's, and
 // nothing else.
 func TestSiteTaggedBuildCarriesEveryCommand(t *testing.T) {
-	want := []string{"preview", "view", "deploy", "check", "config"}
+	want := []string{"serve", "view", "deploy", "check", "config"}
 	if got := len(siteCommands); got != len(want) {
 		t.Fatalf("siteCommands has %d entries in a tagged build, want %d: %+v", got, len(want), siteCommands)
 	}
@@ -217,7 +217,7 @@ func TestSiteUsage(t *testing.T) {
 		errHas     string
 		errIsEmpty bool
 	}{
-		{"namespace listed in top-level usage", []string{}, 1, "site     Preview a static site", "", true},
+		{"namespace listed in top-level usage", []string{}, 1, "site     Serve and view a static site", "", true},
 		{"no command prints usage to stderr", []string{"site"}, 1, "", "allod site deploy [--config <path>] [--dry-run]", false},
 		{"--help prints usage to stdout", []string{"site", "--help"}, 0, "allod site deploy [--config <path>] [--dry-run]", "", true},
 		{"-h prints usage to stdout", []string{"site", "-h"}, 0, "allod site config [--config <path>] [--force]", "", true},
@@ -226,7 +226,7 @@ func TestSiteUsage(t *testing.T) {
 		{"config --help prints usage to stdout", []string{"site", "config", "--help"}, 0, "allod site config [--config <path>] [--force]", "", true},
 		{"config help discovers updates", []string{"site", "config", "update", "--help"}, 0, "allod site config update {host|user|password}", "", true},
 		{"help states update needs a stanza", []string{"site", "--help"}, 0, "Update requires an existing 'shared' stanza", "", true},
-		{"help also lists preview", []string{"site", "--help"}, 0, "allod site preview ", "", true},
+		{"help also lists serve", []string{"site", "--help"}, 0, "allod site serve ", "", true},
 		{"unknown command", []string{"site", "publish"}, 1, "", "unknown site command: publish", false},
 	}
 
@@ -253,11 +253,11 @@ func TestSiteUsage(t *testing.T) {
 // prose that appears nowhere in any Usage: or Commands: line, so its
 // presence or absence distinguishes the short usage from the long one.
 var siteDetailOnlySentences = map[string]string{
-	"deploy":  "deployment-owned hosting layout compiled in",
-	"check":   "A rejected FTP login can identify only the username or password",
-	"config":  "Passwords are not echoed as they are typed",
-	"preview": "keeps running under systemd until '--stop'",
-	"view":    "ends the forward and nothing else",
+	"deploy": "deployment-owned hosting layout compiled in",
+	"check":  "A rejected FTP login can identify only the username or password",
+	"config": "Passwords are not echoed as they are typed",
+	"serve":  "keeps running under systemd until '--stop'",
+	"view":   "ends the forward and nothing else",
 }
 
 // TestSiteBareInvocationHasNoDetailProse pins the short-usage contract: a
@@ -306,11 +306,11 @@ func TestSiteHelpIncludesDetailProse(t *testing.T) {
 // naming 'allod site config update user'.
 func TestSiteCommandHelpMentionsOnlyItsOwnCommand(t *testing.T) {
 	ownUsage := map[string]string{
-		"preview": "allod site preview [--port <n>] [--stop] [--vm <name>] [<site>]",
-		"view":    "allod site view [--vm <name>] [--port <n>] <site>",
-		"deploy":  "allod site deploy [--config <path>] [--dry-run]",
-		"check":   "allod site check [--config <path>]",
-		"config":  "allod site config [--config <path>] [--force]",
+		"serve":  "allod site serve [--port <n>] [--stop] [--vm <name>] [<site>]",
+		"view":   "allod site view [--vm <name>] [--port <n>] <site>",
+		"deploy": "allod site deploy [--config <path>] [--dry-run]",
+		"check":  "allod site check [--config <path>]",
+		"config": "allod site config [--config <path>] [--force]",
 	}
 	for command, usage := range ownUsage {
 		t.Run(command, func(t *testing.T) {
@@ -376,10 +376,10 @@ func TestSiteArgumentErrorPrintsOwnUsageOnly(t *testing.T) {
 		},
 		{
 			"preview missing flag value",
-			[]string{"site", "preview", "--port"},
+			[]string{"site", "serve", "--port"},
 			"allod: --port requires a value\n",
-			"Usage:\n  allod site preview ",
-			"\nRun 'allod site preview --help' for details.\n",
+			"Usage:\n  allod site serve ",
+			"\nRun 'allod site serve --help' for details.\n",
 		},
 		{
 			"deploy --config missing value",
@@ -445,13 +445,13 @@ func TestSiteSharedDetailAppearsWhereItApplies(t *testing.T) {
 		})
 	}
 
-	t.Run("preview", func(t *testing.T) {
-		out, errText, code := runAllod(t, "site", "preview", "--help")
+	t.Run("serve", func(t *testing.T) {
+		out, errText, code := runAllod(t, "site", "serve", "--help")
 		if code != 0 || errText != "" {
 			t.Fatalf("exit=%d stderr=%q, want success with empty stderr", code, errText)
 		}
 		if strings.Contains(out, marker) {
-			t.Errorf("'site preview --help' carries the '--config' detail it does not accept\ngot: %q", out)
+			t.Errorf("'site serve --help' carries the '--config' detail it does not accept\ngot: %q", out)
 		}
 	})
 

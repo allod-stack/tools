@@ -15,13 +15,13 @@ package main
 // The same reasoning explains why there is no way to name the target: see
 // siteDeploy.
 //
-// 'deploy', 'check', and 'config' are behind the 'site' build tag; 'preview'
-// is not, and lives in site_preview.go along with the namespace registration
+// 'deploy', 'check', and 'config' are behind the 'site' build tag; 'serve'
+// is not, and lives in site_serve.go along with the namespace registration
 // itself — see that file and site_common.go. A machine that publishes no
 // site has no rclone remote and no business carrying a command that syncs to
 // one, so it does not carry these three: this file's init() only appends
-// them to the command table site_preview.go's init() already populated with
-// 'preview', and an untagged build never compiles this file, so 'allod site
+// them to the command table site_serve.go's init() already populated with
+// 'serve', and an untagged build never compiles this file, so 'allod site
 // deploy' there falls through to "unknown site command" — which is true, and
 // is what an absent capability should look like. A command that is present
 // and permanently broken says something false about the machine.
@@ -259,16 +259,16 @@ var (
 	siteVerify      = fetchSite
 )
 
-// init extends the 'site' namespace site_preview.go's init() already
+// init extends the 'site' namespace site_serve.go's init() already
 // registered, adding the three commands this build's tag opts it into. It
 // appends to siteCommands rather than replacing it, and never calls
 // registerNamespace: that would panic on the duplicate word, and
-// site_preview.go's init() is the only one allowed to call it.
+// site_serve.go's init() is the only one allowed to call it.
 //
 // It also appends to siteSharedDetails, the one shared detail block this
 // build carries: '--config <path>', named against the three commands
 // registered here that accept it. An untagged build's init() never runs
-// this file at all, so siteSharedDetails there stays empty and preview's
+// this file at all, so siteSharedDetails there stays empty and serve's
 // help stays free of a flag it does not take.
 func init() {
 	siteCommands = append(siteCommands,
@@ -943,7 +943,7 @@ site check' as the way to verify the stored values with the server.
 // config --help' entirely, though both take the same flag with the same
 // meaning. init() below registers it once in siteSharedDetails so the long
 // form prints it once and each of the three commands' own '--help' prints
-// it too; preview, which takes no '--config', never sees it.
+// it too; serve, which takes no '--config', never sees it.
 const siteConfigFlagDetail = `'--config <path>' selects one rclone configuration path for any command. An
 explicit path takes precedence over RCLONE_CONFIG, rclone's reported path,
 XDG_CONFIG_HOME, and HOME. A path beginning with '-' uses --config=<path> so it
