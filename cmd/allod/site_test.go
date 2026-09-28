@@ -257,7 +257,7 @@ var siteDetailOnlySentences = map[string]string{
 	"deploy":  "deployment-owned hosting layout compiled in",
 	"check":   "A rejected FTP login can identify only the username or password",
 	"config":  "Passwords are not echoed as they are typed",
-	"preview": "mirror zola's own flags of the same names",
+	"preview": "keeps running under systemd until '--stop'",
 }
 
 // TestSiteBareInvocationHasNoDetailProse pins the short-usage contract: a
@@ -306,7 +306,7 @@ func TestSiteHelpIncludesDetailProse(t *testing.T) {
 // naming 'allod site config update user'.
 func TestSiteCommandHelpMentionsOnlyItsOwnCommand(t *testing.T) {
 	ownUsage := map[string]string{
-		"preview": "allod site preview [--port <n>] [--interface <addr>] [--base-url <url>] [--drafts] [--open] [-- <zola args>...]",
+		"preview": "allod site preview [--port <n>] [--stop] [<site>]",
 		"deploy":  "allod site deploy [--config <path>] [--dry-run]",
 		"check":   "allod site check [--config <path>]",
 		"config":  "allod site config [--config <path>] [--force]",

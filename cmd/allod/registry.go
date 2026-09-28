@@ -7,24 +7,36 @@ import (
 	"strings"
 )
 
-// registryCheckout looks up id (for example "allod/memory") in the
-// repository registry (registryPath()) and returns its checkout path,
-// relative to workDir(). A missing or malformed registry file means no id
-// matches; it is not an error by itself.
-func registryCheckout(id string) (checkout string, ok bool) {
+// registryEntry is the subset of a repository's registry entry this program
+// reads. PreviewPort is zero when the repository is not a previewable site;
+// allod/inventory's registry validation, not this program, holds a stated one
+// to 1024-65535 and to one repository each.
+type registryEntry struct {
+	Checkout    string `json:"checkout"`
+	PreviewPort int    `json:"preview_port"`
+}
+
+// registryEntries reads the whole repository registry (registryPath()), keyed
+// by id, for example "allod/memory". A missing or malformed file yields no
+// entries; that is not an error by itself. A caller looking a repository up by
+// its checkout rather than its id iterates this.
+func registryEntries() map[string]registryEntry {
 	data, err := os.ReadFile(registryPath())
 	if err != nil {
-		return "", false
+		return nil
 	}
 	var registry struct {
-		Repositories map[string]struct {
-			Checkout string `json:"checkout"`
-		} `json:"repositories"`
+		Repositories map[string]registryEntry `json:"repositories"`
 	}
 	if json.Unmarshal(data, &registry) != nil {
-		return "", false
+		return nil
 	}
-	entry, found := registry.Repositories[id]
+	return registry.Repositories
+}
+
+// registryCheckout returns id's checkout path, relative to workDir().
+func registryCheckout(id string) (checkout string, ok bool) {
+	entry, found := registryEntries()[id]
 	if !found || entry.Checkout == "" {
 		return "", false
 	}

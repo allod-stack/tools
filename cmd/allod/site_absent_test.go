@@ -112,7 +112,7 @@ func TestUntaggedSiteUsageListsOnlyPreview(t *testing.T) {
 // stays short even with one command registered, and '--help' still carries
 // the detail prose the bare form omits.
 func TestUntaggedSiteBareInvocationHasNoDetailProse(t *testing.T) {
-	const detailOnly = "mirror zola's own flags of the same names"
+	const detailOnly = "keeps running under systemd until '--stop'"
 
 	_, errText, code := runAllod(t, "site")
 	if code != 1 {
@@ -154,7 +154,7 @@ func TestUntaggedSitePreviewArgumentErrorPrintsOwnUsageOnly(t *testing.T) {
 			t.Errorf("argument error does not contain %q\ngot: %q", want, errText)
 		}
 	}
-	if detailOnly := "mirror zola's own flags of the same names"; strings.Contains(errText, detailOnly) {
+	if detailOnly := "keeps running under systemd until '--stop'"; strings.Contains(errText, detailOnly) {
 		t.Errorf("argument error printed preview's detail prose %q\ngot: %q", detailOnly, errText)
 	}
 }
