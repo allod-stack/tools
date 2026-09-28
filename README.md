@@ -43,10 +43,11 @@ lib/                      shared shell libraries
 
 ### Optional namespaces
 
-`allod site preview` is compiled into every build: it starts a local
-`zola serve` from a site repository's own locked generator, and it is meant
-to run on exactly the machines where a site is edited. Those machines carry
-no hosting credential and no rclone configuration, and preview reads neither.
+`allod site preview` is compiled into every build: it runs the `preview` app a
+site repository's own flake exposes, as a user systemd unit on loopback, and is
+meant for exactly the machines where a site is edited. Those machines carry no
+hosting credential and no rclone configuration, and preview reads neither. See
+[allod site preview](docs/allod-site-preview.md).
 
 `allod site deploy`, `check`, and `config` are behind the `site` build tag. A
 machine that publishes no site has no rclone remote to publish through, so it
@@ -104,6 +105,7 @@ namespace present, and each untagged run asserts it absent.
   comprehension-first HTML report
 - [Report components](docs/components.md) — semantic visual vocabulary and
   authoring contracts
+- [allod site preview](docs/allod-site-preview.md) — serve a site in a dev VM from the `preview` app in its own flake
 - [Git hooks](git-hooks/README.md) — `protected-refs-policy`, `setup-tracked-hooks`
 - [allod trace](docs/allod-trace.md) — distill local Claude, Codex, and Pi session logs into redacted markdown traces
 
