@@ -10,7 +10,7 @@ host install them through their Nix composition, with no manual installation aft
 ## Layout
 
 ```
-cmd/allod/                Go main CLI (change, patch, pr, trace, site serve and view; deploy/check/config and secret opt-in)
+cmd/allod/                Go main CLI (change, check, patch, pr, trace, site serve and view; deploy/check/config and secret opt-in)
 cmd/flake-update-cascade/ flake input update cascade Go command
 cmd/forge/                Forgejo CLI Go command
 internal/flakelock/       flake.lock graph walking for the cascade
@@ -108,6 +108,7 @@ namespace present, and each untagged run asserts it absent.
   authoring contracts
 - [allod site serve and view](docs/allod-site-preview.md) — serve a site in a dev VM from the `preview` app in its own flake, and view it from the hypervisor
 - [Git hooks](git-hooks/README.md) — `protected-refs-policy`, `setup-tracked-hooks`
+- [allod check](docs/allod-check.md) — run a repository's machines and checks, one `nix` process at a time, in place of `nix flake check`
 - [allod trace](docs/allod-trace.md) — distill local Claude, Codex, and Pi session logs into redacted markdown traces
 
 ## Shared Library
@@ -211,6 +212,13 @@ worktree and the repo is broken — usually because the directory was deleted, b
 also when the directory survives and its `.git` file did not. `git worktree
 prune` clears the admin entry and never deletes a directory, so check what is
 left behind before removing it by hand: it may still hold uncommitted work.
+
+### Running a repository's checks
+
+`cd ~/work/<checkout> && allod check` replaces `nix flake check`: one `nix`
+process per machine and per check, every failing step reported in one run, and a
+run that evaluated checks and built none refused. Input overrides and
+`allod-check.toml`: [allod check](docs/allod-check.md).
 
 ### Updating a flake input
 

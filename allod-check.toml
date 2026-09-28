@@ -1,0 +1,1 @@
+passive-outputs = ["packages", "devShells"]

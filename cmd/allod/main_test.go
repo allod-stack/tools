@@ -99,6 +99,18 @@ func useSiteRepo(t *testing.T, config string) string {
 	return resolved
 }
 
+func equalArgs(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // --- Dispatch ---
 
 // TestUsageListsEveryRegisteredNamespace ties the usage text to the dispatch
