@@ -1,8 +1,7 @@
 package main
 
-// Tests for 'allod site view', which runs on the hypervisor and so compiles into
-// every build. They use site_preview_test.go's stub and fixtures, and add a seam
-// standing in for the process replacing itself with ssh.
+// These use site_preview_test.go's stub and fixtures, and one more seam: the
+// process replacing itself with ssh.
 
 import (
 	"encoding/json"
@@ -13,8 +12,7 @@ import (
 	"testing"
 )
 
-// usePreviewVMs writes a vm-specs.json beside the registry usePreviewRegistry
-// wrote, giving each machine named the repository list given.
+// Beside the registry usePreviewRegistry wrote, which is where production looks.
 func usePreviewVMs(t *testing.T, machines map[string][]string) {
 	t.Helper()
 	specs := map[string]map[string][]string{}
@@ -28,7 +26,6 @@ func usePreviewVMs(t *testing.T, machines map[string][]string) {
 	previewWrite(t, filepath.Join(os.Getenv("INVENTORY"), "scripts", "vm-specs.json"), string(body))
 }
 
-// useExecStub captures the command that would have replaced this process.
 func useExecStub(t *testing.T, captured *[]string) {
 	t.Helper()
 	previous := sitePreviewExec
@@ -42,10 +39,8 @@ func wantSiteViewForward(vm string, port int) []string {
 		"-L", fmt.Sprintf("127.0.0.1:%d:127.0.0.1:%d", port, port), "--", vm}
 }
 
-// TestSiteViewForwardsThePort pins both commands a view runs — the remote start
-// over a connection of its own, then the forward it replaces itself with — and
-// that the address is printed once, by this machine rather than the VM, whose own
-// loopback address means nothing here until the forward is up.
+// The address is printed once, by this machine: the VM's own is meaningless here
+// until the forward is up.
 func TestSiteViewForwardsThePort(t *testing.T) {
 	stub := &previewStub{}
 	usePreviewStub(t, stub)
@@ -68,25 +63,20 @@ func TestSiteViewForwardsThePort(t *testing.T) {
 	}
 }
 
-// TestSiteViewVMLookup pins which machine is used: the one whose repository list
-// holds the site, '--vm' over that, and a refusal that counts and names what was
-// found when it is not exactly one.
 func TestSiteViewVMLookup(t *testing.T) {
 	tests := []struct {
 		name     string
 		machines map[string][]string
 		args     []string
 		vm       string
-		says     string
+		says     []string
 	}{
 		{name: "the one machine that lists it", machines: map[string][]string{"vm-one": {previewSiteID}}, vm: "vm-one"},
 		{name: "--vm overrides the lookup", machines: map[string][]string{"vm-one": {previewSiteID}},
 			args: []string{"--vm", "vm-other"}, vm: "vm-other"},
 		{name: "no machine lists it", machines: map[string][]string{"vm-one": {"allod/other"}},
-			says: "0 machines in "},
-		{name: "several machines list it", says: "2 machines in ",
-			machines: map[string][]string{"vm-one": {previewSiteID}, "vm-two": {previewSiteID}}},
-		{name: "several machines are named", says: "[vm-one vm-two]",
+			says: []string{"0 machines in "}},
+		{name: "several machines are counted and named", says: []string{"2 machines in ", "(vm-one vm-two)"},
 			machines: map[string][]string{"vm-two": {previewSiteID}, "vm-one": {previewSiteID}}},
 	}
 	for _, test := range tests {
@@ -103,8 +93,10 @@ func TestSiteViewVMLookup(t *testing.T) {
 				if code != 1 {
 					t.Errorf("exit code = %d, want 1", code)
 				}
-				if !strings.Contains(errText, test.says) {
-					t.Errorf("stderr does not contain %q\ngot: %q", test.says, errText)
+				for _, says := range test.says {
+					if !strings.Contains(errText, says) {
+						t.Errorf("stderr does not contain %q\ngot: %q", says, errText)
+					}
 				}
 				if len(forward) != 0 {
 					t.Errorf("a refused view still replaced itself: %v", forward)
@@ -123,9 +115,30 @@ func TestSiteViewVMLookup(t *testing.T) {
 	}
 }
 
-// TestSiteViewStopsWhenTheRemoteStartFails pins that a view whose preview could
-// not be started in the VM exits with that command's own code and forwards
-// nothing: the remote command has already said why on standard error.
+// A preview_port nothing can use is read only where it is needed, so '--port'
+// replaces it here as it does in the VM.
+func TestSiteViewPortFlagOverridesABadRegistryPort(t *testing.T) {
+	stub := &previewStub{}
+	usePreviewStub(t, stub)
+	usePreviewRegistry(t, previewCheckout, `"18650"`)
+	usePreviewVMs(t, map[string][]string{"vm-one": {previewSiteID}})
+	var forward []string
+	useExecStub(t, &forward)
+
+	out, errText, code := runAllod(t, "site", "view", "--port", "18601", previewSiteID)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr: %q", code, errText)
+	}
+	if want := "http://127.0.0.1:18601\n"; out != want {
+		t.Errorf("stdout = %q, want %q", out, want)
+	}
+	if want := wantSiteViewForward("vm-one", 18601); fmt.Sprint(forward) != fmt.Sprint(want) {
+		t.Errorf("forward =\n%v\nwant\n%v", forward, want)
+	}
+}
+
+// A preview that did not start in the VM has already said why there, so this exits
+// with its code and forwards nothing.
 func TestSiteViewStopsWhenTheRemoteStartFails(t *testing.T) {
 	stub := &previewStub{remote: 3}
 	usePreviewStub(t, stub)
@@ -146,7 +159,7 @@ func TestSiteViewStopsWhenTheRemoteStartFails(t *testing.T) {
 	}
 }
 
-// TestSiteViewRefusals covers each refusal. None of them forwards anything.
+// Every refusal. None of them forwards anything.
 func TestSiteViewRefusals(t *testing.T) {
 	tests := []struct {
 		name string
@@ -188,8 +201,6 @@ func TestSiteViewRefusals(t *testing.T) {
 	}
 }
 
-// TestSiteViewHelp checks that the help says what Ctrl-C does and does not end,
-// and how to stop the server from here.
 func TestSiteViewHelp(t *testing.T) {
 	out, errText, code := runAllod(t, "site", "view", "--help")
 	if code != 0 || errText != "" {

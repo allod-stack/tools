@@ -62,8 +62,6 @@ new_site() {
   printf '%s' "$root"
 }
 
-# shell_app_flake writes a flake whose only output is the preview app, run from
-# the serve.sh its caller writes beside it.
 shell_app_flake() {
   cat > "$1/flake.nix" <<EOF
 {
@@ -77,16 +75,16 @@ EOF
 ROOT_SERVES=$(new_site serves)
 shell_app_flake "$ROOT_SERVES"
 printf '<h1>%s</h1>\n' "$PAGE_MARK" > "$ROOT_SERVES/index.html"
-# One page on one port, one connection at a time. The delay before the first
-# listen stands in for the build a real preview app does first, and is what
-# makes 'start serves the fixture page' notice a start that reported success
-# before anything was listening.
+# One page on one port, one connection at a time. The fixture stays silent for ten
+# seconds, twice the five the fetch in 'start serves the fixture page' can wait at
+# worst, so that step fails whenever the address was printed before the port
+# answered.
 cat > "$ROOT_SERVES/serve.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 page=$(cat "${0%/*}/index.html")
 printf 'fixture preview app waiting before it listens\n'
-sleep 3
+sleep 10
 printf 'fixture preview app listening on %s:%s\n' "$ALLOD_PREVIEW_INTERFACE" "$ALLOD_PREVIEW_PORT"
 while true; do
   printf 'HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s' \
@@ -108,9 +106,8 @@ fixture_commit() {
   git -C "$1" -c user.email=fixture@example.invalid -c user.name=Fixture commit -q -m "$2"
 }
 
-# The worktree fixture is a repository whose registered checkout has no preview
-# app at all, on a branch that has one and its own page. Only the worktree can
-# serve, and only the registry knows the port and the name.
+# The registered checkout has no preview app; only the branch the worktree holds
+# has one, and only the registry knows the port and the unit name.
 ROOT_WORKTREE=$(new_site worktree-main)
 git -C "$ROOT_WORKTREE" init -q -b master
 printf '{\n  outputs = { self }: { };\n}\n' > "$ROOT_WORKTREE/flake.nix"
@@ -157,7 +154,6 @@ step() {
   fi
 }
 
-# fail_step ends the step's subshell, and only that subshell.
 fail_step() {
   printf '     %s\n' "$@" >&2
   exit 1
@@ -207,12 +203,11 @@ start_serves_a_page() {
   preview fixture/preview-serves
   assert_status 0 "$STATUS" "start"
   assert_contains "$OUTPUT" "http://127.0.0.1:$PORT_SERVES" "start prints the address"
-  # Two retries, about two seconds of grace: enough for the fixture server to be
-  # back between connections, and less than the three it waits before its first
-  # one, so a start that printed the address without waiting leaves nothing to
-  # fetch here.
-  page=$(curl --silent --show-error --retry 2 --retry-connrefused \
-    --max-time 5 "http://127.0.0.1:$PORT_SERVES/")
+  # One retry covers the moment the fixture server is re-listening between
+  # connections. Its worst wait is five seconds, two attempts of --max-time 2 and
+  # one --retry-delay, against the ten the fixture stays silent.
+  page=$(curl --silent --show-error --retry 1 --retry-delay 1 --retry-connrefused \
+    --max-time 2 "http://127.0.0.1:$PORT_SERVES/")
   assert_contains "$page" "$PAGE_MARK" "the page served is the fixture's own"
 }
 
@@ -268,7 +263,8 @@ a_flake_without_the_app_is_refused() {
   preview fixture/preview-appless
   assert_status 1 "$STATUS" "start of a flake with no preview app"
   assert_contains "$OUTPUT" "apps.$SYSTEM.preview" "the refusal names the missing app"
-  listed=$(systemctl --user list-units --all --no-legend "$UNIT_APPLESS.service" 2>/dev/null || true)
+  # No '|| true': a probe that cannot run must fail this step, not report nothing.
+  listed=$(systemctl --user list-units --all --no-legend "$UNIT_APPLESS.service")
   if [ -n "$listed" ]; then
     fail_step "a refused start left a unit behind" "$listed"
   fi
@@ -283,8 +279,8 @@ a_worktree_previews_as_its_site() {
   if [ "$state" != "active" ]; then
     fail_step "the unit is not named after the registered site: $UNIT_WORKTREE is $state"
   fi
-  page=$(curl --silent --show-error --retry 2 --retry-connrefused \
-    --max-time 5 "http://127.0.0.1:$PORT_WORKTREE/")
+  page=$(curl --silent --show-error --retry 1 --retry-delay 1 --retry-connrefused \
+    --max-time 2 "http://127.0.0.1:$PORT_WORKTREE/")
   assert_contains "$page" "$WORKTREE_MARK" "the page served is the worktree's"
 }
 

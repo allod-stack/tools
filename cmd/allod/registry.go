@@ -9,7 +9,6 @@ import (
 	"strings"
 )
 
-// registryEntry is what this program reads of a repository's registry entry.
 // PreviewPort stays undecoded: as an int, one entry with a string or a fraction
 // there would fail the whole file for every lookup, site or not.
 type registryEntry struct {
@@ -17,8 +16,7 @@ type registryEntry struct {
 	PreviewPort json.RawMessage `json:"preview_port"`
 }
 
-// previewPortValue reads a preview_port, or a '--port' value: zero and ok for an
-// absent one, ok false outside the range allod/inventory's validation enforces.
+// Zero and ok is an absent preview_port; the range is allod/inventory's.
 func previewPortValue(text string) (port int, ok bool) {
 	if text = strings.TrimSpace(text); text == "" || text == "null" {
 		return 0, true
@@ -27,8 +25,6 @@ func previewPortValue(text string) (port int, ok bool) {
 	return port, err == nil && port >= 1024 && port <= 65535
 }
 
-// previewPort is the port id's entry states, zero for none, and a refusal that
-// names both when it states one outside the range.
 func previewPort(id string, entry registryEntry) int {
 	port, ok := previewPortValue(string(entry.PreviewPort))
 	if !ok {
@@ -40,8 +36,7 @@ func previewPort(id string, entry registryEntry) int {
 
 func vmSpecsPath() string { return filepath.Join(filepath.Dir(registryPath()), "vm-specs.json") }
 
-// vmsWithRepo names every machine whose repository list holds id, in order, so a
-// refusal that lists them reads the same twice.
+// Sorted, so a refusal that lists the machines reads the same twice.
 func vmsWithRepo(id string) []string {
 	data, err := os.ReadFile(vmSpecsPath())
 	if err != nil {
@@ -63,8 +58,7 @@ func vmsWithRepo(id string) []string {
 	return found
 }
 
-// registryEntries reads the whole registry (registryPath()), keyed by id; a
-// missing or malformed file yields no entries, which is not an error by itself.
+// A missing or malformed registry yields no entries, which is not an error here.
 func registryEntries() map[string]registryEntry {
 	data, err := os.ReadFile(registryPath())
 	if err != nil {
@@ -79,7 +73,7 @@ func registryEntries() map[string]registryEntry {
 	return registry.Repositories
 }
 
-// registryCheckout returns id's checkout path, relative to workDir().
+// The checkout path is relative to workDir().
 func registryCheckout(id string) (checkout string, ok bool) {
 	entry, found := registryEntries()[id]
 	if !found || entry.Checkout == "" {

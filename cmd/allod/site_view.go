@@ -5,12 +5,12 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 )
 
-// sitePreviewExec is the second test seam. It replaces this process, so nothing
-// after it runs and there is no child for allod to watch: ssh owns the forward's
-// whole lifetime, and Ctrl-C reaches ssh itself.
+// Replacing the process leaves no child for allod to watch: ssh owns the
+// forward's whole lifetime and Ctrl-C reaches ssh itself.
 var sitePreviewExec = func(argv []string) {
 	path, err := exec.LookPath(argv[0])
 	if err != nil {
@@ -38,14 +38,13 @@ func siteView(args []string) {
 	if vm == "" {
 		machines := vmsWithRepo(site)
 		if len(machines) != 1 {
-			die(1, "%d machines in %s list %s%s; name one with --vm",
-				len(machines), vmSpecsPath(), site, sitePreviewNames(machines))
+			die(1, "%d machines in %s list %s (%s); name one with --vm",
+				len(machines), vmSpecsPath(), site, strings.Join(machines, " "))
 		}
 		vm = machines[0]
 	}
-	// The remote start's own address is the VM's loopback, which means nothing here
-	// until the forward is up, so only its diagnostics are shown and the address is
-	// printed once, below.
+	// The remote start prints the VM's own loopback address, which means nothing
+	// here until the forward is up, so only its diagnostics are shown.
 	if status := sitePreviewRemote(vm, site, port, false, io.Discard); status != 0 {
 		exit(status)
 	}
@@ -54,13 +53,6 @@ func siteView(args []string) {
 	sitePreviewExec([]string{"ssh", "-N", "-o", "ControlMaster=no", "-o", "ControlPath=none",
 		"-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3",
 		"-L", forward, "--", vm})
-}
-
-func sitePreviewNames(machines []string) string {
-	if len(machines) == 0 {
-		return ""
-	}
-	return " (" + fmt.Sprint(machines) + ")"
 }
 
 const siteViewDetail = `'view' opens a site being previewed in a VM in this machine's browser. It makes
@@ -75,8 +67,8 @@ vm-specs.json whose repository list holds the site, which '--vm <name>' override
 and which must be given when none or several do.
 
 Ctrl-C, or closing the terminal, ends the forward and nothing else: the port here
-closes, and the server in the VM keeps running, because an agent is using it too.
-Stop that server with 'allod site preview --stop --vm <name> <site>'.
+closes and the server in the VM keeps running. Stop that server with
+'allod site preview --stop --vm <name> <site>'.
 `
 
 func init() {

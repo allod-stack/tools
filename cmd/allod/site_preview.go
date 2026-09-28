@@ -15,7 +15,8 @@ var sitePreviewRun = func(name string, args []string, out io.Writer) int {
 }
 
 var sitePreviewTimeout = 60 * time.Second
-var sitePreviewPoll = 250 * time.Millisecond
+
+const sitePreviewPoll = 250 * time.Millisecond
 
 // The 'or {}' fallbacks answer for a flake with no apps rather than failing.
 const sitePreviewAppExpr = `let flake = builtins.getFlake "%s"; system = builtins.currentSystem; ` +
@@ -25,9 +26,7 @@ const sitePreviewAppExpr = `let flake = builtins.getFlake "%s"; system = builtin
 // reference, where '"', '${', '#' and '?' all mean something.
 const sitePreviewPlain = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
 
-// siteFlags parses the options 'preview' and 'view' share, refusing a value that
-// begins with '-' wherever one is expected, and prints command's own help for
-// '-h'. '--stop' is preview's alone; view refuses it by name.
+// '--stop' is preview's alone; view refuses it by name.
 func siteFlags(command string, args []string) (port int, vm, site string, stop bool) {
 	for len(args) > 0 {
 		switch option := args[0]; option {
@@ -64,15 +63,14 @@ func siteFlags(command string, args []string) (port int, vm, site string, stop b
 	return port, vm, site, stop
 }
 
-// shellQuote wraps one value for the shell in the VM: ssh joins the words after
-// the host with spaces and hands the result to that shell, so a site id with a
-// space or a quote in it arrives as one argument only if it is quoted here.
+// ssh joins the words after the host with spaces and hands them to a shell there,
+// so a value arrives as one argument only if it is quoted here.
 func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
 }
 
-// sitePreviewRemote runs this same command in vm over a connection of its own: a
-// forward on a shared connection outlives the command that asked for it.
+// The connection is never a shared one: a forward on a shared connection outlives
+// the command that asked for it.
 func sitePreviewRemote(vm, site string, port int, stop bool, out io.Writer) int {
 	remote := []string{"-o", "ControlMaster=no", "-o", "ControlPath=none", "--", vm, "allod", "site", "preview"}
 	if port != 0 {
@@ -93,30 +91,32 @@ func sitePreview(args []string) {
 		exit(sitePreviewRemote(vm, site, port, stop, stdout))
 	}
 	root, name, entry := sitePreviewSite(site)
-	registryPort := previewPort(name, entry)
-	for _, character := range root {
-		if !strings.ContainsRune(sitePreviewPlain+"/+", character) {
-			die(1, "the checkout path %s cannot be given to nix: it contains %q", root, character)
-		}
-	}
 	unit := "allod-preview-" + sitePreviewSlug(name)
 	if stop {
 		// A stop alone cannot report this: it exits 5 on a unit never loaded.
-		if !sitePreviewActive(unit) {
+		if !sitePreviewRunning(unit) {
 			fmt.Fprintf(stdout, "%s is not running\n", unit)
 		} else if sitePreviewRun("systemctl", []string{"--user", "stop", unit}, stderr) != 0 {
 			die(1, "could not stop %s", unit)
 		}
 		return
 	}
-	if port == 0 && registryPort == 0 {
-		die(1, "no preview port for %s: give its entry in %s a preview_port, or pass --port", name, registryPath())
-	} else if port == 0 {
-		port = registryPort
+	// The registry's port is read only where it is needed, so a malformed one
+	// neither blocks a stop nor outlives the '--port' that replaces it.
+	if port == 0 {
+		if port = previewPort(name, entry); port == 0 {
+			die(1, "no preview port for %s: give its entry in %s a preview_port, or pass --port", name, registryPath())
+		}
 	}
-	// The app is asked about only when a start is about to happen: a preview
-	// serving a worktree answers to the same id as a checkout without the app.
-	if !sitePreviewActive(unit) {
+	// The app and the path are checked only when a start is about to happen: a
+	// preview serving a worktree answers to the same id as a checkout without the
+	// app, and nothing but a start hands the path to nix.
+	if !sitePreviewRunning(unit) {
+		for _, character := range root {
+			if !strings.ContainsRune(sitePreviewPlain+"/+", character) {
+				die(1, "the checkout path %s cannot be given to nix: it contains %q", root, character)
+			}
+		}
 		var absent strings.Builder
 		if sitePreviewRun("nix", []string{"eval", "--impure", "--raw", "--expr", fmt.Sprintf(sitePreviewAppExpr, root)}, &absent) != 0 {
 			die(1, "could not evaluate the flake at %s", root)
@@ -133,12 +133,10 @@ func sitePreview(args []string) {
 	sitePreviewWait(unit, port)
 }
 
-// sitePreviewSite resolves the site to its checkout root, the name it is refused,
-// reported and named after, and the registry entry that states its port. Every
-// route to one site reaches one name, and so one unit name, which is what lets a
-// '--stop' elsewhere name the unit this machine started: a directory is looked
-// back up in the registry, and a git worktree, which no registry names, through
-// the repository it belongs to, while the root stays the worktree being edited.
+// Every route to one site must reach one name, and so one unit name, or a
+// '--stop' elsewhere would not name the unit this machine started. A git worktree
+// is therefore looked up through the repository it belongs to, while the root
+// stays the worktree being edited.
 func sitePreviewSite(site string) (root, name string, entry registryEntry) {
 	entries := registryEntries()
 	if site != "" {
@@ -180,23 +178,41 @@ func sitePreviewSlug(name string) string {
 	}, name)
 }
 
-func sitePreviewActive(unit string) bool {
-	return sitePreviewRun("systemctl", []string{"--user", "is-active", "--quiet", unit}, io.Discard) == 0
+// sitePreviewRunning answers from the exit codes measured for 'systemctl --user
+// is-active --quiet': 0 active, 3 loaded but not active (activating, or failed
+// before it was collected), 4 inactive or no such unit. A 3 counts as running, so
+// a unit that is still coming up is stopped rather than reported as absent, and
+// any other code means systemd could not be asked, which is never "not running".
+func sitePreviewRunning(unit string) bool {
+	switch status := sitePreviewRun("systemctl", []string{"--user", "is-active", "--quiet", unit}, io.Discard); status {
+	case 0, 3:
+		return true
+	case 4:
+		return false
+	default:
+		die(1, "could not ask systemd about %s: 'systemctl --user is-active' exited %d", unit, status)
+		return false
+	}
 }
 
-// The connection comes before the question about the unit, so a server that
-// answered in the instant its unit ended still counts as serving.
+// A connection is only good news while the unit is still up: an app that accepts
+// one connection and exits, or another program holding the port, answers just as
+// a working preview does.
 func sitePreviewWait(unit string, port int) {
 	address := fmt.Sprintf("127.0.0.1:%d", port)
 	for deadline := time.Now().Add(sitePreviewTimeout); ; time.Sleep(sitePreviewPoll) {
+		accepted := false
 		if connection, err := net.DialTimeout("tcp", address, time.Second); err == nil {
 			connection.Close()
-			fmt.Fprintf(stdout, "http://%s\n", address)
-			return
+			accepted = true
 		}
-		if !sitePreviewActive(unit) {
+		if !sitePreviewRunning(unit) {
 			sitePreviewRun("journalctl", []string{"--user", "-u", unit, "-n", "20", "--no-pager"}, stderr)
 			die(1, "%s is no longer running; its last log lines are above", unit)
+		}
+		if accepted {
+			fmt.Fprintf(stdout, "http://%s\n", address)
+			return
 		}
 		if !time.Now().Before(deadline) {
 			fmt.Fprintf(stderr, "allod: %s is still starting; follow it with: journalctl --user -f -u %s\n", unit, unit)
@@ -221,13 +237,13 @@ The server listens on 127.0.0.1 alone, and its output is in the journal:
 resolves nothing here and runs this same command in that VM over a connection of
 its own, which is how the owner stops a preview from the hypervisor.
 
-Exit 0 prints the address, whether this run started the server or found one up;
-exit 1 means the unit has stopped, and its last log lines are on standard error;
-exit 3 means the unit is up with the port still silent, as a first build looks.
+Exit 0 prints the address, whether this run started the server or found one up.
+Exit 3 means the unit is up with the port still silent, as a first build looks.
+Exit 1 is everything else: a refusal, a command that failed, or a unit that has
+stopped, in which case its last log lines are on standard error.
 `
 
-// This file carries no build tag, so preview is in every build; siteCommands in
-// site_common.go says why the entry is added from an init().
+// siteCommands in site_common.go says why the entry is added from an init().
 func init() {
 	registerNamespace(namespace{name: "site", summary: "Preview a static site; deploy, check, config are present in site-tagged builds", main: siteMain})
 	siteCommands = append([]siteCommand{{

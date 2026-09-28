@@ -7,7 +7,7 @@ An agent working in a dev VM can serve the site it is editing, and the owner can
 A previewable site's flake has an app named `preview` for the machine's system, `apps.<system>.preview`. The app:
 
 - listens on the TCP port in `ALLOD_PREVIEW_PORT`, at the address in `ALLOD_PREVIEW_INTERFACE`, which is always the literal `127.0.0.1` — on these machines `localhost` resolves to `::1` alone, and a server bound there cannot be reached;
-- fails when that port is taken, and never moves to another one. `allod` waits for the port it handed over to accept a connection, so a server that quietly picked a different port would be reported as serving while nothing reachable is;
+- fails when that port is taken, and never moves to another one. `allod` only ever waits on the port it handed over, so a server that quietly picked a different one is reported as still starting while the site is in fact being served where no forward reaches it — or, if something else holds the assigned port, as serving;
 - serves everything the browser needs on that one port, reload channel included;
 - runs in the foreground and exits when sent `SIGTERM`;
 - reloads the browser when files change, by whatever means the tool has.
@@ -87,7 +87,7 @@ journalctl --user -u allod-preview-<slug>
 
 Add `-f` to follow it. `--stop` stops the unit and every process it started; a preview that is not running is reported as such and is not an error.
 
-A start exits 0 and prints `http://127.0.0.1:<port>` once the port accepts a connection, whether this run started the server or found one already up. It exits 1 when the unit is no longer running, with the last 20 lines of its log on standard error. It exits 3 when 60 seconds pass with the unit up and the port still silent, which is what a first build inside the unit looks like; that message names the `journalctl` line to watch. `allod site preview --help` says the same in brief.
+A start exits 0 and prints `http://127.0.0.1:<port>` once the port accepts a connection and the unit is still running, whether this run started the server or found one already up. It exits 3 when 60 seconds pass with the unit up and the port still silent, which is what a first build inside the unit looks like; that message names the `journalctl` line to watch. Exit 1 is everything else — a refusal, a command that failed, systemd that could not be asked, or a unit that has stopped, in which case the last 20 lines of its log are on standard error. `allod site preview --help` says the same in brief.
 
 ## From the hypervisor
 

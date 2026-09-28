@@ -187,9 +187,8 @@ func deployRuns(t *testing.T, stub *deployStub, want [][]string) {
 
 // --- Dispatch and usage ---
 
-// TestSiteTaggedBuildCarriesEveryCommand pins the shape a site-tagged build
-// carries: 'preview' and 'view' from the untagged files plus the three this
-// file's init() adds, and nothing else.
+// A site-tagged build carries the untagged files' commands plus this file's, and
+// nothing else.
 func TestSiteTaggedBuildCarriesEveryCommand(t *testing.T) {
 	want := []string{"preview", "view", "deploy", "check", "config"}
 	if got := len(siteCommands); got != len(want) {
