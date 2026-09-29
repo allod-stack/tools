@@ -195,8 +195,8 @@ func TestEditDistance(t *testing.T) {
 	}
 }
 
-// Pins the threshold itself: one edit inside it qualifies, one edit past it
-// does not, on strings sharing no character, so containment plays no part.
+// Pins tier two's threshold, on strings sharing no character so tier one
+// never fires: one edit inside it qualifies, one edit past it does not.
 func TestSiteListClosestEditDistanceBoundary(t *testing.T) {
 	within := []siteListEntry{{id: "ab"}}
 	if got, ok := siteListClosest(within, "xy"); !ok || got != "ab" {
@@ -210,23 +210,35 @@ func TestSiteListClosestEditDistanceBoundary(t *testing.T) {
 	}
 }
 
-func TestSiteListClosestContainment(t *testing.T) {
-	entries := []siteListEntry{{id: "allod/blog"}, {id: "allod/docs"}}
+// Tier one: containment alone decides, even when a non-containing entry
+// ("allod/xl", one substitution from "allod/bl") would also qualify on edit
+// distance.
+func TestSiteListClosestContainmentOutranksDistance(t *testing.T) {
+	entries := []siteListEntry{{id: "allod/blog"}, {id: "allod/docs"}, {id: "allod/xl"}}
 	if got, ok := siteListClosest(entries, "allod/bl"); !ok || got != "allod/blog" {
 		t.Errorf(`siteListClosest(..., "allod/bl") = %q, %v, want "allod/blog", true`, got, ok)
 	}
 }
 
-// Two qualifying ids name neither: guessing between them would as often
-// mislead as help.
-func TestSiteListClosestAmbiguousNamesNone(t *testing.T) {
+// Tier one, two or more ids containing the given text: name neither,
+// regardless of what tier two's distances would say.
+func TestSiteListClosestContainmentAmbiguousNamesNone(t *testing.T) {
 	entries := []siteListEntry{{id: "allod/blog"}, {id: "allod/docs"}}
 	if got, ok := siteListClosest(entries, "allod/"); ok {
 		t.Errorf(`siteListClosest(..., "allod/") = %q, %v, want "", false`, got, ok)
 	}
 }
 
-// --- The CLI paths themselves: allod/tools#248's Validation section ---
+// Tier two, two ids equally within distance and neither containing: name
+// neither.
+func TestSiteListClosestDistanceAmbiguousNamesNone(t *testing.T) {
+	entries := []siteListEntry{{id: "ab"}, {id: "ac"}}
+	if got, ok := siteListClosest(entries, "zz"); ok {
+		t.Errorf(`siteListClosest(..., "zz") = %q, %v, want "", false`, got, ok)
+	}
+}
+
+// --- The CLI paths themselves ---
 
 // No id, either command, lists the known sites beside the usual usage error.
 func TestSiteListNoIDListsKnownSites(t *testing.T) {
@@ -312,6 +324,46 @@ func TestSiteListUnknownIDAmbiguousNamesNone(t *testing.T) {
 	if !strings.Contains(errText, "Known sites:") {
 		t.Errorf("stderr does not contain the list\ngot: %q", errText)
 	}
+}
+
+// Ids sharing a long owner prefix is the normal case, not a corner: a given
+// text that is a prefix of exactly one id must still name it even though a
+// third id's malformed entry sits within edit distance of that same text.
+func TestSiteListClosestSharedOwnerPrefix(t *testing.T) {
+	writeSiteListRegistry(t, t.TempDir(), map[string]siteListFixtureEntry{
+		"example/blog": {checkout: "sites/blog", port: "18601"},
+		"example/docs": {checkout: "sites/docs", port: "18602"},
+		"example/wiki": {checkout: "sites/wiki"}, // no preview_port
+		"example/bad":  {checkout: "sites/bad", port: `"80"`},
+	})
+	tests := []struct {
+		given string
+		want  string
+	}{
+		{"example/bl", "example/blog"},
+		{"example/d", "example/docs"},
+	}
+	for _, test := range tests {
+		t.Run(test.given, func(t *testing.T) {
+			_, errText, code := runAllod(t, "site", "view", test.given)
+			if code != 1 {
+				t.Errorf("exit code = %d, want 1", code)
+			}
+			if want := "closest known id: " + test.want; !strings.Contains(errText, want) {
+				t.Errorf("stderr does not contain %q\ngot: %q", want, errText)
+			}
+		})
+	}
+
+	t.Run("example", func(t *testing.T) {
+		_, errText, code := runAllod(t, "site", "view", "example")
+		if code != 1 {
+			t.Errorf("exit code = %d, want 1", code)
+		}
+		if strings.Contains(errText, "closest known id") {
+			t.Errorf("stderr named a closest id although three known ids contain the given text\ngot: %q", errText)
+		}
+	})
 }
 
 // A registry with no previewable site prints the one-line statement and

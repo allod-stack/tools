@@ -107,23 +107,31 @@ func siteListText(entries []siteListEntry) string {
 // typo, small enough that two genuinely different ids rarely both qualify.
 const siteListEditDistance = 2
 
-// siteListClosest names the one entry, among those given, that plausibly is
-// what was meant: its id contains the given text, or is within
-// siteListEditDistance edits of it. Two or more qualifying ids return "",
-// false — guessing between them would as often mislead as help.
+// siteListClosest names the one entry that plausibly is what was meant, in
+// two tiers rather than one pool: if exactly one entry's id contains given,
+// name it, and two or more containing it name none regardless of distance.
+// Only when none contain it does an id within siteListEditDistance edits of
+// given qualify, again naming one only when exactly one does.
 func siteListClosest(entries []siteListEntry, given string) (id string, ok bool) {
 	found, count := "", 0
 	for _, entry := range entries {
-		if strings.Contains(entry.id, given) || editDistance(entry.id, given) <= siteListEditDistance {
+		if strings.Contains(entry.id, given) {
+			found, count = entry.id, count+1
+		}
+	}
+	if count > 0 {
+		return found, count == 1
+	}
+	for _, entry := range entries {
+		if editDistance(entry.id, given) <= siteListEditDistance {
 			found, count = entry.id, count+1
 		}
 	}
 	return found, count == 1
 }
 
-// editDistance is the Levenshtein distance between a and b: the fewest
-// single-character insertions, deletions, and substitutions that turn one
-// into the other. Two-row dynamic programming, standard library only.
+// editDistance is the Levenshtein distance between a and b: single-character
+// insertions, deletions, and substitutions, each costing 1.
 func editDistance(a, b string) int {
 	ra, rb := []rune(a), []rune(b)
 	previous := make([]int, len(rb)+1)
