@@ -86,7 +86,7 @@ func siteServe(args []string) {
 	port, vm, site, stop := siteFlags("serve", args)
 	if vm != "" {
 		if site == "" {
-			siteCommandUsageError("serve", "--vm needs a site id: nothing is resolved on this machine")
+			siteListMissingID("serve", "--vm needs a site id: nothing is resolved on this machine", true)
 		}
 		exit(sitePreviewRemote(vm, site, port, stop, stdout))
 	}
@@ -142,7 +142,7 @@ func sitePreviewSite(site string) (root, name string, entry registryEntry) {
 	if site != "" {
 		entry, found := entries[site]
 		if !found || entry.Checkout == "" {
-			die(1, "unknown site: %s has no entry in %s", site, registryPath())
+			siteListUnknown(site, true)
 		}
 		return filepath.Join(workDir(), entry.Checkout), site, entry
 	}

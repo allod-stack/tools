@@ -24,11 +24,11 @@ var sitePreviewExec = func(argv []string) {
 func siteView(args []string) {
 	port, vm, site, _ := siteFlags("view", args)
 	if site == "" {
-		siteCommandUsageError("view", "site view needs a site id")
+		siteListMissingID("view", "site view needs a site id", true)
 	}
 	entry, found := registryEntries()[site]
 	if !found {
-		die(1, "unknown site: %s has no entry in %s", site, registryPath())
+		siteListUnknown(site, true)
 	}
 	if port == 0 {
 		if port = previewPort(site, entry); port == 0 {
