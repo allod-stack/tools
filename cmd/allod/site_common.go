@@ -310,7 +310,7 @@ func siteUsageText() string {
 		text.WriteString("\n\n")
 		text.WriteString(shared.text)
 	}
-	return text.String()
+	return renderSiteDetail(text.String())
 }
 
 // siteCommandEntry looks up one command by name and reports whether it is
@@ -394,7 +394,20 @@ func siteCommandHelp(name string) string {
 		text.WriteString("\n\n")
 		text.WriteString(shared.text)
 	}
-	return text.String()
+	return renderSiteDetail(text.String())
+}
+
+// siteRegistryPathPlaceholder marks the one spot a detail block names the
+// registry file. It is substituted at render time rather than baked into the
+// constant, because registryPath() depends on $INVENTORY, which a real
+// invocation resolves fresh and a test sets per run.
+const siteRegistryPathPlaceholder = "{{registryPath}}"
+
+// renderSiteDetail fills in siteRegistryPathPlaceholder in already-assembled
+// help text. A block with no placeholder passes through unchanged, so this is
+// safe to run over every command's output, not only the ones that use it.
+func renderSiteDetail(text string) string {
+	return strings.ReplaceAll(text, siteRegistryPathPlaceholder, registryPath())
 }
 
 // siteCommandUsageError reports one argument-parsing error inside a site
@@ -409,15 +422,29 @@ func siteCommandHelp(name string) string {
 // name must be a name already registered in siteCommands, for the same
 // reason siteCommandHelp requires it.
 func siteCommandUsageError(name string, format string, args ...any) {
+	fmt.Fprintf(stderr, "allod: "+format+"\n", args...)
+	fmt.Fprint(stderr, siteCommandUsageLines(name))
+	exit(1)
+}
+
+// siteCommandUsageLines renders one command's own Usage: block followed by
+// the pointer to its '--help', the tail siteCommandUsageError appends to
+// every refusal. site_list.go's "no site id" case shares it too, printing
+// the known-sites list between its message and this same tail rather than
+// duplicating it.
+//
+// name must be a name already registered in siteCommands, for the same
+// reason siteCommandHelp requires it.
+func siteCommandUsageLines(name string) string {
 	entry, ok := siteCommandEntry(name)
 	if !ok {
-		panic("siteCommandUsageError: unregistered site command: " + name)
+		panic("siteCommandUsageLines: unregistered site command: " + name)
 	}
-	fmt.Fprintf(stderr, "allod: "+format+"\n", args...)
-	fmt.Fprint(stderr, "Usage:\n")
+	var text strings.Builder
+	text.WriteString("Usage:\n")
 	for _, line := range entry.usage {
-		fmt.Fprintf(stderr, "  %s\n", line)
+		fmt.Fprintf(&text, "  %s\n", line)
 	}
-	fmt.Fprintf(stderr, "\nRun 'allod site %s --help' for details.\n", name)
-	exit(1)
+	fmt.Fprintf(&text, "\nRun 'allod site %s --help' for details.\n", name)
+	return text.String()
 }
