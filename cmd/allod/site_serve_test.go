@@ -29,7 +29,6 @@ type previewStub struct {
 	// 'N' no such unit, anything else a manager that could not be asked, which are
 	// the codes measured for that command. absent is what the nix eval prints,
 	// gitCommon what the git rev-parse prints, remote the status an ssh returns.
-	// binds is the port a start begins to answer on, as the preview's app would.
 	calls     [][]string
 	active    string
 	absent    string
