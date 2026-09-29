@@ -1,24 +1,11 @@
 package main
 
-// The known-sites listing 'view' and 'serve --vm' print in place of the two
-// messages that used to leave a reader with nothing but a file path: no site
-// id given, and an id the registry does not have. Kept out of
-// site_serve.go and site_view.go, which allod/tools#249 edits at the same
-// time, so the two branches touch none of the same lines.
-
 import (
 	"fmt"
 	"slices"
 	"strings"
 )
 
-// siteIDDetail explains what a site id is, shared rather than duplicated
-// between 'serve' and 'view' — the two commands that take one — the way
-// '--config <path>' is shared by deploy, check, and config in site.go.
-// {{registryPath}} is filled in at render time (site_common.go's
-// renderSiteDetail): the path depends on $INVENTORY, which a real
-// invocation resolves fresh and a test sets per run, so a fixed path baked
-// in here would go stale.
 const siteIDDetail = `A site id is the repository's key in the registry, not its domain or a
 shortened name: the entry's own key under "repositories" in {{registryPath}}.
 `
@@ -31,9 +18,7 @@ func init() {
 	})
 }
 
-// siteListEntry is one line of the known-sites listing: a registry id that
-// carries a preview_port, with that port when it parsed, and the machines
-// vm-specs.json lists it under when the caller asked for them.
+// siteListEntry is one line of the known-sites listing.
 type siteListEntry struct {
 	id       string
 	port     int
@@ -41,15 +26,10 @@ type siteListEntry struct {
 	machines []string
 }
 
-// siteListEntries returns, sorted by id, every registry entry whose
-// preview_port field is set at all. previewPortValue's own "absent" case
-// (empty or 'null') is not a site with a preview and is left out; a value
-// that is set but does not parse is kept and marked unusable rather than
-// hidden or, as previewPort in registry.go would, made to die — the list
-// must survive one bad entry. withMachines asks vm-specs.json for the
-// machines that list each site, which costs a file read; every caller here
-// can afford it, since 'view' and 'serve --vm' already read that file on
-// the same machine for the paths this replaces.
+// siteListEntries lists every registry entry with a preview_port set. A
+// malformed one is kept and marked unusable rather than hidden or, as
+// previewPort in registry.go would, made to die: the list must survive one
+// bad entry.
 func siteListEntries(withMachines bool) []siteListEntry {
 	all := registryEntries()
 	ids := make([]string, 0, len(all))
@@ -157,12 +137,9 @@ func editDistance(a, b string) int {
 	return previous[len(rb)]
 }
 
-// siteListMissingID reports "no site id" in the shape siteCommandUsageError
-// reports any other argument mistake in the same command — the one-line
-// message, then this command's own Usage: lines, then its '--help' pointer —
-// with the known-sites list between the message and that tail, so a first
-// run with no id becomes a lookup instead of a dead end at the registry
-// file. Exit code and destination (standard error) are unchanged: 1, there.
+// siteListMissingID reports a missing site id the way siteCommandUsageError
+// reports any other argument mistake, with the known-sites list inserted
+// before the Usage: block.
 func siteListMissingID(command, message string, withMachines bool) {
 	fmt.Fprintf(stderr, "allod: %s\n", message)
 	fmt.Fprint(stderr, siteListText(siteListEntries(withMachines)))
@@ -170,10 +147,8 @@ func siteListMissingID(command, message string, withMachines bool) {
 	exit(1)
 }
 
-// siteListUnknown reports "unknown site": the file that has no such entry,
-// the one closest id when exactly one known id is close enough to name, and
-// the same known-sites list a missing id gets. Exit code and destination are
-// unchanged: 1, standard error.
+// siteListUnknown reports an unknown site id: the registry file, a closest
+// match when exactly one qualifies, and the known-sites list.
 func siteListUnknown(site string, withMachines bool) {
 	entries := siteListEntries(withMachines)
 	fmt.Fprintf(stderr, "allod: unknown site: %s has no entry in %s\n", site, registryPath())

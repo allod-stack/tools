@@ -403,9 +403,8 @@ func siteCommandHelp(name string) string {
 // invocation resolves fresh and a test sets per run.
 const siteRegistryPathPlaceholder = "{{registryPath}}"
 
-// renderSiteDetail fills in siteRegistryPathPlaceholder in already-assembled
-// help text. A block with no placeholder passes through unchanged, so this is
-// safe to run over every command's output, not only the ones that use it.
+// renderSiteDetail fills in siteRegistryPathPlaceholder; text without it
+// passes through unchanged.
 func renderSiteDetail(text string) string {
 	return strings.ReplaceAll(text, siteRegistryPathPlaceholder, registryPath())
 }
@@ -427,14 +426,8 @@ func siteCommandUsageError(name string, format string, args ...any) {
 	exit(1)
 }
 
-// siteCommandUsageLines renders one command's own Usage: block followed by
-// the pointer to its '--help', the tail siteCommandUsageError appends to
-// every refusal. site_list.go's "no site id" case shares it too, printing
-// the known-sites list between its message and this same tail rather than
-// duplicating it.
-//
-// name must be a name already registered in siteCommands, for the same
-// reason siteCommandHelp requires it.
+// siteCommandUsageLines renders a command's Usage: block and '--help'
+// pointer; name must be registered in siteCommands or this panics.
 func siteCommandUsageLines(name string) string {
 	entry, ok := siteCommandEntry(name)
 	if !ok {

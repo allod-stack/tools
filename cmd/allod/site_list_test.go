@@ -123,12 +123,6 @@ func TestSiteListEntriesIncludesMachinesWhenAsked(t *testing.T) {
 	}
 }
 
-// withMachines=false must not read vm-specs.json at all: no file exists here,
-// and a read attempt that treated its absence as anything but silent would
-// show up as an empty machines list either way, so this pins the call is
-// skipped by checking siteListEntries(false) never blocks on it — regression
-// coverage for a future caller that passes true by mistake in a cost-averse
-// path is out of scope; every caller today affords the read (site_list.go).
 func TestSiteListEntriesNoMachinesWhenNotAsked(t *testing.T) {
 	writeSiteListRegistry(t, t.TempDir(), map[string]siteListFixtureEntry{
 		"allod/blog": {checkout: "sites/blog", port: "18601"},
