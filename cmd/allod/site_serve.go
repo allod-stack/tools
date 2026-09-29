@@ -124,6 +124,9 @@ func siteServe(args []string) {
 		if missing := strings.TrimSpace(absent.String()); missing != "" {
 			die(1, "the flake at %s has no %s; docs/allod-site-preview.md in allod/tools has worked examples", root, missing)
 		}
+		if sitePreviewAnswers(port) {
+			die(1, "port %d is already in use: %s was not started", port, unit)
+		}
 		start := []string{"--user", "--collect", "--quiet", "--unit", unit, "--working-directory", root, "-E",
 			fmt.Sprintf("ALLOD_PREVIEW_PORT=%d", port), "-E", "ALLOD_PREVIEW_INTERFACE=127.0.0.1", "--", "nix", "run", root + "#preview"}
 		if sitePreviewRun("systemd-run", start, stderr) != 0 {
@@ -195,17 +198,22 @@ func sitePreviewRunning(unit string) bool {
 	}
 }
 
+func sitePreviewAnswers(port int) bool {
+	connection, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second)
+	if err != nil {
+		return false
+	}
+	connection.Close()
+	return true
+}
+
 // A connection is only good news while the unit is still up: an app that accepts
 // one connection and exits, or another program holding the port, answers just as
 // a working preview does.
 func sitePreviewWait(unit string, port int) {
 	address := fmt.Sprintf("127.0.0.1:%d", port)
 	for deadline := time.Now().Add(sitePreviewTimeout); ; time.Sleep(sitePreviewPoll) {
-		accepted := false
-		if connection, err := net.DialTimeout("tcp", address, time.Second); err == nil {
-			connection.Close()
-			accepted = true
-		}
+		accepted := sitePreviewAnswers(port)
 		if !sitePreviewRunning(unit) {
 			sitePreviewRun("journalctl", []string{"--user", "-u", unit, "-n", "20", "--no-pager"}, stderr)
 			die(1, "%s is no longer running; its last log lines are above", unit)
@@ -239,8 +247,9 @@ its own, which is how the owner stops a preview from the hypervisor.
 
 Exit 0 prints the address, whether this run started the server or found one up.
 Exit 3 means the unit is up with the port still silent, as a first build looks.
-Exit 1 is everything else: a refusal, a command that failed, or a unit that has
-stopped, in which case its last log lines are on standard error.
+Exit 1 is everything else: a refusal, a port something else already answers on,
+a command that failed, or a unit that has stopped, in which case its last log
+lines are on standard error.
 `
 
 // siteCommands in site_common.go says why the entry is added from an init().

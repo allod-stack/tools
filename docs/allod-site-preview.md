@@ -7,7 +7,7 @@ An agent working in a dev VM can serve the site it is editing, and the owner can
 A previewable site's flake has an app named `preview` for the machine's system, `apps.<system>.preview`. The app:
 
 - listens on the TCP port in `ALLOD_PREVIEW_PORT`, at the address in `ALLOD_PREVIEW_INTERFACE`, which is always the literal `127.0.0.1` — on these machines `localhost` resolves to `::1` alone, and a server bound there cannot be reached;
-- fails when that port is taken, and never moves to another one. `allod` only ever waits on the port it handed over, so a server that quietly picked a different one is reported as still starting while the site is in fact being served where no forward reaches it — or, if something else holds the assigned port, as serving;
+- fails when that port is taken, and never moves to another one. `allod` only ever waits on the port it handed over, so a server that quietly picked a different one is reported as still starting while the site is in fact being served where no forward reaches it;
 - serves everything the browser needs on that one port, reload channel included;
 - runs in the foreground and exits when sent `SIGTERM`;
 - reloads the browser when files change, by whatever means the tool has.
@@ -88,6 +88,8 @@ journalctl --user -u allod-preview-<slug>
 Add `-f` to follow it. `--stop` stops the unit and every process it started; a preview that is not running is reported as such and is not an error.
 
 A start exits 0 and prints `http://127.0.0.1:<port>` once the port accepts a connection and the unit is still running, whether this run started the server or found one already up. It exits 3 when 60 seconds pass with the unit up and the port still silent, which is what a first build inside the unit looks like; that message names the `journalctl` line to watch. Exit 1 is everything else — a refusal, a command that failed, systemd that could not be asked, or a unit that has stopped, in which case the last 20 lines of its log are on standard error. `allod site serve --help` says the same in brief.
+
+Before it starts a unit, `serve` connects to the port once. If anything answers, the port is taken: it exits 1 naming the port and starts nothing, so another program's server is not printed as the site's. A preview that is already running is not checked this way. The check cannot see a port taken in the seconds between it and the app's bind; the app then fails as its contract requires, and the journal says so.
 
 ## From the hypervisor
 

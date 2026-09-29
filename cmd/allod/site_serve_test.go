@@ -29,11 +29,21 @@ type previewStub struct {
 	// 'N' no such unit, anything else a manager that could not be asked, which are
 	// the codes measured for that command. absent is what the nix eval prints,
 	// gitCommon what the git rev-parse prints, remote the status an ssh returns.
+	// binds is the port a start begins to answer on, as the preview's app would.
 	calls     [][]string
 	active    string
 	absent    string
 	gitCommon string
 	remote    int
+	binds     int
+	bound     net.Listener
+}
+
+func (stub *previewStub) release() {
+	if stub.bound != nil {
+		stub.bound.Close()
+		stub.bound = nil
+	}
 }
 
 func usePreviewStub(t *testing.T, stub *previewStub) {
@@ -41,9 +51,17 @@ func usePreviewStub(t *testing.T, stub *previewStub) {
 	run, timeout := sitePreviewRun, sitePreviewTimeout
 	t.Cleanup(func() { sitePreviewRun, sitePreviewTimeout = run, timeout })
 	sitePreviewTimeout = 0
+	t.Cleanup(stub.release)
 	sitePreviewRun = func(name string, args []string, out io.Writer) int {
 		stub.calls = append(stub.calls, append([]string{name}, args...))
 		switch {
+		case name == "systemd-run" && stub.binds != 0:
+			listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", stub.binds))
+			if err != nil {
+				t.Errorf("the start could not bind %d: %v", stub.binds, err)
+				return 1
+			}
+			stub.bound = listener
 		case name == "nix":
 			fmt.Fprint(out, stub.absent)
 		case name == "journalctl":
@@ -148,9 +166,9 @@ func previewListener(t *testing.T, serving bool) int {
 // The same site named by id and found from the current directory must reach one
 // start, and so one unit name.
 func TestSiteServeStart(t *testing.T) {
-	byID := &previewStub{active: "NA"}
+	port := previewListener(t, false)
+	byID := &previewStub{active: "NA", binds: port}
 	usePreviewStub(t, byID)
-	port := previewListener(t, true)
 	root := usePreviewRegistry(t, previewCheckout, fmt.Sprint(port))
 
 	out, errText, code := runAllod(t, "site", "serve", previewSiteID)
@@ -167,7 +185,8 @@ func TestSiteServeStart(t *testing.T) {
 		"--working-directory", root, "-E", fmt.Sprintf("ALLOD_PREVIEW_PORT=%d", port),
 		"-E", "ALLOD_PREVIEW_INTERFACE=127.0.0.1", "--", "nix", "run", root+"#preview")
 
-	fromDirectory := &previewStub{active: "NA"}
+	byID.release()
+	fromDirectory := &previewStub{active: "NA", binds: port}
 	usePreviewStub(t, fromDirectory)
 	t.Chdir(root)
 	if _, errText, code := runAllod(t, "site", "serve"); code != 0 {
@@ -217,9 +236,9 @@ func TestSiteServeVM(t *testing.T) {
 // the port and the unit name, while the working directory and the flake stay the
 // worktree's.
 func TestSiteServeWorktree(t *testing.T) {
-	stub := &previewStub{active: "NA"}
+	port := previewListener(t, false)
+	stub := &previewStub{active: "NA", binds: port}
 	usePreviewStub(t, stub)
-	port := previewListener(t, true)
 	repository := usePreviewRegistry(t, previewCheckout, fmt.Sprint(port))
 	worktree := filepath.Join(filepath.Dir(filepath.Dir(repository)), "changes", "example-branch")
 	previewWrite(t, filepath.Join(worktree, siteConfigName), "domain = \"example.invalid\"\n")
@@ -263,9 +282,14 @@ func TestSiteServeOutcomes(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			// A row that starts the unit gets its listener from the start, since
+			// one that is already there is a port in use.
+			port := previewListener(t, test.serving && !test.starts)
 			stub := &previewStub{active: test.active}
+			if test.serving && test.starts {
+				stub.binds = port
+			}
 			usePreviewStub(t, stub)
-			port := previewListener(t, test.serving)
 			usePreviewRegistry(t, previewCheckout, fmt.Sprint(port))
 
 			out, errText, code := runAllod(t, "site", "serve", previewSiteID)
@@ -295,6 +319,38 @@ func TestSiteServeOutcomes(t *testing.T) {
 				stub.pinCommand(t, "journalctl", "--user", "-u", previewUnit, "-n", "20", "--no-pager")
 			} else if shown := len(stub.matching("journalctl")); shown != 0 {
 				t.Errorf("journalctl ran %d times, want 0: there is no failure to show", shown)
+			}
+		})
+	}
+}
+
+// The false green to avoid is the other program's address printed as the site's.
+func TestSiteServeRefusesAPortInUse(t *testing.T) {
+	for _, from := range []string{"the registry", "--port"} {
+		t.Run(from, func(t *testing.T) {
+			stub := &previewStub{active: "N"}
+			usePreviewStub(t, stub)
+			port := previewListener(t, true)
+			args := []string{"site", "serve", previewSiteID}
+			if from == "--port" {
+				usePreviewRegistry(t, previewCheckout, "")
+				args = []string{"site", "serve", "--port", fmt.Sprint(port), previewSiteID}
+			} else {
+				usePreviewRegistry(t, previewCheckout, fmt.Sprint(port))
+			}
+
+			out, errText, code := runAllod(t, args...)
+			if code != 1 {
+				t.Errorf("exit code = %d, want 1; stderr: %q", code, errText)
+			}
+			if out != "" {
+				t.Errorf("stdout = %q, want empty", out)
+			}
+			if want := fmt.Sprintf("port %d is already in use: %s was not started", port, previewUnit); !strings.Contains(errText, want) {
+				t.Errorf("stderr does not contain %q\ngot: %q", want, errText)
+			}
+			if started := len(stub.matching("systemd-run")); started != 0 {
+				t.Errorf("systemd-run ran %d times, want 0", started)
 			}
 		})
 	}
@@ -331,9 +387,9 @@ func TestSiteServeBadRegistryPortIsReadOnlyWhenUsed(t *testing.T) {
 	})
 
 	t.Run("--port overrides it", func(t *testing.T) {
-		stub := &previewStub{active: "NA"}
+		port := previewListener(t, false)
+		stub := &previewStub{active: "NA", binds: port}
 		usePreviewStub(t, stub)
-		port := previewListener(t, true)
 		usePreviewRegistry(t, previewCheckout, `"18650"`)
 
 		out, errText, code := runAllod(t, "site", "serve", "--port", fmt.Sprint(port), previewSiteID)
