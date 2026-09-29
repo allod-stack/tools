@@ -73,30 +73,34 @@ func siteListEntries(withMachines bool) []siteListEntry {
 	return entries
 }
 
-// line renders one entry as siteListText prints it.
-func (entry siteListEntry) line() string {
+// line renders one entry padded so idWidth columns line up across entries.
+func (entry siteListEntry) line(idWidth int) string {
 	port := "preview_port is not usable"
 	if entry.portOK {
 		port = fmt.Sprint(entry.port)
 	}
-	text := "  " + entry.id + "  " + port
+	text := fmt.Sprintf("  %-*s  %s", idWidth, entry.id, port)
 	if len(entry.machines) > 0 {
 		text += "  (" + strings.Join(entry.machines, " ") + ")"
 	}
 	return text
 }
 
-// siteListText renders entries for standard error: one line each, or, when
-// there are none, the one-line statement that names the registry file so the
-// reader knows where a previewable entry would go.
+// siteListText prints one line per entry, id and port columns aligned, or,
+// with none, a one-line statement naming the registry file instead of an
+// empty list.
 func siteListText(entries []siteListEntry) string {
 	if len(entries) == 0 {
 		return fmt.Sprintf("no entry in %s carries a preview_port\n", registryPath())
 	}
+	width := 0
+	for _, entry := range entries {
+		width = max(width, len(entry.id))
+	}
 	var text strings.Builder
 	text.WriteString("Known sites:\n")
 	for _, entry := range entries {
-		text.WriteString(entry.line())
+		text.WriteString(entry.line(width))
 		text.WriteString("\n")
 	}
 	return text.String()
