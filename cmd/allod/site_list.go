@@ -18,7 +18,6 @@ func init() {
 	})
 }
 
-// siteListEntry is one line of the known-sites listing.
 type siteListEntry struct {
 	id       string
 	port     int
@@ -26,10 +25,7 @@ type siteListEntry struct {
 	machines []string
 }
 
-// siteListEntries lists every registry entry with a preview_port set. A
-// malformed one is kept and marked unusable rather than hidden or, as
-// previewPort in registry.go would, made to die: the list must survive one
-// bad entry.
+// Not previewPort: it dies on a malformed preview_port, and the list must not.
 func siteListEntries(withMachines bool) []siteListEntry {
 	all := registryEntries()
 	ids := make([]string, 0, len(all))
@@ -53,7 +49,6 @@ func siteListEntries(withMachines bool) []siteListEntry {
 	return entries
 }
 
-// line renders one entry padded so idWidth columns line up across entries.
 func (entry siteListEntry) line(idWidth int) string {
 	port := "preview_port is not usable"
 	if entry.portOK {
@@ -66,9 +61,6 @@ func (entry siteListEntry) line(idWidth int) string {
 	return text
 }
 
-// siteListText prints one line per entry, id and port columns aligned, or,
-// with none, a one-line statement naming the registry file instead of an
-// empty list.
 func siteListText(entries []siteListEntry) string {
 	if len(entries) == 0 {
 		return fmt.Sprintf("no entry in %s carries a preview_port\n", registryPath())
@@ -86,16 +78,11 @@ func siteListText(entries []siteListEntry) string {
 	return text.String()
 }
 
-// siteListEditDistance is how many single-character edits an id may be from
-// the given text and still count as close enough to guess: enough to catch a
-// typo, small enough that two genuinely different ids rarely both qualify.
 const siteListEditDistance = 2
 
-// siteListClosest names the one entry that plausibly is what was meant, in
-// two tiers rather than one pool: if exactly one entry's id contains given,
-// name it, and two or more containing it name none regardless of distance.
-// Only when none contain it does an id within siteListEditDistance edits of
-// given qualify, again naming one only when exactly one does.
+// An id containing given outranks edit distance, which decides only when no id
+// contains it: ids in one registry share an owner prefix and sit within a few
+// edits of each other. Two or more candidates in the deciding tier name none.
 func siteListClosest(entries []siteListEntry, given string) (id string, ok bool) {
 	found, count := "", 0
 	for _, entry := range entries {
@@ -114,8 +101,7 @@ func siteListClosest(entries []siteListEntry, given string) (id string, ok bool)
 	return found, count == 1
 }
 
-// editDistance is the Levenshtein distance between a and b: single-character
-// insertions, deletions, and substitutions, each costing 1.
+// Levenshtein.
 func editDistance(a, b string) int {
 	ra, rb := []rune(a), []rune(b)
 	previous := make([]int, len(rb)+1)
@@ -137,9 +123,6 @@ func editDistance(a, b string) int {
 	return previous[len(rb)]
 }
 
-// siteListMissingID reports a missing site id the way siteCommandUsageError
-// reports any other argument mistake, with the known-sites list inserted
-// before the Usage: block.
 func siteListMissingID(command, message string, withMachines bool) {
 	fmt.Fprintf(stderr, "allod: %s\n", message)
 	fmt.Fprint(stderr, siteListText(siteListEntries(withMachines)))
@@ -147,8 +130,6 @@ func siteListMissingID(command, message string, withMachines bool) {
 	exit(1)
 }
 
-// siteListUnknown reports an unknown site id: the registry file, a closest
-// match when exactly one qualifies, and the known-sites list.
 func siteListUnknown(site string, withMachines bool) {
 	entries := siteListEntries(withMachines)
 	fmt.Fprintf(stderr, "allod: unknown site: %s has no entry in %s\n", site, registryPath())

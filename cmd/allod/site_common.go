@@ -397,14 +397,9 @@ func siteCommandHelp(name string) string {
 	return renderSiteDetail(text.String())
 }
 
-// siteRegistryPathPlaceholder marks the one spot a detail block names the
-// registry file. It is substituted at render time rather than baked into the
-// constant, because registryPath() depends on $INVENTORY, which a real
-// invocation resolves fresh and a test sets per run.
+// Filled in when help is rendered: registryPath() depends on $INVENTORY.
 const siteRegistryPathPlaceholder = "{{registryPath}}"
 
-// renderSiteDetail fills in siteRegistryPathPlaceholder; text without it
-// passes through unchanged.
 func renderSiteDetail(text string) string {
 	return strings.ReplaceAll(text, siteRegistryPathPlaceholder, registryPath())
 }
@@ -426,8 +421,7 @@ func siteCommandUsageError(name string, format string, args ...any) {
 	exit(1)
 }
 
-// siteCommandUsageLines renders a command's Usage: block and '--help'
-// pointer; name must be registered in siteCommands or this panics.
+// name must be registered in siteCommands.
 func siteCommandUsageLines(name string) string {
 	entry, ok := siteCommandEntry(name)
 	if !ok {

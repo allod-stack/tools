@@ -1,10 +1,5 @@
 package main
 
-// site_list.go has no exec seam of its own: every path here exits before
-// 'view' or 'serve' would run ssh, nix, or systemctl, so these tests need no
-// stub and no t.Chdir — only a registry fixture and, where a test asks for
-// machines, a vm-specs.json beside it.
-
 import (
 	"fmt"
 	"os"
@@ -13,17 +8,11 @@ import (
 	"testing"
 )
 
-// siteListFixtureEntry is one registry entry for the tests below: checkout is
-// unused by any assertion here but required by the registry's shape, and
-// port is the raw JSON text of preview_port, or "" to omit the field
-// entirely — the case a site with no preview is written as.
+// port is the raw JSON text of preview_port; "" omits the field.
 type siteListFixtureEntry struct {
 	checkout, port string
 }
 
-// writeSiteListRegistry writes <dir>/scripts/repositories.json and points
-// INVENTORY at dir, so registryPath() and siteListEntries read exactly this
-// fixture.
 func writeSiteListRegistry(t *testing.T, dir string, entries map[string]siteListFixtureEntry) {
 	t.Helper()
 	scripts := filepath.Join(dir, "scripts")
@@ -51,8 +40,6 @@ func writeSiteListRegistry(t *testing.T, dir string, entries map[string]siteList
 	t.Setenv("INVENTORY", dir)
 }
 
-// The fixture the "no id" and "unknown id" Validation bullets ask for: three
-// sites, two with a port.
 func threeSiteFixture(t *testing.T) {
 	t.Helper()
 	writeSiteListRegistry(t, t.TempDir(), map[string]siteListFixtureEntry{
@@ -61,8 +48,6 @@ func threeSiteFixture(t *testing.T) {
 		"allod/wiki": {checkout: "sites/wiki"}, // no preview_port: never listed
 	})
 }
-
-// --- siteListEntries ---
 
 func TestSiteListEntriesSortedWithPreviewPortOnly(t *testing.T) {
 	threeSiteFixture(t)
@@ -78,8 +63,6 @@ func TestSiteListEntriesSortedWithPreviewPortOnly(t *testing.T) {
 	}
 }
 
-// A malformed preview_port neither hides the entry nor dies (previewPort in
-// registry.go would); it is shown, marked unusable, beside a good one.
 func TestSiteListEntriesMalformedPortIsShownNotHidden(t *testing.T) {
 	writeSiteListRegistry(t, t.TempDir(), map[string]siteListFixtureEntry{
 		"allod/blog": {checkout: "sites/blog", port: "18601"},
@@ -133,8 +116,6 @@ func TestSiteListEntriesNoMachinesWhenNotAsked(t *testing.T) {
 	}
 }
 
-// --- siteListText ---
-
 func TestSiteListTextEmptyRegistryNamesTheFile(t *testing.T) {
 	writeSiteListRegistry(t, t.TempDir(), map[string]siteListFixtureEntry{
 		"allod/wiki": {checkout: "sites/wiki"},
@@ -163,8 +144,6 @@ func TestSiteListTextOneLinePerEntrySorted(t *testing.T) {
 	}
 }
 
-// --- editDistance and siteListClosest ---
-
 func TestEditDistance(t *testing.T) {
 	tests := []struct {
 		a, b string
@@ -189,8 +168,7 @@ func TestEditDistance(t *testing.T) {
 	}
 }
 
-// Pins tier two's threshold, on strings sharing no character so tier one
-// never fires: one edit inside it qualifies, one edit past it does not.
+// Strings sharing no character, so containment never decides.
 func TestSiteListClosestEditDistanceBoundary(t *testing.T) {
 	within := []siteListEntry{{id: "ab"}}
 	if got, ok := siteListClosest(within, "xy"); !ok || got != "ab" {
@@ -204,9 +182,6 @@ func TestSiteListClosestEditDistanceBoundary(t *testing.T) {
 	}
 }
 
-// Tier one: containment alone decides, even when a non-containing entry
-// ("allod/xl", one substitution from "allod/bl") would also qualify on edit
-// distance.
 func TestSiteListClosestContainmentOutranksDistance(t *testing.T) {
 	entries := []siteListEntry{{id: "allod/blog"}, {id: "allod/docs"}, {id: "allod/xl"}}
 	if got, ok := siteListClosest(entries, "allod/bl"); !ok || got != "allod/blog" {
@@ -214,8 +189,6 @@ func TestSiteListClosestContainmentOutranksDistance(t *testing.T) {
 	}
 }
 
-// Tier one, two or more ids containing the given text: name neither,
-// regardless of what tier two's distances would say.
 func TestSiteListClosestContainmentAmbiguousNamesNone(t *testing.T) {
 	entries := []siteListEntry{{id: "allod/blog"}, {id: "allod/docs"}}
 	if got, ok := siteListClosest(entries, "allod/"); ok {
@@ -223,8 +196,6 @@ func TestSiteListClosestContainmentAmbiguousNamesNone(t *testing.T) {
 	}
 }
 
-// Tier two, two ids equally within distance and neither containing: name
-// neither.
 func TestSiteListClosestDistanceAmbiguousNamesNone(t *testing.T) {
 	entries := []siteListEntry{{id: "ab"}, {id: "ac"}}
 	if got, ok := siteListClosest(entries, "zz"); ok {
@@ -232,9 +203,6 @@ func TestSiteListClosestDistanceAmbiguousNamesNone(t *testing.T) {
 	}
 }
 
-// --- The CLI paths themselves ---
-
-// No id, either command, lists the known sites beside the usual usage error.
 func TestSiteListNoIDListsKnownSites(t *testing.T) {
 	tests := []struct {
 		name string
@@ -266,8 +234,6 @@ func TestSiteListNoIDListsKnownSites(t *testing.T) {
 	}
 }
 
-// An unknown id, in 'view' and in 'serve <site>' with no --vm, lists the same
-// known sites.
 func TestSiteListUnknownIDListsKnownSites(t *testing.T) {
 	tests := []struct {
 		name string
@@ -293,7 +259,6 @@ func TestSiteListUnknownIDListsKnownSites(t *testing.T) {
 	}
 }
 
-// An id that is a prefix of exactly one known id names that one.
 func TestSiteListUnknownIDNamesTheOneCloseMatch(t *testing.T) {
 	threeSiteFixture(t)
 	_, errText, code := runAllod(t, "site", "view", "allod/bl")
@@ -305,7 +270,6 @@ func TestSiteListUnknownIDNamesTheOneCloseMatch(t *testing.T) {
 	}
 }
 
-// An id that matches two known ids names neither.
 func TestSiteListUnknownIDAmbiguousNamesNone(t *testing.T) {
 	threeSiteFixture(t)
 	_, errText, code := runAllod(t, "site", "view", "allod/")
@@ -320,9 +284,7 @@ func TestSiteListUnknownIDAmbiguousNamesNone(t *testing.T) {
 	}
 }
 
-// Ids sharing a long owner prefix is the normal case, not a corner: a given
-// text that is a prefix of exactly one id must still name it even though a
-// third id's malformed entry sits within edit distance of that same text.
+// example/bad is within two edits of both prefixes.
 func TestSiteListClosestSharedOwnerPrefix(t *testing.T) {
 	writeSiteListRegistry(t, t.TempDir(), map[string]siteListFixtureEntry{
 		"example/blog": {checkout: "sites/blog", port: "18601"},
@@ -360,8 +322,6 @@ func TestSiteListClosestSharedOwnerPrefix(t *testing.T) {
 	})
 }
 
-// A registry with no previewable site prints the one-line statement and
-// exits 1, on every path that would otherwise print the list.
 func TestSiteListEmptyRegistryStatesFileAndExitsOne(t *testing.T) {
 	tests := []struct {
 		name string
@@ -393,8 +353,6 @@ func TestSiteListEmptyRegistryStatesFileAndExitsOne(t *testing.T) {
 	}
 }
 
-// A malformed preview_port elsewhere in the registry must not stop the list
-// from being printed, or the command from exiting normally.
 func TestSiteListSurvivesAMalformedPreviewPortElsewhere(t *testing.T) {
 	writeSiteListRegistry(t, t.TempDir(), map[string]siteListFixtureEntry{
 		"allod/blog": {checkout: "sites/blog", port: "18601"},
@@ -411,8 +369,6 @@ func TestSiteListSurvivesAMalformedPreviewPortElsewhere(t *testing.T) {
 	}
 }
 
-// The help names what a site id is and where the registry lives, once, on
-// both commands that take one.
 func TestSiteListHelpExplainsTheID(t *testing.T) {
 	dir := t.TempDir()
 	writeSiteListRegistry(t, dir, map[string]siteListFixtureEntry{})
