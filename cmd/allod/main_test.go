@@ -131,8 +131,9 @@ func TestUsageListsEveryRegisteredNamespace(t *testing.T) {
 			t.Errorf("usage does not list the %s namespace\ngot: %q", entry.name, out)
 		}
 	}
-	// One line of usage per namespace, plus the usage line, the blank line,
-	// the 'Namespaces:' heading, and the trailing blank line and PATH note.
+	if want := "\nA namespace not listed runs allod-<namespace> from PATH.\n"; !strings.HasSuffix(out, want) {
+		t.Errorf("usage does not end with %q\ngot: %q", want, out)
+	}
 	if got, want := strings.Count(out, "\n"), len(namespaces)+5; got != want {
 		t.Errorf("usage has %d lines, want %d\ngot: %q", got, want, out)
 	}
@@ -162,7 +163,7 @@ func TestHelpFlagPrintsUsage(t *testing.T) {
 }
 
 func TestUnknownNamespace(t *testing.T) {
-	stubTools(t) // PATH has nothing named allod-frobnicate.
+	stubTools(t)
 	_, errText, code := runAllod(t, "frobnicate")
 	if code != 1 {
 		t.Errorf("exit code = %d, want 1", code)
@@ -172,8 +173,17 @@ func TestUnknownNamespace(t *testing.T) {
 	}
 }
 
-// TestUnlistedNamespaceRunsExternalCommand covers the git-style fallback: a
-// word missing from the dispatch table runs allod-<word> from PATH instead.
+func TestEmptyNamespaceWordIsUnknown(t *testing.T) {
+	stubTools(t, "allod-")
+	_, errText, code := runAllod(t, "")
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	if want := "unknown command namespace: "; !strings.Contains(errText, want) {
+		t.Errorf("stderr does not contain %q\ngot: %q", want, errText)
+	}
+}
+
 func TestUnlistedNamespaceRunsExternalCommand(t *testing.T) {
 	binDir := t.TempDir()
 	path := filepath.Join(binDir, "allod-frobnicate")
@@ -181,9 +191,10 @@ func TestUnlistedNamespaceRunsExternalCommand(t *testing.T) {
 		t.Fatalf("could not write stub: %v", err)
 	}
 	t.Setenv("PATH", binDir)
+	var gotPath string
 	var argv []string
 	previous := externalNamespaceExec
-	externalNamespaceExec = func(got []string) { argv = got }
+	externalNamespaceExec = func(p string, got []string) { gotPath, argv = p, got }
 	t.Cleanup(func() { externalNamespaceExec = previous })
 
 	_, errText, code := runAllod(t, "frobnicate", "--wax", "on")
@@ -193,19 +204,20 @@ func TestUnlistedNamespaceRunsExternalCommand(t *testing.T) {
 	if errText != "" {
 		t.Errorf("stderr = %q, want empty", errText)
 	}
-	if want := []string{path, "--wax", "on"}; !equalArgs(argv, want) {
+	if gotPath != path {
+		t.Errorf("path = %q, want %q", gotPath, path)
+	}
+	if want := []string{"allod-frobnicate", "--wax", "on"}; !equalArgs(argv, want) {
 		t.Errorf("argv = %v, want %v", argv, want)
 	}
 }
 
-// TestRegisteredNamespaceWinsOverPATH covers the other half of the same
-// contract: a compiled-in namespace dispatches even when a same-named file
-// sits on PATH, so a stray allod-change cannot capture allod change.
+// Compiled-in namespaces take precedence over same-named PATH executables.
 func TestRegisteredNamespaceWinsOverPATH(t *testing.T) {
 	stubTools(t, "allod-change")
-	var argv []string
+	var called bool
 	previous := externalNamespaceExec
-	externalNamespaceExec = func(got []string) { argv = got }
+	externalNamespaceExec = func(string, []string) { called = true }
 	t.Cleanup(func() { externalNamespaceExec = previous })
 
 	_, errText, code := runAllod(t, "change")
@@ -215,8 +227,8 @@ func TestRegisteredNamespaceWinsOverPATH(t *testing.T) {
 	if !strings.Contains(errText, changeUsageText) {
 		t.Errorf("stderr does not contain the change usage text\ngot: %q", errText)
 	}
-	if len(argv) != 0 {
-		t.Errorf("change dispatched to PATH instead of the compiled-in namespace: %v", argv)
+	if called {
+		t.Error("change dispatched to PATH instead of the compiled-in namespace")
 	}
 }
 

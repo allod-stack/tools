@@ -18,11 +18,10 @@ var (
 	stderr io.Writer = os.Stderr
 )
 
-// externalNamespaceExec runs an allod-<namespace> executable found on PATH,
-// replacing the process so its stdio, signals, and exit status are its own
-// (the seam sitePreviewExec in site_view.go uses, so a test can swap it).
-var externalNamespaceExec = func(argv []string) {
-	if err := syscall.Exec(argv[0], argv, os.Environ()); err != nil {
+// externalNamespaceExec replaces the process with path, so its stdio,
+// signals, and exit status become the external command's own.
+var externalNamespaceExec = func(path string, argv []string) {
+	if err := syscall.Exec(path, argv, os.Environ()); err != nil {
 		die(1, "could not run %s: %s", argv[0], err)
 	}
 }
@@ -106,10 +105,10 @@ func run(args []string) (code int) {
 		return 0
 	}
 
-	// "-h"/"--help" must not become a PATH lookup for "allod---help".
-	if !strings.HasPrefix(args[0], "-") {
+	// "-h"/"--help" and "" must not become a PATH lookup for "allod---help"/"allod-".
+	if args[0] != "" && !strings.HasPrefix(args[0], "-") {
 		if path, err := exec.LookPath("allod-" + args[0]); err == nil {
-			externalNamespaceExec(append([]string{path}, args[1:]...))
+			externalNamespaceExec(path, append([]string{"allod-" + args[0]}, args[1:]...))
 			return 0
 		}
 	}
