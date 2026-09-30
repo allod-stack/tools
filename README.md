@@ -97,6 +97,14 @@ and is present everywhere. The host opts in with
 required, and the flake check runs all four: each tag's tests assert the
 namespace present, and each untagged run asserts it absent.
 
+A namespace absent from the dispatch table entirely, not just one gated by a
+build tag, is still not a dead end: `allod <word>` runs `allod-<word>` from
+PATH with the remaining arguments, git-style, so a deployment can add its
+own commands under the public name without a build tag or a change to this
+binary. A compiled-in namespace always wins over a file on PATH, and if
+neither has the word the answer stays the existing "unknown command
+namespace" failure.
+
 ## Documentation
 
 - [Workspace tools](workspace/README.md) — `pull-all`, `work-diff`

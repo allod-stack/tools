@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"strings"
+	"syscall"
 )
 
 var (
@@ -15,6 +17,15 @@ var (
 	stdout io.Writer = os.Stdout
 	stderr io.Writer = os.Stderr
 )
+
+// externalNamespaceExec runs an allod-<namespace> executable found on PATH,
+// replacing the process so its stdio, signals, and exit status are its own
+// (the seam sitePreviewExec in site_view.go uses, so a test can swap it).
+var externalNamespaceExec = func(argv []string) {
+	if err := syscall.Exec(argv[0], argv, os.Environ()); err != nil {
+		die(1, "could not run %s: %s", argv[0], err)
+	}
+}
 
 type cliExit struct{ code int }
 
@@ -95,6 +106,14 @@ func run(args []string) (code int) {
 		return 0
 	}
 
+	// "-h"/"--help" must not become a PATH lookup for "allod---help".
+	if !strings.HasPrefix(args[0], "-") {
+		if path, err := exec.LookPath("allod-" + args[0]); err == nil {
+			externalNamespaceExec(append([]string{path}, args[1:]...))
+			return 0
+		}
+	}
+
 	switch args[0] {
 	case "-h", "--help":
 		fmt.Fprint(stdout, usageText())
@@ -112,6 +131,7 @@ func usageText() string {
 	for _, entry := range namespaces {
 		fmt.Fprintf(&text, "  %-8s %s\n", entry.name, entry.summary)
 	}
+	text.WriteString("\nA namespace not listed runs allod-<namespace> from PATH.\n")
 	return text.String()
 }
 
