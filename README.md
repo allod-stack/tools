@@ -10,7 +10,7 @@ host install them through their Nix composition, with no manual installation aft
 ## Layout
 
 ```
-cmd/allod/                Go main CLI (change, check, patch, pr, trace, site serve and view; deploy/check/config and secret opt-in)
+cmd/allod/                Go main CLI (change, check, patch, pr, skills, trace, site serve and view; deploy/check/config and secret opt-in)
 cmd/flake-update-cascade/ flake input update cascade Go command
 cmd/forge/                Forgejo CLI Go command
 internal/flakelock/       flake.lock graph walking for the cascade
@@ -110,6 +110,7 @@ namespace present, and each untagged run asserts it absent.
 - [Git hooks](git-hooks/README.md) — `protected-refs-policy`, `setup-tracked-hooks`
 - [allod check](docs/allod-check.md) — run a repository's machines and checks, one `nix` process at a time, in place of `nix flake check`
 - [allod trace](docs/allod-trace.md) — distill local Claude, Codex, and Pi session logs into redacted markdown traces
+- `allod skills list` — list the agent skills a skills directory exposes, one line of frontmatter description each; defaults to `allod/memory`
 
 ## Shared Library
 

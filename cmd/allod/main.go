@@ -50,6 +50,7 @@ var namespaces = []namespace{
 	{"change", "Manage code changes (begin, list, record, submit, cleanup)", changeMain},
 	{"patch", "Transfer patches between environments (fetch, apply, receive)", patchMain},
 	{"pr", "Work with pull requests (explain)", delegatePR},
+	{"skills", "List available agent skills (list)", skillsMain},
 }
 
 // registerNamespace adds one namespace to the dispatch table. It panics on a
