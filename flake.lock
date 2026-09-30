@@ -3,11 +3,11 @@
     "allod-secrets": {
       "flake": false,
       "locked": {
-        "lastModified": 1790703742,
-        "narHash": "sha256-G4ZZ3oZ9Cg5mcChsiy0J2bIOG0tfjr27JRw90q5Q698=",
+        "lastModified": 1790738090,
+        "narHash": "sha256-JC8Av4412zsm4eqEo1mSJX3/KkCuMjMwyGjFaVOicOY=",
         "ref": "refs/heads/master",
-        "rev": "e0ed37f39cce7a83b65dc49050ea586c99ad2709",
-        "revCount": 68,
+        "rev": "f649e120c9c660ac725152b5613412a8d5b3eb4f",
+        "revCount": 75,
         "type": "git",
         "url": "https://forge.anarch.diy/allod/secrets.git"
       },
