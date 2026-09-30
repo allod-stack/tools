@@ -456,8 +456,7 @@ func changeRecord(args []string) {
 		}
 	}
 
-	// New files are invisible to 'git add -u': recording without naming them
-	// would push a commit that silently leaves them out of the change.
+	// New files are invisible to 'git add -u': recording without naming them pushes a commit that silently leaves them out.
 	if remaining := untrackedNotNamed(repo, files); len(remaining) > 0 {
 		die(1, "refusing to record with untracked files the commit would not include: %s; name them with --files, ignore them in .gitignore, or delete them", strings.Join(remaining, ", "))
 	}
@@ -508,12 +507,8 @@ func changeRecord(args []string) {
 	fmt.Fprintf(stdout, "Branch: %s\nCommit: %s\n", branch, commit)
 }
 
-// untrackedNotNamed lists untracked, non-ignored files in repo that the named
-// files do not cover: not the files themselves, and not files under a named
-// directory. Paths are cleaned before comparison so './x' matches 'x', and
-// absolute named paths are made repo-relative, since 'git add' accepts both
-// spellings and refusing on a file the named path covers would be a false
-// positive.
+// Paths are normalized before comparison ('./x', absolute) so the refusal
+// never fires on a file the named path covers.
 func untrackedNotNamed(repo string, named []string) []string {
 	output, ok := gitOutput(repo, "ls-files", "--others", "--exclude-standard")
 	if !ok || output == "" {
