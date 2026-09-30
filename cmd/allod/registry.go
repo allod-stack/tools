@@ -13,6 +13,7 @@ import (
 // there would fail the whole file for every lookup, site or not.
 type registryEntry struct {
 	Checkout    string          `json:"checkout"`
+	Memory      bool            `json:"memory"`
 	PreviewPort json.RawMessage `json:"preview_port"`
 }
 
@@ -80,6 +81,22 @@ func registryCheckout(id string) (checkout string, ok bool) {
 		return "", false
 	}
 	return entry.Checkout, true
+}
+
+// memoryRegistryIds returns the registry ids whose entry carries
+// "memory": true, sorted. Sorted order makes the default skill sweep
+// deterministic and puts allod/memory's public skills ahead of any
+// deployment's fork, whatever the fork is named.
+func memoryRegistryIds() []string {
+	entries := registryEntries()
+	ids := make([]string, 0, len(entries))
+	for id, entry := range entries {
+		if entry.Memory {
+			ids = append(ids, id)
+		}
+	}
+	slices.Sort(ids)
+	return ids
 }
 
 // registryPath returns the file registryCheckout reads: $INVENTORY's

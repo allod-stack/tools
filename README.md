@@ -110,7 +110,7 @@ namespace present, and each untagged run asserts it absent.
 - [Git hooks](git-hooks/README.md) — `protected-refs-policy`, `setup-tracked-hooks`
 - [allod check](docs/allod-check.md) — run a repository's machines and checks, one `nix` process at a time, in place of `nix flake check`
 - [allod trace](docs/allod-trace.md) — distill local Claude, Codex, and Pi session logs into redacted markdown traces
-- `allod skill` — list the agent skills a skills directory exposes (name plus a brief description); `allod skill <name>` prints one in full. Defaults to `allod/memory`.
+- `allod skill` — list the agent skills a skills directory exposes (name plus a brief description); `allod skill <name>` prints one in full. Without `--from`, sources are every registry entry marked `"memory": true`, in sorted registry-id order, falling back to `allod/memory` when the registry marks none.
 
 ## Shared Library
 

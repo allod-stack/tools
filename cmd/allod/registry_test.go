@@ -11,18 +11,29 @@ import (
 // checkout value.
 func writeRegistryFixture(t *testing.T, dir string, entries map[string]string) {
 	t.Helper()
+	objects := make(map[string]string, len(entries))
+	for id, checkout := range entries {
+		objects[id] = `{"checkout": "` + checkout + `"}`
+	}
+	writeRegistryFixtureRaw(t, dir, objects)
+}
+
+// writeRegistryFixtureRaw writes a repository registry whose entries are
+// verbatim JSON objects, for fixtures that need fields beyond checkout.
+func writeRegistryFixtureRaw(t *testing.T, dir string, entries map[string]string) {
+	t.Helper()
 	scripts := filepath.Join(dir, "scripts")
 	if err := os.MkdirAll(scripts, 0755); err != nil {
 		t.Fatal(err)
 	}
 	body := `{"repositories": {`
 	first := true
-	for id, checkout := range entries {
+	for id, entry := range entries {
 		if !first {
 			body += ", "
 		}
 		first = false
-		body += `"` + id + `": {"checkout": "` + checkout + `"}`
+		body += `"` + id + `": ` + entry
 	}
 	body += `}}`
 	if err := os.WriteFile(filepath.Join(scripts, "repositories.json"), []byte(body), 0644); err != nil {
