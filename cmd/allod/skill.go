@@ -46,8 +46,6 @@ is used) or a path to a skills directory; repeat or comma-separate targets to
 search several. Without --from, skills come from allod/memory.
 `
 
-// skillList prints one line per skill across the target directories: the
-// frontmatter name, then a brief description.
 func skillList(targets []string) {
 	dirs := resolveSkillDirs(targets)
 	printed := 0
@@ -59,10 +57,8 @@ func skillList(targets []string) {
 	}
 }
 
-// skillShow prints each named skill's SKILL.md in full, verbatim, with a
-// blank line between skills. Every name is resolved before anything prints,
-// so one bad name fails the command instead of leaving output that looks
-// complete.
+// Every name resolves before anything prints, so one bad name fails the
+// command instead of leaving output that looks complete.
 func skillShow(names, targets []string) {
 	dirs := resolveSkillDirs(targets)
 	index := map[string]string{}
@@ -94,8 +90,6 @@ func skillShow(names, targets []string) {
 	}
 }
 
-// resolveSkillDirs resolves targets to skills directories; an empty target
-// list means the allod/memory checkout's skills directory.
 func resolveSkillDirs(targets []string) []string {
 	if len(targets) == 0 {
 		targets = []string{"allod/memory"}
@@ -115,10 +109,7 @@ func resolveSkillDirs(targets []string) []string {
 	return dirs
 }
 
-// printSkillLines prints one line per skill directory under dir that carries
-// a SKILL.md, sorted by name. It returns the number of skills printed; a
-// subdirectory without a SKILL.md is named on stderr and skipped, because a
-// stray file must not hide the skills around it.
+// printSkillLines prints one line per skill under dir and returns how many.
 func printSkillLines(dir string) int {
 	skills := readSkills(dir)
 	for _, skill := range skills {
@@ -133,8 +124,8 @@ type skillEntry struct {
 	dirName     string
 }
 
-// readSkills reads every skill directory under dir, sorted by name. A
-// subdirectory without a readable SKILL.md is named on stderr and skipped.
+// A subdirectory without a readable SKILL.md is skipped with a stderr note:
+// a stray file must not hide the skills around it.
 func readSkills(dir string) []skillEntry {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -158,10 +149,8 @@ func readSkills(dir string) []skillEntry {
 
 // briefLimit caps a listed description; the full text is one `allod skill
 // <name>` away, so the list stays skimmable.
-const briefLimit = 100
+const briefLimit = 100 // the full text is one `allod skill <name>` away; the list stays skimmable
 
-// briefDescription truncates a description to briefLimit characters, at a
-// word boundary when one is near the cut.
 func briefDescription(text string) string {
 	if len(text) <= briefLimit {
 		return text
@@ -173,11 +162,9 @@ func briefDescription(text string) string {
 	return cut + "..."
 }
 
-// parseSkillFile reads a skill's frontmatter name and description. The Agent
-// Skills format is a YAML subset: keys at the left margin between --- lines,
-// with the description allowed as a block scalar (| or > with optional -,+,
-// digits) continued on indented lines. ok is false when the file is missing,
-// unreadable, or has no frontmatter block.
+// The Agent Skills format is a YAML subset: keys at the left margin between
+// --- lines, with the description allowed as a block scalar continued on
+// indented lines.
 func parseSkillFile(path, fallbackName string) (skill skillEntry, ok bool) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -199,10 +186,8 @@ func parseSkillFile(path, fallbackName string) (skill skillEntry, ok bool) {
 	return skill, true
 }
 
-// frontmatterValue returns the value of one left-margin key from frontmatter
-// lines, folding a block scalar's indented continuation lines into one
-// single-spaced string. The returned lines have the key and its continuation
-// removed, so a second key can be read after it.
+// rest has the key and any block-scalar continuation removed, so a second
+// key can be read after it.
 func frontmatterValue(lines []string, key string) (value string, rest []string, ok bool) {
 	for i, line := range lines {
 		if !strings.HasPrefix(line, key+":") {
@@ -231,8 +216,7 @@ func frontmatterValue(lines []string, key string) (value string, rest []string, 
 	return "", lines, false
 }
 
-// isBlockScalar reports whether a frontmatter value is a YAML block scalar
-// indicator rather than inline text: | or > alone or with - + digits after.
+// | or > alone or with - + digits after: the YAML block scalar indicators.
 func isBlockScalar(text string) bool {
 	if text == "" || (text[0] != '|' && text[0] != '>') {
 		return false
