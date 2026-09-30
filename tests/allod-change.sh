@@ -863,6 +863,41 @@ assert_equal "$(git -C "$path" status --porcelain)" "$status_before" \
 assert_equal "$(git -C "$path" rev-parse HEAD)" "$head_before" \
   "record makes no commit in a moved checkout"
 
+repo="$HOME/work/record-untracked"
+init_repo "$repo" master
+git -C "$repo" checkout -q -b feature
+printf 'new\n' > "$repo/new.txt"
+head_before=$(git -C "$repo" rev-parse HEAD)
+capture record_in_repo "$repo" -m "record with untracked"
+assert_status 1 "record refuses to commit with an untracked file present"
+assert_contains "$CAPTURE_OUTPUT" "new.txt" "record names the untracked file"
+assert_contains "$CAPTURE_OUTPUT" "--files" "record points at --files"
+assert_equal "$(git -C "$repo" rev-parse HEAD)" "$head_before" \
+  "record commits nothing when untracked files block it"
+remote_has_branch "$repo" feature &&
+  fail "record pushes nothing when untracked files block it" ||
+  pass "record pushes nothing when untracked files block it"
+
+capture record_in_repo "$repo" -m "record names the untracked file" -f new.txt
+assert_status 0 "record records the named untracked file"
+assert_contains "$(git -C "$repo" show --name-only --format=%s HEAD)" "new.txt" \
+  "record includes the named file in the commit"
+
+mkdir -p "$repo/sub"
+printf 'a\n' > "$repo/sub/a.txt"
+printf 'b\n' > "$repo/sub/b.txt"
+capture record_in_repo "$repo" -m "record names a directory" -f sub
+assert_status 0 "record stages a named directory of untracked files"
+
+printf 'junk\n' > "$repo/junk.tmp"
+printf 'junk.tmp\n' > "$repo/.gitignore"
+git -C "$repo" add .gitignore
+git -C "$repo" commit -qm "ignore junk"
+git -C "$repo" push -q origin feature
+printf 'changed again\n' > "$repo/tracked.txt"
+capture record_in_repo "$repo" -m "record ignores ignored files" -f tracked.txt
+assert_status 0 "record ignores gitignored files"
+
 repo="$HOME/work/record-sweep-refused"
 init_repo "$repo" master
 printf 'changed\n' > "$repo/tracked.txt"
@@ -1054,11 +1089,18 @@ printf 'one changed\n' > "$path/file1.txt"
 printf 'two changed\n' > "$path/file2.txt"
 printf 'new\n' > "$path/untracked.txt"
 capture record_in_repo "$path" -m "tracked changes"
+assert_status 1 "record refuses untracked files when staging tracked modifications in a worktree"
+assert_contains "$CAPTURE_OUTPUT" "untracked.txt" "record names the untracked file it refuses to leave out"
+git -C "$path" diff --cached --quiet &&
+  pass "record stages nothing when untracked files block it" ||
+  fail "record stages nothing when untracked files block it"
+
+rm "$path/untracked.txt"
+capture record_in_repo "$path" -m "tracked changes"
 assert_status 0 "record without -f stages tracked modifications in a worktree"
 files=$(changed_files_in_head "$path")
 assert_contains "$files" "file1.txt" "record add -u includes first tracked file"
 assert_contains "$files" "file2.txt" "record add -u includes second tracked file"
-assert_not_contains "$files" "untracked.txt" "record add -u excludes untracked file"
 
 repo="$HOME/work/record-retry"
 init_repo "$repo" master
