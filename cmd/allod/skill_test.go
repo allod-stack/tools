@@ -198,14 +198,15 @@ func TestSkillDefaultsToAllodMemory(t *testing.T) {
 func TestSkillDefaultRefusesWhenRegistryLacksMemoryRepo(t *testing.T) {
 	writeRegistryFixture(t, t.TempDir(), nil)
 	t.Setenv("INVENTORY", t.TempDir())
+	t.Setenv("WORK_DIR", t.TempDir())
 
 	_, errText, code := runAllod(t, "skill")
 
 	if code != 1 {
 		t.Errorf("exit code %d, want 1", code)
 	}
-	if !strings.Contains(errText, "allod/memory") {
-		t.Errorf("stderr %q, want the default target named", errText)
+	if !strings.Contains(errText, "no skills found") {
+		t.Errorf("stderr %q, want the no-skills refusal", errText)
 	}
 }
 
@@ -236,6 +237,144 @@ func TestSkillUnknownTarget(t *testing.T) {
 	}
 	if !strings.Contains(errText, "allod/nowhere") || !strings.Contains(errText, "not a registry id") {
 		t.Errorf("stderr %q, want the unknown-target refusal", errText)
+	}
+}
+
+func TestSkillDefaultListsEveryMemoryMarkedCheckout(t *testing.T) {
+	inventory := t.TempDir()
+	base := t.TempDir()
+	writeSkill(t, filepath.Join(base, "allod", "memory", "skills"), "public", "name: public\ndescription: From the public repo.\n")
+	writeSkill(t, filepath.Join(base, "agent-memory", "skills"), "private", "name: private\ndescription: From the private fork.\n")
+	writeRegistryFixtureRaw(t, inventory, map[string]string{
+		"allod/tools":  `{"checkout": "allod/tools"}`,
+		"allod/memory": `{"checkout": "allod/memory", "memory": true}`,
+		"agent-memory": `{"checkout": "agent-memory", "memory": true}`,
+	})
+	t.Setenv("INVENTORY", inventory)
+	t.Setenv("WORK_DIR", base)
+
+	out, errText, code := runAllod(t, "skill")
+
+	if code != 0 {
+		t.Fatalf("exit code %d, stderr %q", code, errText)
+	}
+	if errText != "" {
+		t.Errorf("stderr %q, want silence", errText)
+	}
+	want := "private: From the private fork.\npublic: From the public repo.\n"
+	if out != want {
+		t.Errorf("stdout %q, want %q (sorted registry-id order)", out, want)
+	}
+}
+
+func TestSkillDefaultSkipsMissingMemoryCheckout(t *testing.T) {
+	inventory := t.TempDir()
+	base := t.TempDir()
+	writeSkill(t, filepath.Join(base, "allod", "memory", "skills"), "public", "name: public\ndescription: Present.\n")
+	writeRegistryFixtureRaw(t, inventory, map[string]string{
+		"allod/memory": `{"checkout": "allod/memory", "memory": true}`,
+		"agent-memory": `{"checkout": "agent-memory", "memory": true}`,
+	})
+	t.Setenv("INVENTORY", inventory)
+	t.Setenv("WORK_DIR", base)
+
+	out, errText, code := runAllod(t, "skill")
+
+	if code != 0 {
+		t.Fatalf("exit code %d, stderr %q", code, errText)
+	}
+	if strings.Contains(errText, "agent-memory") {
+		t.Errorf("stderr %q, want the missing checkout skipped silently", errText)
+	}
+	if out != "public: Present.\n" {
+		t.Errorf("stdout %q", out)
+	}
+}
+
+func TestSkillDefaultResolvesThroughRegistryNotRelativeDir(t *testing.T) {
+	inventory := t.TempDir()
+	base := t.TempDir()
+	writeSkill(t, filepath.Join(base, "allod", "memory", "skills"), "registered", "name: registered\ndescription: Via registry.\n")
+	writeRegistryFixtureRaw(t, inventory, map[string]string{
+		"allod/memory": `{"checkout": "allod/memory", "memory": true}`,
+	})
+	t.Setenv("INVENTORY", inventory)
+	t.Setenv("WORK_DIR", base)
+	t.Chdir(base) // allod/memory also exists as a relative directory here
+
+	out, errText, code := runAllod(t, "skill")
+
+	if code != 0 {
+		t.Fatalf("exit code %d, stderr %q", code, errText)
+	}
+	if out != "registered: Via registry.\n" {
+		t.Errorf("stdout %q, want the registry checkout's skills", out)
+	}
+}
+
+func TestSkillDefaultFallsBackWithoutMemoryMarkedEntries(t *testing.T) {
+	inventory := t.TempDir()
+	base := t.TempDir()
+	writeSkill(t, filepath.Join(base, "allod", "memory", "skills"), "public", "name: public\ndescription: Default.\n")
+	writeRegistryFixtureRaw(t, inventory, map[string]string{
+		"allod/tools": `{"checkout": "allod/tools"}`,
+	})
+	t.Setenv("INVENTORY", inventory)
+	t.Setenv("WORK_DIR", base)
+	t.Chdir(base) // the fallback default may resolve as a relative directory
+
+	out, errText, code := runAllod(t, "skill")
+
+	if code != 0 {
+		t.Fatalf("code %d stderr %q", code, errText)
+	}
+	if out != "public: Default.\n" {
+		t.Errorf("stdout %q", out)
+	}
+}
+
+func TestSkillDefaultFailsWhenNoMemoryCheckoutOnDisk(t *testing.T) {
+	inventory := t.TempDir()
+	writeRegistryFixtureRaw(t, inventory, map[string]string{
+		"allod/memory": `{"checkout": "allod/memory", "memory": true}`,
+	})
+	t.Setenv("INVENTORY", inventory)
+	t.Setenv("WORK_DIR", t.TempDir())
+
+	_, errText, code := runAllod(t, "skill")
+
+	if code != 1 {
+		t.Errorf("exit code %d, want 1", code)
+	}
+	if !strings.Contains(errText, "no skills found") {
+		t.Errorf("stderr %q, want the no-skills refusal", errText)
+	}
+}
+
+func TestSkillDuplicateNameListedOnceAndFirstSourceWins(t *testing.T) {
+	first := writeSkill(t, t.TempDir(), "dup", "name: dup\ndescription: Printed from the first source.\n")
+	second := writeSkill(t, t.TempDir(), "dup", "name: dup\ndescription: Second source.\n")
+
+	out, _, code := runAllod(t, "skill", "--from", first+","+second)
+
+	if code != 0 {
+		t.Fatal(code)
+	}
+	if out != "dup: Printed from the first source.\n" {
+		t.Errorf("stdout %q, want the duplicate listed once from the first source", out)
+	}
+
+	out, _, code = runAllod(t, "skill", "dup", "--from", first+","+second)
+
+	if code != 0 {
+		t.Fatal(code)
+	}
+	want, err := os.ReadFile(filepath.Join(first, "dup", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != string(want) {
+		t.Errorf("stdout %q, want the first source's SKILL.md", out)
 	}
 }
 

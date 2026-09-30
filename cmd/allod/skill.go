@@ -43,16 +43,32 @@ in full.
 
 A --from target is a registry id such as allod/memory (its skills/ directory
 is used) or a path to a skills directory; repeat or comma-separate targets to
-search several. Without --from, skills come from allod/memory.
+search several. Without --from, skills come from every registry entry marked
+"memory": true, in sorted registry-id order — allod/memory and any private
+memory fork the deployment registers. A name reachable from several sources
+resolves to the first source in that order.
 `
 
+// A name reachable from several sources prints once, from the first directory
+// in resolved order.
 func skillList(targets []string) {
 	dirs := resolveSkillDirs(targets)
+	seen := map[string]bool{}
 	printed := 0
 	for _, dir := range dirs {
-		printed += printSkillLines(dir)
+		for _, skill := range readSkills(dir) {
+			if seen[skill.name] {
+				continue
+			}
+			seen[skill.name] = true
+			fmt.Fprintf(stdout, "%s: %s\n", skill.name, briefDescription(skill.description))
+			printed++
+		}
 	}
 	if printed == 0 {
+		if len(dirs) == 0 {
+			die(1, "no skills found")
+		}
 		die(1, "no skills found in %s", strings.Join(dirs, ", "))
 	}
 }
@@ -90,32 +106,60 @@ func skillShow(names, targets []string) {
 	}
 }
 
+// The registry resolves a target before a same-named relative directory. With
+// no targets the sources come from the registry: see defaultSkillDirs.
 func resolveSkillDirs(targets []string) []string {
 	if len(targets) == 0 {
-		targets = []string{"allod/memory"}
+		return defaultSkillDirs()
 	}
 	dirs := make([]string, 0, len(targets))
 	for _, target := range targets {
+		if checkout, ok := registryCheckout(target); ok {
+			dirs = append(dirs, filepath.Join(workDir(), checkout, "skills"))
+			continue
+		}
 		if info, err := os.Stat(target); err == nil && info.IsDir() {
 			dirs = append(dirs, target)
 			continue
 		}
-		checkout, ok := registryCheckout(target)
-		if !ok {
-			die(1, "unknown skills target: %s (not a directory, not a registry id)", target)
-		}
-		dirs = append(dirs, filepath.Join(workDir(), checkout, "skills"))
+		die(1, "unknown skills target: %s (not a directory, not a registry id)", target)
 	}
 	return dirs
 }
 
-// printSkillLines prints one line per skill under dir and returns how many.
-func printSkillLines(dir string) int {
-	skills := readSkills(dir)
-	for _, skill := range skills {
-		fmt.Fprintf(stdout, "%s: %s\n", skill.name, briefDescription(skill.description))
+// defaultSkillDirs lists the skills directories of every registry entry marked
+// "memory": true, in sorted registry-id order — allod/memory's public skills
+// and any private memory fork a deployment registers. A checkout not on disk is
+// skipped silently: the deployment's vm-specs repos lists govern which machines
+// clone which repos, and the sweep must not fail because one is missing here.
+// When the registry marks no memory repos — no inventory checkout, standalone
+// use — the single allod/memory default remains: the id maps to its own checkout
+// unless the registry says otherwise.
+func defaultSkillDirs() []string {
+	ids := memoryRegistryIds()
+	if len(ids) == 0 {
+		checkout, ok := registryCheckout("allod/memory")
+		if !ok {
+			checkout = "allod/memory"
+		}
+		dir := filepath.Join(workDir(), checkout, "skills")
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			return []string{dir}
+		}
+		return nil
 	}
-	return len(skills)
+	dirs := make([]string, 0, len(ids))
+	for _, id := range ids {
+		checkout, ok := registryCheckout(id)
+		if !ok {
+			continue
+		}
+		dir := filepath.Join(workDir(), checkout, "skills")
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			dirs = append(dirs, dir)
+		}
+	}
+	return dirs
 }
 
 type skillEntry struct {
