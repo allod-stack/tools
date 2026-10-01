@@ -30,10 +30,12 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -647,6 +649,52 @@ func builtHtaccess(storePath string) string {
 	return path
 }
 
+// siteBuildSymlinks uses Lstat, not Stat, so a link is found and reported
+// rather than followed.
+func siteBuildSymlinks(root string) []string {
+	if _, err := os.Lstat(root); os.IsNotExist(err) {
+		return nil
+	}
+	var links []string
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.Type()&fs.ModeSymlink == 0 {
+			return nil
+		}
+		target, err := os.Readlink(path)
+		if err != nil {
+			target = "?"
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			rel = path
+		}
+		links = append(links, rel+" -> "+target)
+		return nil
+	})
+	if err != nil {
+		die(1, "could not inspect %s for symbolic links: %s", root, err)
+	}
+	sort.Strings(links)
+	return links
+}
+
+// requireNoBuildSymlinks is the one place the symlink rule is enforced for a
+// build from any generator; a deploy that would stop never prints a plan first.
+func requireNoBuildSymlinks(storePath string) {
+	links := siteBuildSymlinks(storePath)
+	if len(links) == 0 {
+		return
+	}
+	fmt.Fprintf(stderr, "allod: refusing to deploy %s: it contains a symbolic link:\n", storePath)
+	for _, link := range links {
+		fmt.Fprintf(stderr, "  %s\n", link)
+	}
+	exit(1)
+}
+
 // siteDeployTransfers, siteDeployCheckers, and siteDeployFTPConcurrency bound
 // how many FTP connections one rclone filesystem instance can hold open at
 // once. rclone's FTP backend documentation says: "If you are doing a sync or
@@ -740,8 +788,10 @@ func siteDeploy(args []string) {
 
 	docroot := profile.docroot(config.domain)
 	trash := siteRemoteName + ":deploy-trash/" + config.domain
-	// Both reads settle the build's shape before anything is transferred, so
-	// a malformed build stops the deploy here rather than between passes.
+	// These checks settle the build's shape before anything is transferred,
+	// so a build that would stop the deploy stops here rather than between
+	// passes.
+	requireNoBuildSymlinks(storePath)
 	homePage, hasHomePage := builtHomePage(storePath)
 	htaccess := ""
 	if profile.excludesHtaccess() {
@@ -859,7 +909,11 @@ site repository root, builds that repo with 'nix build --no-link
 --print-out-paths', and syncs the resulting store path through the 'shared'
 rclone remote. Deploy never handles a credential, and checks that the remote
 can authenticate before it starts the build rather than discovering a rejected
-login afterwards.
+login afterwards. Before anything is transferred, deploy walks the built store
+path and refuses, naming each one, if it contains a symbolic link — which a
+web server would otherwise resolve at request time against the machine it
+runs on and so could publish one of the host's own files — and '--dry-run'
+refuses the same way.
 
 Each site-enabled binary has one deployment-owned hosting layout compiled in.
 Without a linker override it uses 'directadmin', whose docroot is

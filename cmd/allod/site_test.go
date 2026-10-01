@@ -1721,8 +1721,9 @@ func TestSiteDeployRefusesMalformedBuild(t *testing.T) {
 		{"directadmin .htaccess is a directory", "directadmin", ".htaccess", false, "is not a regular file"},
 		// rclone skips a symlink it is not told to follow, so a linked
 		// .htaccess would pass a Stat-based check and then fail, or stay
-		// behind, two passes later.
-		{"directadmin .htaccess is a symlink", "directadmin", ".htaccess", true, "is not a regular file"},
+		// behind, two passes later; the generic refusal runs first and
+		// names the link.
+		{"directadmin .htaccess is a symlink", "directadmin", ".htaccess", true, ".htaccess -> rules.conf"},
 	}
 
 	for _, test := range tests {
@@ -1755,6 +1756,106 @@ func TestSiteDeployRefusesMalformedBuild(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSiteDeployRefusesSymlinksInBuild: a web server resolves a link at
+// request time against the host machine, so deploy refuses a build carrying
+// one and names every offender; a dry run refuses the same way.
+func TestSiteDeployRefusesSymlinksInBuild(t *testing.T) {
+	buildWithLinks := func(t *testing.T) (storePath, nestedLink string) {
+		storePath = builtSite(t, map[string]string{"index.html": "home\n"})
+		if err := os.MkdirAll(filepath.Join(storePath, "assets"), 0755); err != nil {
+			t.Fatalf("could not create nested directory: %v", err)
+		}
+		if err := os.Symlink("/etc/shadow", filepath.Join(storePath, "linked.txt")); err != nil {
+			t.Fatalf("could not create top-level symlink: %v", err)
+		}
+		nestedLink = filepath.Join("assets", "nested.css")
+		if err := os.Symlink("/etc/passwd", filepath.Join(storePath, nestedLink)); err != nil {
+			t.Fatalf("could not create nested symlink: %v", err)
+		}
+		return storePath, nestedLink
+	}
+
+	t.Run("a real deploy is refused and names both links", func(t *testing.T) {
+		storePath, nestedLink := buildWithLinks(t)
+		stub := &deployStub{storePath: storePath, verifyStatus: 200}
+		useDeployStub(t, stub)
+		useSiteRepo(t, "domain = \"example.com\"\n")
+
+		_, errText, code := runAllod(t, "site", "deploy")
+		if code != 1 {
+			t.Errorf("exit code = %d, want 1", code)
+		}
+		for _, want := range []string{"linked.txt -> /etc/shadow", nestedLink + " -> /etc/passwd"} {
+			if !strings.Contains(errText, want) {
+				t.Errorf("stderr does not contain %q\ngot: %q", want, errText)
+			}
+		}
+		if stub.syncCalls != 0 {
+			t.Errorf("rclone ran %d times on a build with symlinks, want 0", stub.syncCalls)
+		}
+	})
+
+	t.Run("a dry run is refused the same way", func(t *testing.T) {
+		storePath, _ := buildWithLinks(t)
+		stub := &deployStub{storePath: storePath, verifyStatus: 200}
+		useDeployStub(t, stub)
+		useSiteRepo(t, "domain = \"example.com\"\n")
+
+		_, errText, code := runAllod(t, "site", "deploy", "--dry-run")
+		if code != 1 {
+			t.Errorf("exit code = %d, want 1", code)
+		}
+		if !strings.Contains(errText, "linked.txt -> /etc/shadow") {
+			t.Errorf("stderr does not contain %q\ngot: %q", "linked.txt -> /etc/shadow", errText)
+		}
+		if stub.syncCalls != 0 {
+			t.Errorf("rclone ran %d times on a dry run with symlinks, want 0", stub.syncCalls)
+		}
+	})
+
+	t.Run("a symlinked index.html is named, not a read error", func(t *testing.T) {
+		storePath := builtSite(t, map[string]string{})
+		if err := os.MkdirAll(filepath.Join(storePath, "assets"), 0755); err != nil {
+			t.Fatalf("could not create nested directory: %v", err)
+		}
+		if err := os.Symlink("assets", filepath.Join(storePath, "index.html")); err != nil {
+			t.Fatalf("could not symlink index.html: %v", err)
+		}
+		stub := &deployStub{storePath: storePath, verifyStatus: 200}
+		useDeployStub(t, stub)
+		useSiteRepo(t, "domain = \"example.com\"\n")
+
+		_, errText, code := runAllod(t, "site", "deploy")
+		if code != 1 {
+			t.Errorf("exit code = %d, want 1", code)
+		}
+		if !strings.Contains(errText, "index.html -> assets") {
+			t.Errorf("stderr does not contain %q\ngot: %q", "index.html -> assets", errText)
+		}
+	})
+
+	t.Run("a build with no links passes through", func(t *testing.T) {
+		storePath := builtSite(t, map[string]string{})
+		if err := os.MkdirAll(filepath.Join(storePath, "assets"), 0755); err != nil {
+			t.Fatalf("could not create nested directory: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(storePath, "assets", "style.css"), []byte("body {}\n"), 0644); err != nil {
+			t.Fatalf("could not write nested file: %v", err)
+		}
+		stub := &deployStub{storePath: storePath, verifyStatus: 200}
+		useDeployStub(t, stub)
+		useSiteRepo(t, "domain = \"example.com\"\n")
+
+		_, errText, code := runAllod(t, "site", "deploy")
+		if code != 0 {
+			t.Fatalf("exit code = %d, want 0\nstderr: %s", code, errText)
+		}
+		if stub.syncCalls != 2 {
+			t.Errorf("rclone ran %d times, want 2", stub.syncCalls)
+		}
+	})
 }
 
 // TestFetchSite exercises the real HTTP check rather than the seam, because
