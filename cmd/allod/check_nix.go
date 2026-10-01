@@ -26,6 +26,13 @@ const (
 var (
 	checkHandledOutputs = []string{"nixosConfigurations", "checks", "nixosModules"}
 	checkBuiltinPassive = []string{"lib", "vmFacts"}
+	// Output names the flake output schema defines, plus the two conventions it
+	// does not but every other Nix tool already understands: homeModules is the
+	// Home Manager counterpart of nixosModules, formatter the tree formatter's.
+	checkStandardPassive = []string{
+		"apps", "devShells", "formatter", "homeModules", "hydraJobs",
+		"legacyPackages", "overlay", "overlays", "packages", "templates",
+	}
 )
 
 var checkStream = func(name string, args []string) int {
@@ -132,6 +139,7 @@ func checkEnumerate(options checkOptions) checkEnumeration {
 
 func checkAllowedPassive(options checkOptions) []string {
 	allowed := append([]string{}, checkBuiltinPassive...)
+	allowed = append(allowed, checkStandardPassive...)
 	for _, name := range checkConfigPassiveOutputs(options) {
 		if !slices.Contains(allowed, name) {
 			allowed = append(allowed, name)
@@ -196,6 +204,41 @@ func checkConfigNames(options checkOptions, decoded string) []string {
 		}
 	}
 	return allowed
+}
+
+// checkNearestKnownName reports the known output name closest to a refused one,
+// when that distance reads as a misspelling rather than a coincidence. The
+// candidates are every name the command handles or leaves alone, so a typo of
+// checks is named as such and not sent to the configuration file.
+func checkNearestKnownName(name string) (string, bool) {
+	candidates := append(append(append([]string{}, checkHandledOutputs...), checkBuiltinPassive...), checkStandardPassive...)
+	best, bestDistance := "", len(name)+1
+	for _, candidate := range candidates {
+		if distance := checkNameDistance(name, candidate); distance < bestDistance {
+			best, bestDistance = candidate, distance
+		}
+	}
+	return best, bestDistance <= 2
+}
+
+func checkNameDistance(a, b string) int {
+	previous := make([]int, len(b)+1)
+	current := make([]int, len(b)+1)
+	for j := range previous {
+		previous[j] = j
+	}
+	for i := 1; i <= len(a); i++ {
+		current[0] = i
+		for j := 1; j <= len(b); j++ {
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			current[j] = min(min(current[j-1]+1, previous[j]+1), previous[j-1]+cost)
+		}
+		previous, current = current, previous
+	}
+	return previous[len(b)]
 }
 
 func checkRefusedOutputs(outputs, allowed []string) []string {

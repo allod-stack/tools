@@ -285,10 +285,10 @@ func TestCheckRefusals(t *testing.T) {
 			             {"system": "riscv64-linux", "name": "three"}]}`,
 			[]string{"Witnessed nothing: evaluated 3 of 3 checks and built none of them.",
 				"run the gate on aarch64-linux,riscv64-linux,"}},
-		{"an unlisted output, and not the allowed one beside it",
+		{"a misspelled standard output, and not the allowed one beside it",
 			`{"outputs": ["checks", "chekcs", "packages", "vmFacts"], "machines": [], "modules": [],
 			  "checks": [{"system": "x86_64-linux", "name": "green-local"}]}`,
-			[]string{"exposes flake output(s) allod check does not run:\n  - chekcs\n  - packages\n"}},
+			[]string{"exposes flake output(s) allod check does not run:\n  - chekcs (close to checks; probably a typo)\n"}},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -309,6 +309,54 @@ func TestCheckRefusals(t *testing.T) {
 				t.Errorf("stderr blames a step or an allowed output\ngot: %s", errText)
 			}
 		})
+	}
+}
+
+func TestCheckStandardPassiveOutputs(t *testing.T) {
+	useCheckStub(t, &checkStub{outputs: `{"outputs": ["checks", "homeModules", "packages"],
+	  "machines": ["green-machine"], "modules": [],
+	  "checks": [{"system": "x86_64-linux", "name": "green-local"}]}`})
+	out, errText, code := runAllod(t, "check")
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0\nstderr: %s", code, errText)
+	}
+	for _, want := range []string{"==> passive output homeModules\n", "==> passive output packages\n"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout does not contain %q\ngot: %s", want, out)
+		}
+	}
+	if strings.Contains(errText, "homeModules") || strings.Contains(errText, "packages") {
+		t.Errorf("stderr refuses a standard output\ngot: %s", errText)
+	}
+}
+
+func TestCheckRefusalNamesTheKind(t *testing.T) {
+	useCheckStub(t, &checkStub{outputs: `{"outputs": ["checks", "chekcs", "profilesSource"],
+	  "machines": [], "modules": [],
+	  "checks": [{"system": "x86_64-linux", "name": "green-local"}]}`})
+	_, errText, code := runAllod(t, "check")
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	for _, want := range []string{
+		"  - chekcs (close to checks; probably a typo)\n",
+		"  - profilesSource (not a standard output; to allow it, list it in passive-outputs = [...] in allod-check.toml at the flake root)\n",
+	} {
+		if !strings.Contains(errText, want) {
+			t.Errorf("stderr does not contain %q\ngot: %s", want, errText)
+		}
+	}
+}
+
+func TestCheckNearestKnownName(t *testing.T) {
+	if near, ok := checkNearestKnownName("chekcs"); !ok || near != "checks" {
+		t.Errorf("checkNearestKnownName(chekcs) = %q, %v; want checks, true", near, ok)
+	}
+	if near, ok := checkNearestKnownName("homeModuls"); !ok || near != "homeModules" {
+		t.Errorf("checkNearestKnownName(homeModuls) = %q, %v; want homeModules, true", near, ok)
+	}
+	if _, ok := checkNearestKnownName("profilesSource"); ok {
+		t.Error("checkNearestKnownName(profilesSource) matched a known name")
 	}
 }
 

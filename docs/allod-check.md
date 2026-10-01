@@ -65,9 +65,11 @@ has not been committed.
 ## allod-check.toml
 
 Some repositories expose a top-level output that is not a machine, a check or a
-module — a source tree another flake consumes, say. Two such names are built in,
-`lib` and `vmFacts`. Any other one is the repository's own setting, and lives in
-`allod-check.toml` at the root of the flake being checked:
+module — a source tree another flake consumes, say. The names the flake output
+schema defines (`packages`, `apps`, `devShells`, ...), plus `homeModules`,
+`formatter`, `lib` and `vmFacts`, are built in and passive. Anything else is the
+repository's own setting, and lives in `allod-check.toml` at the root of the
+flake being checked:
 
 ```toml
 passive-outputs = ["profilesSource", "secretsSource"]
@@ -94,10 +96,12 @@ stop the run with a message naming the file.
 ## What a refusal means
 
 **`<flake> exposes flake output(s) allod check does not run:`** — a top-level
-output is neither run nor allowed, and the run stops before any step. Nearly
-always a typo: `chekcs.x86_64-linux.foo` is not a check, and nothing else would
-have told you. Otherwise allow it in `allod-check.toml` if forcing it is enough,
-or teach the command a step for it.
+output is neither run nor allowed, and the run stops before any step. Each name
+says which kind it is. One close to a standard output, `chekcs` beside `checks`,
+is printed as `close to checks; probably a typo` — `chekcs.x86_64-linux.foo` is
+not a check, and nothing else would have told you. A name nothing standard
+covers is printed with the way to allow it: list it in `allod-check.toml` if
+forcing it is enough, or teach the command a step for it.
 
 **`found no machine and no check to run in <flake>`** — the flake exposed neither,
 so there was nothing to gate. A run of no steps is not a pass.

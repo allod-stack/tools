@@ -30,8 +30,10 @@ is only evaluated, and a run that evaluated checks and built none is refused.
 written to, lock file included.
 
 An output other than nixosConfigurations, checks and nixosModules is refused
-unless allowed: 'lib' and 'vmFacts' always, and whatever passive-outputs lists
-in allod-check.toml at the flake root, which is forced and nothing more.
+unless allowed: the flake output schema's standard names (packages,
+homeModules, ...) are passive, as are 'lib' and 'vmFacts' always, and whatever
+passive-outputs lists in allod-check.toml at the flake root, which is forced
+and nothing more.
 `
 
 type checkOverride struct {
@@ -117,11 +119,20 @@ func checkMain(args []string) {
 
 	if refused := checkRefusedOutputs(enumeration.Outputs, allowed); len(refused) > 0 {
 		fmt.Fprintf(stderr, "allod: %s exposes flake output(s) allod check does not run:\n", options.flake)
+		typoSuspected := false
 		for _, name := range refused {
-			fmt.Fprintf(stderr, "  - %s\n", name)
+			if near, ok := checkNearestKnownName(name); ok {
+				typoSuspected = true
+				fmt.Fprintf(stderr, "  - %s (close to %s; probably a typo)\n", name, near)
+			} else {
+				fmt.Fprintf(stderr, "  - %s (not a standard output; to allow it, list it in %s = [...] in %s at the flake root)\n",
+					name, checkPassiveOutputsKey, checkConfigName)
+			}
 		}
-		die(1, "an unknown output is usually a typo; to allow one deliberately, list it in %s = [...] in %s at the flake root",
-			checkPassiveOutputsKey, checkConfigName)
+		if typoSuspected {
+			die(1, "a name close to a standard flake output is usually a typo")
+		}
+		exit(1)
 	}
 
 	fmt.Fprintf(stdout, "Gate for %s on %s\n", options.flake, system)
