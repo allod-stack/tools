@@ -1,14 +1,8 @@
 package main
 
-// TestExternalCommandIsExeced proves the process replacement itself, not
-// just the argv it is handed: it re-execs this test binary as a child, and
-// the ALLOD_TEST_EXEC_HELPER branch calls run() directly so the real
-// externalNamespaceExec (syscall.Exec, not a swapped stub) runs.
-//
-// The stub it execs into is a compiled binary, not a shell script: a
-// script's shebang line makes the kernel substitute the file's real path
-// for argv[0] no matter what argv[0] the caller passed, which would hide
-// the very git-style rename this test exists to check.
+// The stub is a compiled binary, not a shell script: the kernel replaces a
+// shebang script's argv[0] with the file's real path, which would hide the
+// git-style rename this test checks. The helper branch runs the real exec.
 
 import (
 	"errors"
