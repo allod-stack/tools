@@ -443,3 +443,16 @@ func TestSkillListAlignsToLongestName(t *testing.T) {
 		t.Errorf("stdout %q", out)
 	}
 }
+
+func TestSkillBodyLineCannotSupplyFrontmatter(t *testing.T) {
+	dir := writeSkill(t, t.TempDir(), "tricky", "name: tricky\ndescription: Has a body line that looks like frontmatter.\n---\n\nBody mentions:\nsummary: this line is body text, not a summary\nname: also-body\n")
+
+	out, _, code := runAllod(t, "skill", "--from", dir)
+
+	if code != 0 {
+		t.Fatal(code)
+	}
+	if out != "tricky  Has a body line that looks like frontmatter.\n" {
+		t.Errorf("stdout %q, want the body lines ignored", out)
+	}
+}

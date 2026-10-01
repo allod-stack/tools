@@ -237,25 +237,31 @@ func briefDescription(text string) string {
 
 // The Agent Skills format is a YAML subset: keys at the left margin between
 // --- lines, with the description allowed as a block scalar continued on
-// indented lines.
+// indented lines. Keys are read only from that block, never the body: a body
+// line that begins like a frontmatter key must not supply one.
 func parseSkillFile(path, fallbackName string) (skill skillEntry, ok bool) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return skillEntry{}, false
 	}
 	lines := strings.Split(string(data), "\n")
-	if len(lines) < 2 || lines[0] != "---" {
+	if len(lines) < 3 || lines[0] != "---" {
 		return skillEntry{}, false
 	}
+	end := slices.Index(lines[1:], "---")
+	if end == -1 {
+		return skillEntry{}, false
+	}
+	frontmatter := lines[1 : end+1]
 	skill.name = fallbackName
 	skill.dirName = fallbackName
-	description, lines, ok := frontmatterValue(lines[1:], "description")
+	description, rest, ok := frontmatterValue(frontmatter, "description")
 	if ok {
 		skill.description = description
 	}
-	summary, lines, _ := frontmatterValue(lines, "summary")
+	summary, rest, _ := frontmatterValue(rest, "summary")
 	skill.summary = summary
-	if name, _, ok := frontmatterValue(lines, "name"); ok {
+	if name, _, ok := frontmatterValue(rest, "name"); ok {
 		skill.name = name
 	}
 	return skill, true
