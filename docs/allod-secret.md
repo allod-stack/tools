@@ -8,12 +8,12 @@ A credential's plaintext is a template with the secret substituted into it. The 
 
 ```json
 {
-  "credential": "forgejo-https-token-allod-dev",
-  "secret_path": "secrets/forgejo-https-token-allod-dev.age",
-  "value": { "template": "https://allod-agent:{secret}@forge.anarch.diy" },
+  "credential": "example-api-token",
+  "secret_path": "secrets/example-api-token.age",
+  "value": { "template": "Authorization: Bearer {secret}" },
   "targets": [
-    { "system": "allod-dev", "kind": "dev-vm", "deployed_path": "/root/.git-credentials",
-      "verify": "sudo env HOME=/root GIT_TERMINAL_PROMPT=0 git ls-remote https://forge.anarch.diy/allod/tools.git HEAD" }
+    { "system": "allod-dev", "kind": "dev-vm", "deployed_path": "/run/credentials/example-api",
+      "verify": "example-cli token verify < /run/credentials/example-api" }
   ]
 }
 ```
@@ -96,7 +96,7 @@ Nothing is decrypted. Every credential in the group must already be `active` wit
 
 `--dry-run` runs every gate — branch, clean tree, active state, ciphertext present, recipients, registry shape, unique group membership, declared value and verification — reads no value, decrypts nothing, encrypts nothing, runs no checks, and writes nothing. It still refuses a dirty tree. It prints the group, its targets, the deploy and verification steps, and the revocation gate, phrased as what a live run would do.
 
-The printed steps come from the registry: the rebuild command per target kind, the verification command per target, the revocation gate with Forgejo wording only for a `forgejo` group and none at all for an `in-place` strategy, and — when the group carries `local_auth_refresh` entries — `refresh-local-auth --group <alias>` as the operator's next step. That stays a separate host script, nexus's own `refresh-local-auth`: it installs root-owned files under sudo, a privilege a git-repository command should not hold. A group with such an entry also requires `refresh-local-auth` to resolve on PATH, checked before the value is read and on `--dry-run` too, so a host whose nexus pin predates allod/nexus#52 is refused before a live run lands a rotation it cannot finish.
+The printed steps come from the registry: the rebuild command per target kind, the verification command per target, and the revocation gate with Forgejo wording only for a `forgejo` group and none at all for an `in-place` strategy.
 
 ## Where things are found
 

@@ -505,14 +505,14 @@ const declareExpectedGroupMultiMachine = `  "multi-token": {
           {
             "system": "dev-a",
             "kind": "dev-vm",
-            "deployed_path": "/root/.git-credentials",
-            "verify": "forge token verify < /root/.git-credentials"
+            "deployed_path": "/home/allod-agent/.config/forge/token",
+            "verify": "forge token verify < /home/allod-agent/.config/forge/token"
           },
           {
             "system": "dev-b",
             "kind": "dev-vm",
-            "deployed_path": "/root/.git-credentials",
-            "verify": "forge token verify < /root/.git-credentials"
+            "deployed_path": "/home/allod-agent/.config/forge/token",
+            "verify": "forge token verify < /home/allod-agent/.config/forge/token"
           }
         ]
       }
@@ -535,7 +535,7 @@ func TestSecretDeclareTwoMachinesServiceForgejo(t *testing.T) {
 	_, errText, code := fx.run(t, "multi-token",
 		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a,dev-b",
 		"--value-template-file", templatePath,
-		"--deployed-path", "/root/.git-credentials", "--verify", "forge token verify < /root/.git-credentials",
+		"--deployed-path", "/home/allod-agent/.config/forge/token", "--verify", "forge token verify < /home/allod-agent/.config/forge/token",
 		"--service", "forgejo", "--account", "allod-agent", "--ui-token-name", "multi-token")
 	if code != 0 {
 		t.Fatalf("exit %d, stderr: %s", code, errText)

@@ -2,8 +2,8 @@ package main
 
 // Redaction runs over the full rendered trace text, once, before it is
 // written to disk. It is a coarse net for the token shapes that actually
-// show up in agent session logs (API keys, bearer tokens, .netrc lines), not
-// a guarantee: a secret shaped like ordinary prose survives it. The pem
+// show up in agent session logs (API keys, bearer tokens, password fields),
+// not a guarantee: a secret shaped like ordinary prose survives it. The pem
 // pattern spans the BEGIN/END markers and everything between, which is why
 // this runs over the whole trace rather than one physical line at a time —
 // a line-by-line pass would only ever catch the marker lines and leave the
@@ -28,7 +28,7 @@ var traceRedactionRules = []traceRedactionRule{
 	{"aws", regexp.MustCompile(`AKIA[0-9A-Z]{16}`)},
 	{"age", regexp.MustCompile(`AGE-SECRET-KEY-1[A-Z2-7]+`)},
 	{"pem", regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----`)},
-	{"netrc", regexp.MustCompile(`password[= ]\S+`)},
+	{"password-field", regexp.MustCompile(`password[= ]\S+`)},
 	{"authorization", regexp.MustCompile(`(?i)Authorization:\s*.+`)},
 	{"url-credential", regexp.MustCompile(`://[^\s/@]+:[^\s/@]+@`)},
 }

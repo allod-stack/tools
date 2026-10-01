@@ -215,20 +215,12 @@ type registryTarget struct {
 }
 
 type registryGroup struct {
-	Credentials      []registryCredential    `json:"credentials"`
-	RegistryAlias    string                  `json:"registry_alias"`
-	Service          string                  `json:"service"`
-	Account          string                  `json:"account"`
-	UITokenName      string                  `json:"ui_token_name"`
-	RotationStrategy string                  `json:"rotation_strategy"`
-	LocalAuthRefresh []localAuthRefreshEntry `json:"local_auth_refresh"`
-}
-
-type localAuthRefreshEntry struct {
-	Contract         string `json:"contract"`
-	System           string `json:"system"`
-	LocalUsername    string `json:"local_username"`
-	SourceCredential string `json:"source_credential"`
+	Credentials      []registryCredential `json:"credentials"`
+	RegistryAlias    string               `json:"registry_alias"`
+	Service          string               `json:"service"`
+	Account          string               `json:"account"`
+	UITokenName      string               `json:"ui_token_name"`
+	RotationStrategy string               `json:"rotation_strategy"`
 }
 
 // secretTarget is everything a tagged command — 'create', 'rekey', or

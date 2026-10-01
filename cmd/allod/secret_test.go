@@ -90,8 +90,6 @@ type secretFixture struct {
 
 	encodings []string
 
-	credentialStoreURL credentialStoreURLGrammar
-
 	checkCalls  int
 	checkStatus int
 
@@ -173,9 +171,8 @@ func newSecretFixture(t *testing.T) *secretFixture {
 			"secrets/new-token.age": {fixtureHostKey, fixtureVMKey},
 			"secrets/old-token.age": {fixtureHostKey, fixtureVMKey, fixtureOtherKey},
 		},
-		decryptResult:      []byte("old value\n"),
-		encodings:          []string{"rclone-obscure"},
-		credentialStoreURL: compileCredentialStoreURLGrammar(t, loadCredentialStoreURLTestdata(t)),
+		decryptResult: []byte("old value\n"),
+		encodings:     []string{"rclone-obscure"},
 	}
 
 	if err := os.WriteFile(fx.identity, []byte("fixture private key\n"), 0600); err != nil {
@@ -230,13 +227,11 @@ func newSecretFixture(t *testing.T) *secretFixture {
 
 	previousCredentials, previousRegistry, previousRecipients := secretEvalCredentials, secretEvalRegistry, secretEvalRecipients
 	previousEncodings := secretEvalEncodings
-	previousCredentialStoreURL := secretEvalCredentialStoreURL
 	previousEncrypt, previousDecrypt, previousCheck := secretEncrypt, secretDecrypt, secretFlakeCheck
 	previousTerminal, previousAsk, previousStdin := secretStdinIsTerminal, secretAskOnTerminal, stdin
 	t.Cleanup(func() {
 		secretEvalCredentials, secretEvalRegistry, secretEvalRecipients = previousCredentials, previousRegistry, previousRecipients
 		secretEvalEncodings = previousEncodings
-		secretEvalCredentialStoreURL = previousCredentialStoreURL
 		secretEncrypt, secretDecrypt, secretFlakeCheck = previousEncrypt, previousDecrypt, previousCheck
 		secretStdinIsTerminal, secretAskOnTerminal, stdin = previousTerminal, previousAsk, previousStdin
 	})
@@ -261,7 +256,6 @@ func newSecretFixture(t *testing.T) *secretFixture {
 	}
 	secretEvalRegistry = func(string) (map[string]registryGroup, error) { return fx.registry, nil }
 	secretEvalEncodings = func(string) ([]string, error) { return fx.encodings, nil }
-	secretEvalCredentialStoreURL = func(string) (credentialStoreURLGrammar, error) { return fx.credentialStoreURL, nil }
 	secretEvalRecipients = func(_ string, path string) ([]string, error) {
 		recipients, ok := fx.recipients[path]
 		if !ok {
@@ -1008,7 +1002,7 @@ func TestFirstCredentialCarryingFormat(t *testing.T) {
 	// would have visited first.
 	if name, ok := firstCredentialCarryingFormat(map[string]registryGroup{
 		"z.rotate": {Credentials: []registryCredential{{Credential: "later-cred", Format: "raw-forgejo-token"}}},
-		"a.rotate": {Credentials: []registryCredential{{Credential: "earlier-cred", Format: "credential-store-url"}}},
+		"a.rotate": {Credentials: []registryCredential{{Credential: "earlier-cred", Format: "legacy-url"}}},
 	}); !ok || name != "earlier-cred" {
 		t.Errorf("got (%q, %v), want the earlier alias's credential (\"earlier-cred\", true)", name, ok)
 	}
