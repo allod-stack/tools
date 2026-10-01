@@ -381,12 +381,12 @@ func (c *cascade) preflight() {
 		}
 		dir := c.repoDir(repo)
 
-		if !isFile(dir + "/flake.lock") {
-			c.status[repo] = skipNoLock
-			continue
-		}
 		if repoIsHostProvided(dir) {
 			c.status[repo] = skipNoOrigin
+			continue
+		}
+		if !isFile(dir + "/flake.lock") {
+			c.status[repo] = skipNoLock
 			continue
 		}
 		remoteURL := c.remote[repo]

@@ -79,10 +79,8 @@ func globDirs(dir string) []string {
 	return append(append(plain, dotted...), doubleDotted...)
 }
 
-// repoIsHostProvided is workspace_repo_is_host_provided: true when `git
-// remote` names no "origin" — the contract the hypervisor's injection step
-// establishes (git init plus a push, never a clone). It reads `remote`, not
-// `remote get-url`, since a dangling URL still counts as having an origin.
+// repoIsHostProvided is true when no remote is named "origin". It reads
+// `remote`, not `remote get-url`: a dangling URL still counts as origin.
 func repoIsHostProvided(dir string) bool {
 	out, ok := gitCapture(dir, "remote")
 	if !ok {

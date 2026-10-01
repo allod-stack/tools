@@ -124,8 +124,6 @@ func TestCollectReposFollowsTheGlobOrder(t *testing.T) {
 	}
 }
 
-// repoIsHostProvided must key on the remote named "origin", not on whether
-// any remote exists at all.
 func TestRepoIsHostProvided(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not on PATH")
@@ -150,10 +148,6 @@ func TestRepoIsHostProvided(t *testing.T) {
 	}
 }
 
-// A repository with no origin remote is the hypervisor's injection contract
-// for a host-provided checkout (git init plus a push, never a clone): it
-// must be dropped before any default-branch or forge-name lookup, as a skip
-// rather than a preflight error.
 func TestPreflightSkipsHostProvidedRepo(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not on PATH")
@@ -166,9 +160,6 @@ func TestPreflightSkipsHostProvidedRepo(t *testing.T) {
 	}
 	if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v\n%s", err, out)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "flake.lock"), []byte("{}"), 0o644); err != nil {
-		t.Fatal(err)
 	}
 
 	c := &cascade{

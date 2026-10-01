@@ -9,7 +9,7 @@ export HOME="$TMP/home"
 export MOCK_LOG="$TMP/git.log"
 mkdir -p "$HOME/work/.git" "$HOME/work/group/nested" "$TMP/bin"
 
-for repo in clean dirty local unpushed switched pull-fail nohead group/nested/repo .profile .cache/ignored no-origin; do
+for repo in clean dirty local unpushed switched pull-fail nohead group/nested/repo .profile .cache/ignored no-origin notrepo; do
   mkdir -p "$HOME/work/$repo/.git"
   : > "$HOME/work/$repo/.git/HEAD"
 done
@@ -66,7 +66,12 @@ case "$command" in
     printf '%s\n' "$repo_dir"
     ;;
   "remote")
-    [[ "$repo" == "no-origin" ]] || printf 'origin\n'
+    # notrepo: `git remote` itself fails, as it would outside a git repo.
+    case "$repo" in
+      no-origin) ;;
+      notrepo) exit 128 ;;
+      *) printf 'origin\n' ;;
+    esac
     ;;
   "symbolic-ref refs/remotes/origin/HEAD")
     if [[ "$repo" == nohead ]]; then
@@ -201,6 +206,8 @@ assert_output_contains ".profile                  up to date [master]" \
   "default: discovers and pulls a dot-named repository"
 assert_output_contains "no-origin                 skipped    [host-provided: no origin]" \
   "default: skips a host-provided checkout with no origin"
+assert_output_contains "notrepo                   up to date [master]" \
+  "default: a failing git remote is not treated as host-provided"
 assert_log_not_contains $'^ignored\t' \
   "default: does not recurse through a dot-named non-repo directory"
 
