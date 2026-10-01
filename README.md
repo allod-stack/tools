@@ -118,7 +118,7 @@ namespace" failure.
 - [Git hooks](git-hooks/README.md) — `protected-refs-policy`, `setup-tracked-hooks`
 - [allod check](docs/allod-check.md) — run a repository's machines and checks, one `nix` process at a time, in place of `nix flake check`
 - [allod trace](docs/allod-trace.md) — distill local Claude, Codex, and Pi session logs into redacted markdown traces
-- `allod skill` — list the agent skills a skills directory exposes (name plus a brief description); `allod skill <name>` prints one in full. Without `--from`, sources are every registry entry marked `"memory": true`, in sorted registry-id order, falling back to `allod/memory` when the registry marks none.
+- `allod skill` — list the agent skills a skills directory exposes: one aligned line each, the name and its `summary:` (a skill without a summary lists its `description` truncated; a name over 16 characters or a summary over 70 refuses). `allod skill <name>` prints one in full. Without `--from`, sources are every registry entry marked `"memory": true`, in sorted registry-id order, falling back to `allod/memory` when the registry marks none.
 
 ## Shared Library
 
