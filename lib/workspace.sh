@@ -66,6 +66,17 @@ workspace_collect_worktrees() {
   done < <(git -C "$repo_dir" worktree list --porcelain 2>/dev/null; printf '\n')
 }
 
+# True when <dir>'s remotes name no "origin" — the contract the hypervisor's
+# injection step establishes (git init plus a push, never a clone). Reads
+# `git remote`, not `remote get-url`: a dangling URL still counts as origin.
+workspace_repo_is_host_provided() {
+  local dir="$1" remote
+  while IFS= read -r remote; do
+    [[ "$remote" == "origin" ]] && return 1
+  done < <(git -C "$dir" remote 2>/dev/null)
+  return 0
+}
+
 # Prints origin's default branch, or prints nothing and fails; never guesses.
 workspace_repo_default_branch() {
   local dir="$1" ref

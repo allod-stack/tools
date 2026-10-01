@@ -51,6 +51,11 @@ trap 'rm -rf "$tmpdir"' EXIT
 process_repo() {
   local repo="$1" dir="$2" outfile="$3"
 
+  if workspace_repo_is_host_provided "$dir"; then
+    printf '  %-24s  skipped    [host-provided: no origin]\n' "$repo" > "$outfile"
+    return
+  fi
+
   local current_branch
   current_branch=$(git -C "$dir" branch --show-current 2>/dev/null || true)
 

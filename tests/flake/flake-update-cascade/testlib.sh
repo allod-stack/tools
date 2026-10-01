@@ -109,6 +109,12 @@ case "$command" in
       *) printf 'ssh://git@forge.anarch.diy:2222/acme/%s.git\n' "$repo" ;;
     esac
     ;;
+  "remote")
+    case "$repo" in
+      no-origin-*) ;;
+      *) printf 'origin\n' ;;
+    esac
+    ;;
   "add flake.lock"|"checkout -B agent/flake-update-demo"|"commit -m flake.lock: update "*|"fetch origin agent/flake-update-demo"|"update-ref -d refs/remotes/origin/agent/flake-update-demo"|"push --force-with-lease origin agent/flake-update-demo"|"checkout master"|"checkout -- flake.lock"|"restore --staged flake.lock"|"reset HEAD flake.lock")
     exit 0
     ;;

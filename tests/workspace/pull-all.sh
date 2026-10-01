@@ -9,7 +9,7 @@ export HOME="$TMP/home"
 export MOCK_LOG="$TMP/git.log"
 mkdir -p "$HOME/work/.git" "$HOME/work/group/nested" "$TMP/bin"
 
-for repo in clean dirty local unpushed switched pull-fail nohead group/nested/repo .profile .cache/ignored; do
+for repo in clean dirty local unpushed switched pull-fail nohead group/nested/repo .profile .cache/ignored no-origin; do
   mkdir -p "$HOME/work/$repo/.git"
   : > "$HOME/work/$repo/.git/HEAD"
 done
@@ -64,6 +64,9 @@ case "$command" in
   "rev-parse --show-toplevel")
     [[ -f "$repo_dir/.git/HEAD" ]] || exit 1
     printf '%s\n' "$repo_dir"
+    ;;
+  "remote")
+    [[ "$repo" == "no-origin" ]] || printf 'origin\n'
     ;;
   "symbolic-ref refs/remotes/origin/HEAD")
     if [[ "$repo" == nohead ]]; then
@@ -169,7 +172,14 @@ assert_log_not_contains() {
 
 # --- Default mode (no flags): pull current branch, no switching ---
 
-output=$("$ROOT/workspace/pull-all")
+status=0
+output=$("$ROOT/workspace/pull-all") || status=$?
+
+if [[ "$status" == 0 ]]; then
+  pass "default: exits 0 even with a host-provided checkout and other skips/errors present"
+else
+  fail "default: exits 0 even with a host-provided checkout and other skips/errors present" "actual exit status: $status"
+fi
 
 assert_output_contains "clean                     up to date [master]" \
   "default: reports an up-to-date default branch"
@@ -189,6 +199,8 @@ assert_output_contains "group/nested/repo         pulled     [master]" \
   "default: discovers and pulls a nested repository"
 assert_output_contains ".profile                  up to date [master]" \
   "default: discovers and pulls a dot-named repository"
+assert_output_contains "no-origin                 skipped    [host-provided: no origin]" \
+  "default: skips a host-provided checkout with no origin"
 assert_log_not_contains $'^ignored\t' \
   "default: does not recurse through a dot-named non-repo directory"
 
@@ -196,6 +208,8 @@ assert_log_not_contains $'^(local|unpushed|switched)\tcheckout' \
   "default: never checks out non-default branches"
 assert_log_not_contains $'^dirty\tpull$' \
   "default: never pulls dirty repos"
+assert_log_not_contains $'^no-origin\tpull$' \
+  "default: never pulls a host-provided checkout"
 # Sync mutates its input, so it reads registry checkouts only: it must never
 # enumerate worktrees, let alone pull one.
 assert_log_not_contains $'\tworktree' \
@@ -224,6 +238,8 @@ assert_output_contains "group/nested/repo         pulled     [master]" \
   "--switch: discovers and pulls a nested repository"
 assert_output_contains ".profile                  up to date [master]" \
   "--switch: discovers and pulls a dot-named repository"
+assert_output_contains "no-origin                 skipped    [host-provided: no origin]" \
+  "--switch: skips a host-provided checkout with no origin"
 
 assert_log_contains $'switched\tcheckout master' \
   "--switch: checks out the default branch before pulling"

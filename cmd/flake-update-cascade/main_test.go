@@ -123,3 +123,69 @@ func TestCollectReposFollowsTheGlobOrder(t *testing.T) {
 		t.Fatalf("collectRepos = %v, want %v", got, want)
 	}
 }
+
+// repoIsHostProvided must key on the remote named "origin", not on whether
+// any remote exists at all.
+func TestRepoIsHostProvided(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	dir := t.TempDir()
+	run := func(args ...string) {
+		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init", "-q")
+	if !repoIsHostProvided(dir) {
+		t.Error("a repo with no remotes at all must be host-provided")
+	}
+	run("remote", "add", "upstream", "https://example.invalid/acme/app.git")
+	if !repoIsHostProvided(dir) {
+		t.Error("a remote named something other than origin must still be host-provided")
+	}
+	run("remote", "add", "origin", "https://example.invalid/acme/app.git")
+	if repoIsHostProvided(dir) {
+		t.Error("an origin remote must not be host-provided")
+	}
+}
+
+// A repository with no origin remote is the hypervisor's injection contract
+// for a host-provided checkout (git init plus a push, never a clone): it
+// must be dropped before any default-branch or forge-name lookup, as a skip
+// rather than a preflight error.
+func TestPreflightSkipsHostProvidedRepo(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	work := t.TempDir()
+	repo := "app"
+	dir := filepath.Join(work, repo)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", dir, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "flake.lock"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c := &cascade{
+		workDir:      work,
+		repos:        []string{repo},
+		activePRFile: filepath.Join(work, "active-pr-branches"),
+		allowedFile:  filepath.Join(work, "allowed-external-remotes"),
+	}
+	c.preflight()
+
+	if got := c.status[repo]; got != skipNoOrigin {
+		t.Fatalf("status = %q, want %q", got, skipNoOrigin)
+	}
+	if len(c.errorRepos) != 0 {
+		t.Fatalf("errorRepos = %v, want none", c.errorRepos)
+	}
+	if _, planned := c.pins[repo]; planned {
+		t.Fatalf("pins[%q] is set, want a host-provided repo never reaching the lock plan", repo)
+	}
+}

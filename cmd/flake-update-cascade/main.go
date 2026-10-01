@@ -385,6 +385,10 @@ func (c *cascade) preflight() {
 			c.status[repo] = skipNoLock
 			continue
 		}
+		if repoIsHostProvided(dir) {
+			c.status[repo] = skipNoOrigin
+			continue
+		}
 		remoteURL := c.remote[repo]
 		if remoteURL == "" {
 			c.status[repo] = skipNoOrigin

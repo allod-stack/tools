@@ -75,6 +75,9 @@ case "$*" in
   "remote get-url origin")
     printf 'ssh://git@forge.anarch.diy:2222/acme/app.git\n'
     ;;
+  "remote")
+    printf 'origin\n'
+    ;;
   "rev-parse @{u}")
     printf 'origin/master\n'
     ;;
