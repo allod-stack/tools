@@ -31,7 +31,7 @@ func TestSkillBareListsNamesAndDescriptionsSorted(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code %d, stderr %q", code, errText)
 	}
-	want := "alpha: First alphabetically.\nzeta: Last alphabetically.\n"
+	want := "alpha  First alphabetically.\nzeta   Last alphabetically.\n"
 	if out != want {
 		t.Errorf("stdout %q, want %q", out, want)
 	}
@@ -106,7 +106,7 @@ func TestSkillFoldsBlockScalarDescription(t *testing.T) {
 	if code != 0 {
 		t.Fatal(code)
 	}
-	if out != "folded: First part second part.\n" {
+	if out != "folded  First part second part.\n" {
 		t.Errorf("stdout %q", out)
 	}
 }
@@ -116,7 +116,7 @@ func TestSkillNameFallsBackToDirectory(t *testing.T) {
 
 	out, _, code := runAllod(t, "skill", "--from", dir)
 
-	if code != 0 || out != "dirname: No name key.\n" {
+	if code != 0 || out != "dirname  No name key.\n" {
 		t.Errorf("code %d, stdout %q", code, out)
 	}
 }
@@ -132,7 +132,7 @@ func TestSkillSkipsSubdirectoryWithoutSkillFile(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code %d, stderr %q", code, errText)
 	}
-	if out != "real: Present.\n" {
+	if out != "real  Present.\n" {
 		t.Errorf("stdout %q", out)
 	}
 	if !strings.Contains(errText, "empty") || !strings.Contains(errText, "SKILL.md") {
@@ -172,7 +172,7 @@ func TestSkillResolvesRegistryId(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code %d, stderr %q", code, errText)
 	}
-	if out != "registered: Via registry id.\n" {
+	if out != "registered  Via registry id.\n" {
 		t.Errorf("stdout %q", out)
 	}
 }
@@ -190,7 +190,7 @@ func TestSkillDefaultsToAllodMemory(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code %d, stderr %q", code, errText)
 	}
-	if out != "defaulted: Default target.\n" {
+	if out != "defaulted  Default target.\n" {
 		t.Errorf("stdout %q", out)
 	}
 }
@@ -219,7 +219,7 @@ func TestSkillFromFlagAccumulatesAndSplits(t *testing.T) {
 	if code != 0 {
 		t.Fatal(code)
 	}
-	want := "one: From the first dir.\ntwo: From the second dir.\n"
+	want := "one  From the first dir.\ntwo  From the second dir.\n"
 	if out != want {
 		t.Errorf("stdout %q, want %q", out, want)
 	}
@@ -261,7 +261,7 @@ func TestSkillDefaultListsEveryMemoryMarkedCheckout(t *testing.T) {
 	if errText != "" {
 		t.Errorf("stderr %q, want silence", errText)
 	}
-	want := "private: From the private fork.\npublic: From the public repo.\n"
+	want := "private  From the private fork.\npublic   From the public repo.\n"
 	if out != want {
 		t.Errorf("stdout %q, want %q (sorted registry-id order)", out, want)
 	}
@@ -286,7 +286,7 @@ func TestSkillDefaultSkipsMissingMemoryCheckout(t *testing.T) {
 	if strings.Contains(errText, "agent-memory") {
 		t.Errorf("stderr %q, want the missing checkout skipped silently", errText)
 	}
-	if out != "public: Present.\n" {
+	if out != "public  Present.\n" {
 		t.Errorf("stdout %q", out)
 	}
 }
@@ -307,7 +307,7 @@ func TestSkillDefaultResolvesThroughRegistryNotRelativeDir(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code %d, stderr %q", code, errText)
 	}
-	if out != "registered: Via registry.\n" {
+	if out != "registered  Via registry.\n" {
 		t.Errorf("stdout %q, want the registry checkout's skills", out)
 	}
 }
@@ -328,7 +328,7 @@ func TestSkillDefaultFallsBackWithoutMemoryMarkedEntries(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code %d stderr %q", code, errText)
 	}
-	if out != "public: Default.\n" {
+	if out != "public  Default.\n" {
 		t.Errorf("stdout %q", out)
 	}
 }
@@ -360,7 +360,7 @@ func TestSkillDuplicateNameListedOnceAndFirstSourceWins(t *testing.T) {
 	if code != 0 {
 		t.Fatal(code)
 	}
-	if out != "dup: Printed from the first source.\n" {
+	if out != "dup  Printed from the first source.\n" {
 		t.Errorf("stdout %q, want the duplicate listed once from the first source", out)
 	}
 
@@ -387,5 +387,59 @@ func TestSkillOptionHandling(t *testing.T) {
 	}
 	if out, _, code := runAllod(t, "skill", "--help"); code != 0 || !strings.Contains(out, "usage: allod skill") {
 		t.Errorf("skill --help: code %d, stdout %q", code, out)
+	}
+}
+
+func TestSkillSummaryFieldPrintsVerbatim(t *testing.T) {
+	dir := writeSkill(t, t.TempDir(), "short", "name: short\ndescription: A long description the list must not use when a summary exists.\nsummary: The one line for humans.\n")
+
+	out, _, code := runAllod(t, "skill", "--from", dir)
+
+	if code != 0 {
+		t.Fatal(code)
+	}
+	if out != "short  The one line for humans.\n" {
+		t.Errorf("stdout %q", out)
+	}
+}
+
+func TestSkillNameOverLimitRefuses(t *testing.T) {
+	dir := writeSkill(t, t.TempDir(), "too-long-name", "name: a-name-of-eighteen\n")
+
+	_, errText, code := runAllod(t, "skill", "--from", dir)
+
+	if code != 1 {
+		t.Errorf("exit code %d, want 1", code)
+	}
+	if !strings.Contains(errText, "SKILL.md") || !strings.Contains(errText, "16") {
+		t.Errorf("stderr %q, want the file and the name limit named", errText)
+	}
+}
+
+func TestSkillSummaryOverLimitRefuses(t *testing.T) {
+	long := strings.Repeat("word ", 15)
+	dir := writeSkill(t, t.TempDir(), "fine", "name: fine\nsummary: "+long+"\n")
+
+	_, errText, code := runAllod(t, "skill", "--from", dir)
+
+	if code != 1 {
+		t.Errorf("exit code %d, want 1", code)
+	}
+	if !strings.Contains(errText, "summary exceeds 70") {
+		t.Errorf("stderr %q, want the summary limit named", errText)
+	}
+}
+
+func TestSkillListAlignsToLongestName(t *testing.T) {
+	dir := writeSkill(t, t.TempDir(), "tiny", "name: tiny\ndescription: Small.\n")
+	writeSkill(t, dir, "longer-name", "name: longer-name\ndescription: Bigger.\n")
+
+	out, _, code := runAllod(t, "skill", "--from", dir)
+
+	if code != 0 {
+		t.Fatal(code)
+	}
+	if out != "longer-name  Bigger.\ntiny         Small.\n" {
+		t.Errorf("stdout %q", out)
 	}
 }

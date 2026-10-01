@@ -37,9 +37,9 @@ func skillMain(args []string) {
 
 const skillUsageText = `usage: allod skill [<name> ...] [--from <target>]...
 
-With no names, list the available skills: one line each with the skill's name
-and a brief description. With one or more names, print each skill's SKILL.md
-in full.
+With no names, list the available skills: one aligned line each with the
+skill's name and its summary. With one or more names, print each skill's
+SKILL.md in full.
 
 A --from target is a registry id such as allod/memory (its skills/ directory
 is used) or a path to a skills directory; repeat or comma-separate targets to
@@ -54,23 +54,41 @@ resolves to the first source in that order.
 func skillList(targets []string) {
 	dirs := resolveSkillDirs(targets)
 	seen := map[string]bool{}
-	printed := 0
+	var listed []skillEntry
 	for _, dir := range dirs {
 		for _, skill := range readSkills(dir) {
 			if seen[skill.name] {
 				continue
 			}
 			seen[skill.name] = true
-			fmt.Fprintf(stdout, "%s: %s\n", skill.name, briefDescription(skill.description))
-			printed++
+			listed = append(listed, skill)
 		}
 	}
-	if printed == 0 {
+	if len(listed) == 0 {
 		if len(dirs) == 0 {
 			die(1, "no skills found")
 		}
 		die(1, "no skills found in %s", strings.Join(dirs, ", "))
 	}
+	width := 0
+	for _, skill := range listed {
+		if len(skill.name) > width {
+			width = len(skill.name)
+		}
+	}
+	for _, skill := range listed {
+		fmt.Fprintf(stdout, "%-*s  %s\n", width, skill.name, listSummary(skill))
+	}
+}
+
+// The frontmatter summary if there is one, else the description truncated to
+// the summary limit: skills written before the summary field still list
+// within the column.
+func listSummary(skill skillEntry) string {
+	if skill.summary != "" {
+		return skill.summary
+	}
+	return briefDescription(skill.description)
 }
 
 // Every name resolves before anything prints, so one bad name fails the
@@ -164,9 +182,17 @@ func defaultSkillDirs() []string {
 
 type skillEntry struct {
 	name        string
+	summary     string
 	description string
 	dirName     string
 }
+
+// Limits the owner set so one long field cannot dominate the list column:
+// a frontmatter field past its limit refuses the listing, naming the file.
+const (
+	nameLimit    = 16
+	summaryLimit = 70
+)
 
 // A subdirectory without a readable SKILL.md is skipped with a stderr note:
 // a stray file must not hide the skills around it.
@@ -180,10 +206,17 @@ func readSkills(dir string) []skillEntry {
 		if !entry.IsDir() {
 			continue
 		}
-		skill, ok := parseSkillFile(filepath.Join(dir, entry.Name(), "SKILL.md"), entry.Name())
+		path := filepath.Join(dir, entry.Name(), "SKILL.md")
+		skill, ok := parseSkillFile(path, entry.Name())
 		if !ok {
-			fmt.Fprintf(stderr, "allod: %s has no readable SKILL.md; skipped\n", filepath.Join(dir, entry.Name()))
+			fmt.Fprintf(stderr, "allod: %s has no readable SKILL.md; skipped\n", path)
 			continue
+		}
+		if len(skill.name) > nameLimit {
+			die(1, "%s: skill name %q exceeds %d characters; rename the skill", path, skill.name, nameLimit)
+		}
+		if len(skill.summary) > summaryLimit {
+			die(1, "%s: summary exceeds %d characters; shorten it", path, summaryLimit)
 		}
 		skills = append(skills, skill)
 	}
@@ -191,16 +224,12 @@ func readSkills(dir string) []skillEntry {
 	return skills
 }
 
-// briefLimit caps a listed description; the full text is one `allod skill
-// <name>` away, so the list stays skimmable.
-const briefLimit = 100 // the full text is one `allod skill <name>` away; the list stays skimmable
-
 func briefDescription(text string) string {
-	if len(text) <= briefLimit {
+	if len(text) <= summaryLimit {
 		return text
 	}
-	cut := text[:briefLimit]
-	if i := strings.LastIndexByte(cut, ' '); i > briefLimit/2 {
+	cut := text[:summaryLimit]
+	if i := strings.LastIndexByte(cut, ' '); i > summaryLimit/2 {
 		cut = cut[:i]
 	}
 	return cut + "..."
@@ -224,6 +253,8 @@ func parseSkillFile(path, fallbackName string) (skill skillEntry, ok bool) {
 	if ok {
 		skill.description = description
 	}
+	summary, lines, _ := frontmatterValue(lines, "summary")
+	skill.summary = summary
 	if name, _, ok := frontmatterValue(lines, "name"); ok {
 		skill.name = name
 	}
