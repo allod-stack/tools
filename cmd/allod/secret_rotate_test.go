@@ -126,29 +126,12 @@ func TestValidateGroupMetadataRefusals(t *testing.T) {
 		{"no credentials", func(g *registryGroup) { g.Credentials = nil }, "credentials is empty"},
 		{"no targets", func(g *registryGroup) { g.Credentials[0].Targets = nil }, "has no targets"},
 		{"bad target kind", func(g *registryGroup) { g.Credentials[0].Targets[0].Kind = "laptop" }, "unsupported kind 'laptop'"},
-		{"local_auth_refresh bad contract", func(g *registryGroup) {
-			g.LocalAuthRefresh = []localAuthRefreshEntry{{Contract: "run-anything", System: "dev-a", LocalUsername: "u", SourceCredential: "cred"}}
-		}, "unsupported contract 'run-anything'"},
-		{"local_auth_refresh unmatched source", func(g *registryGroup) {
-			g.LocalAuthRefresh = []localAuthRefreshEntry{{Contract: "nixos-netrc-from-root-git-credentials", System: "dev-a", LocalUsername: "u", SourceCredential: "nope"}}
-		}, "does not name exactly one credential-store URL target"},
-		{"local_auth_refresh source is not a credential-store template", func(g *registryGroup) {
-			g.Credentials[0].Value = &credentialValue{Template: "{secret}"}
-			g.Credentials[0].Targets[0].DeployedPath = "/root/.git-credentials"
-			g.LocalAuthRefresh = []localAuthRefreshEntry{{Contract: "nixos-netrc-from-root-git-credentials", System: "dev-a", LocalUsername: "u", SourceCredential: "cred"}}
-		}, "does not name exactly one credential-store URL target"},
-		{"local_auth_refresh template source passes", func(g *registryGroup) {
-			g.Credentials[0].Value = &credentialValue{Template: "https://fixture-user:{secret}@example.test"}
-			g.Credentials[0].Targets[0].DeployedPath = "/root/.git-credentials"
-			g.LocalAuthRefresh = []localAuthRefreshEntry{{Contract: "nixos-netrc-from-root-git-credentials", System: "dev-a", LocalUsername: "u", SourceCredential: "cred"}}
-		}, ""},
 	}
-	grammar := compileCredentialStoreURLGrammar(t, loadCredentialStoreURLTestdata(t))
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			group := validRotateGroup()
 			tc.mutate(&group)
-			code, message := rotateDies(t, func() { validateGroupMetadata("g", group, grammar) })
+			code, message := rotateDies(t, func() { validateGroupMetadata("g", group) })
 			if tc.wantErr == "" {
 				if code != 0 {
 					t.Fatalf("valid group refused: %s", message)
@@ -304,36 +287,6 @@ func pathWithoutRclone(t *testing.T) string {
 	return dir
 }
 
-// installFakeRefreshLocalAuth puts a real, minimal 'refresh-local-auth' on
-// PATH ahead of whatever is already there, so a group carrying a
-// local_auth_refresh entry passes rotate's PATH gate.
-func installFakeRefreshLocalAuth(t *testing.T) {
-	t.Helper()
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "refresh-local-auth"), []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-}
-
-// pathWithoutRefreshLocalAuth builds a PATH that resolves 'git' (rotate's
-// own real subprocess for the landing) but can never resolve
-// 'refresh-local-auth', regardless of what the ambient environment happens
-// to have installed, the way pathWithoutRclone builds one that can never
-// resolve 'rclone'.
-func pathWithoutRefreshLocalAuth(t *testing.T) string {
-	t.Helper()
-	git, err := exec.LookPath("git")
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir := t.TempDir()
-	if err := os.Symlink(git, filepath.Join(dir, "git")); err != nil {
-		t.Fatal(err)
-	}
-	return dir
-}
-
 // --- Group resolution and gate refusals ---
 
 func TestSecretRotateGroupSelectionRefusals(t *testing.T) {
@@ -362,7 +315,7 @@ func TestSecretRotateGroupSelectionRefusals(t *testing.T) {
 			rf.addGroup(t, "mixed.rotate", forgejoGroup("mixed.rotate"),
 				rotateGroupCredential{name: "mixed-encoded", system: "fixture-host", kind: "nixos-host", deployedPath: "/root/.config/rclone/rclone.conf", verify: "allod site check",
 					value: &credentialValue{Template: fixtureRcloneTemplate, Encode: "rclone-obscure"}},
-				rotateGroupCredential{name: "mixed-plain", system: "fixture-host", kind: "nixos-host", deployedPath: "/root/.git-credentials", verify: "sudo env HOME=/root GIT_TERMINAL_PROMPT=0 git ls-remote https://example.test/fixture/repo.git HEAD",
+				rotateGroupCredential{name: "mixed-plain", system: "fixture-host", kind: "nixos-host", deployedPath: "/run/credentials/fixture-url", verify: "forge token verify < /run/credentials/fixture-url",
 					value: &credentialValue{Template: "https://fixture-user:{secret}@example.test"}})
 		}, "mixes value encodings (none, rclone-obscure)"},
 		{"missing verify", "no-verify-cred", func(t *testing.T, rf *rotateFixture) {
@@ -487,8 +440,8 @@ func TestSecretRotateRendersEveryGroupMemberFromOneValue(t *testing.T) {
 	rf := newRotateFixture(t)
 	rf.addGroup(t, "shared.rotate", forgejoGroup("shared.rotate"),
 		rotateGroupCredential{
-			name: "cred-a", system: "fixture-host", kind: "nixos-host", deployedPath: "/root/.git-credentials",
-			verify: "sudo env HOME=/root GIT_TERMINAL_PROMPT=0 git ls-remote https://example.test/fixture/repo.git HEAD",
+			name: "cred-a", system: "fixture-host", kind: "nixos-host", deployedPath: "/run/credentials/fixture-url",
+			verify: "forge token verify < /run/credentials/fixture-url",
 			value:  &credentialValue{Template: "https://fixture-user:{secret}@example.test"},
 		},
 		rotateGroupCredential{
@@ -565,13 +518,13 @@ func TestSecretRotateDryRunPrintsStepsWithoutWriting(t *testing.T) {
 	rf := newRotateFixture(t)
 	rf.addGroup(t, "shared.rotate", forgejoGroup("shared.rotate"),
 		rotateGroupCredential{
-			name: "cred-a", system: "fixture-host", kind: "nixos-host", deployedPath: "/root/.git-credentials",
-			verify: "sudo env HOME=/root GIT_TERMINAL_PROMPT=0 git ls-remote https://example.test/fixture/repo.git HEAD",
+			name: "cred-a", system: "fixture-host", kind: "nixos-host", deployedPath: "/run/credentials/fixture-url",
+			verify: "forge token verify < /run/credentials/fixture-url",
 			value:  &credentialValue{Template: "https://fixture-user:{secret}@example.test"},
 		},
 		rotateGroupCredential{
-			name: "cred-b", system: "dev-a", kind: "dev-vm", deployedPath: "/root/.git-credentials",
-			verify: "sudo env HOME=/root GIT_TERMINAL_PROMPT=0 git ls-remote https://example.test/fixture/repo.git HEAD",
+			name: "cred-b", system: "dev-a", kind: "dev-vm", deployedPath: "/run/credentials/fixture-url",
+			verify: "forge token verify < /run/credentials/fixture-url",
 			value:  &credentialValue{Template: "https://fixture-user:{secret}@example.test"},
 		})
 	before := rf.head(t)
@@ -611,7 +564,7 @@ func TestSecretRotateDryRunPrintsStepsWithoutWriting(t *testing.T) {
 		"nix flake update secrets",
 		"sudo nixos-rebuild switch --flake ~/work/allod/deploy#fixture-host",
 		"rebuild-vm dev-a",
-		"GIT_TERMINAL_PROMPT=0 git ls-remote https://example.test/fixture/repo.git HEAD",
+		"forge token verify < /run/credentials/fixture-url",
 		"Revocation gate",
 	} {
 		if !strings.Contains(errText, want) {
@@ -637,8 +590,8 @@ func TestSecretRotateResolvesDeployCheckoutFromTheRegistry(t *testing.T) {
 	rf := newRotateFixture(t)
 	rf.addGroup(t, "shared.rotate", forgejoGroup("shared.rotate"),
 		rotateGroupCredential{
-			name: "cred-a", system: "fixture-host", kind: "nixos-host", deployedPath: "/root/.git-credentials",
-			verify: "sudo env HOME=/root GIT_TERMINAL_PROMPT=0 git ls-remote https://example.test/fixture/repo.git HEAD",
+			name: "cred-a", system: "fixture-host", kind: "nixos-host", deployedPath: "/run/credentials/fixture-url",
+			verify: "forge token verify < /run/credentials/fixture-url",
 			value:  &credentialValue{Template: "https://fixture-user:{secret}@example.test"},
 		})
 
@@ -687,11 +640,9 @@ func TestSecretRotateDryRunStillRefusesADirtyTree(t *testing.T) {
 	}
 }
 
-// --- Printed steps: value shape, service wording, refresh-local-auth ---
+// --- Printed steps: value shape, service wording, rotation strategy ---
 
-func TestSecretRotatePrintedStepsVaryByServiceAndLocalAuthRefresh(t *testing.T) {
-	installFakeRclone(t)
-	installFakeRefreshLocalAuth(t)
+func TestSecretRotatePrintedStepsVaryByServiceAndStrategy(t *testing.T) {
 	rf := newRotateFixture(t)
 	rf.addGroup(t, "raw.rotate", forgejoGroup("raw.rotate"),
 		rotateGroupCredential{name: "raw-cred", system: "dev-a", kind: "dev-vm", deployedPath: "/home/fixture-user/token", verify: "forge token verify < /home/fixture-user/token"})
@@ -700,15 +651,12 @@ func TestSecretRotatePrintedStepsVaryByServiceAndLocalAuthRefresh(t *testing.T) 
 	rf.addGroup(t, "none.rotate", noneGroup,
 		rotateGroupCredential{name: "none-cred", system: "dev-b", kind: "dev-vm", deployedPath: "/home/fixture-user/other-token", verify: "allod site check",
 			value: &credentialValue{Template: fixtureRcloneTemplate, Encode: "rclone-obscure"}})
-	refreshGroup := forgejoGroup("refresh.rotate")
-	refreshGroup.RotationStrategy = "in-place"
-	refreshGroup.LocalAuthRefresh = []localAuthRefreshEntry{{
-		Contract: "nixos-netrc-from-root-git-credentials", System: "fixture-host", LocalUsername: "fixture-user", SourceCredential: "refresh-cred",
-	}}
-	rf.addGroup(t, "refresh.rotate", refreshGroup, rotateGroupCredential{
-		name: "refresh-cred", system: "fixture-host", kind: "nixos-host", deployedPath: "/root/.git-credentials",
-		verify: "sudo env HOME=/root GIT_TERMINAL_PROMPT=0 git ls-remote https://example.test/fixture/repo.git HEAD",
-		value:  &credentialValue{Template: "https://fixture-user:{secret}@example.test"},
+	inPlaceGroup := forgejoGroup("in-place.rotate")
+	inPlaceGroup.RotationStrategy = "in-place"
+	rf.addGroup(t, "in-place.rotate", inPlaceGroup, rotateGroupCredential{
+		name: "in-place-cred", system: "fixture-host", kind: "nixos-host", deployedPath: "/run/credentials/fixture-token",
+		verify: "forge token verify < /run/credentials/fixture-token",
+		value:  &credentialValue{Template: "Authorization: Bearer {secret}"},
 	})
 
 	_, forgejoOut, code := rf.run(t, "secret", "rotate", "raw-cred", "--dry-run")
@@ -723,9 +671,6 @@ func TestSecretRotatePrintedStepsVaryByServiceAndLocalAuthRefresh(t *testing.T) 
 	}
 	if !strings.Contains(forgejoOut, "Forgejo UI token 'fixture-token' while logged in as 'fixture-user'") {
 		t.Errorf("forgejo revocation wording missing:\n%s", forgejoOut)
-	}
-	if strings.Contains(forgejoOut, "refresh-local-auth") {
-		t.Errorf("a group with no local_auth_refresh printed the refresh step:\n%s", forgejoOut)
 	}
 
 	_, noneOut, code := rf.run(t, "secret", "rotate", "none-cred", "--dry-run")
@@ -747,108 +692,18 @@ func TestSecretRotatePrintedStepsVaryByServiceAndLocalAuthRefresh(t *testing.T) 
 		t.Errorf("generic revocation wording missing:\n%s", noneOut)
 	}
 
-	_, refreshOut, code := rf.run(t, "secret", "rotate", "refresh-cred", "--dry-run")
+	_, inPlaceOut, code := rf.run(t, "secret", "rotate", "in-place-cred", "--dry-run")
 	if code != 0 {
-		t.Fatalf("refresh.rotate dry run: exit %d\n%s", code, refreshOut)
+		t.Fatalf("in-place.rotate dry run: exit %d\n%s", code, inPlaceOut)
 	}
-	if !strings.Contains(refreshOut, "  - secrets/refresh-cred.age (refresh-cred, template)") {
-		t.Errorf("a template with no encoding did not print as template:\n%s", refreshOut)
+	if !strings.Contains(inPlaceOut, "  - secrets/in-place-cred.age (in-place-cred, template)") {
+		t.Errorf("a template with no encoding did not print as template:\n%s", inPlaceOut)
 	}
-	if !strings.Contains(refreshOut, "refresh-local-auth --group refresh.rotate") {
-		t.Errorf("refresh-local-auth step missing:\n%s", refreshOut)
+	if !strings.Contains(inPlaceOut, "No old-token revocation step is printed for this group. Provider rotation is") {
+		t.Errorf("in-place no-revocation wording missing:\n%s", inPlaceOut)
 	}
-	// No ciphertext was rotated by this dry run, so the step must describe
-	// what a live run would print, never read as something to do now.
-	if !strings.Contains(refreshOut, "After the real run lands the rotated secret, refresh declared local auth") {
-		t.Errorf("dry run did not phrase the refresh step as what a live run would print:\n%s", refreshOut)
-	}
-	if strings.Contains(refreshOut, "Refresh declared local auth from the rotated encrypted secret before") {
-		t.Errorf("dry run printed the refresh step as an instruction to run now:\n%s", refreshOut)
-	}
-	if !strings.Contains(refreshOut, "No old-token revocation step is printed for this group. Provider rotation is") {
-		t.Errorf("in-place no-revocation wording missing:\n%s", refreshOut)
-	}
-	if strings.Contains(refreshOut, "Revocation gate\nAfter every rebuild") {
-		t.Errorf("an in-place group printed the ordinary revocation gate:\n%s", refreshOut)
-	}
-
-	// A live run, by contrast, has actually rotated the secret by the time
-	// it prints, so the same step is a real instruction to run now.
-	rf.pipe("tok-fixture\n")
-	_, liveErrText, code := rf.run(t, "secret", "rotate", "refresh-cred")
-	if code != 0 {
-		t.Fatalf("refresh.rotate live run: exit %d, stderr: %s", code, liveErrText)
-	}
-	if !strings.Contains(liveErrText, "Refresh declared local auth from the rotated encrypted secret before any git push, flake-lock update, or rebuild fetch:\n   refresh-local-auth --group refresh.rotate") {
-		t.Errorf("a live run did not print the refresh step as an instruction:\n%s", liveErrText)
-	}
-	if strings.Contains(liveErrText, "After the real run lands") {
-		t.Errorf("a live run used the dry-run phrasing:\n%s", liveErrText)
-	}
-}
-
-// TestSecretRotateRefusesALocalAuthRefreshGroupWithoutRefreshLocalAuthOnPATH
-// pins the PATH gate: a group with a local_auth_refresh entry is refused,
-// before the value is ever read, when 'refresh-local-auth'
-// cannot be found on PATH — on a dry run and on a live run alike, since a
-// live run would otherwise land a rotation the operator could not finish.
-func TestSecretRotateRefusesALocalAuthRefreshGroupWithoutRefreshLocalAuthOnPATH(t *testing.T) {
-	rf := newRotateFixture(t)
-	group := forgejoGroup("refresh.rotate")
-	group.LocalAuthRefresh = []localAuthRefreshEntry{{
-		Contract: "nixos-netrc-from-root-git-credentials", System: "fixture-host", LocalUsername: "fixture-user", SourceCredential: "refresh-cred",
-	}}
-	rf.addGroup(t, "refresh.rotate", group, rotateGroupCredential{
-		name: "refresh-cred", system: "fixture-host", kind: "nixos-host", deployedPath: "/root/.git-credentials",
-		verify: "sudo env HOME=/root GIT_TERMINAL_PROMPT=0 git ls-remote https://example.test/fixture/repo.git HEAD",
-		value:  &credentialValue{Template: "https://fixture-user:{secret}@example.test"},
-	})
-	beforeHead := rf.head(t)
-	t.Setenv("PATH", pathWithoutRefreshLocalAuth(t))
-
-	for _, args := range [][]string{
-		{"secret", "rotate", "refresh-cred", "--dry-run"},
-		{"secret", "rotate", "refresh-cred"},
-	} {
-		_, errText, code := rf.run(t, args...)
-		if code == 0 {
-			t.Fatalf("%v: exit 0, want a refusal", args)
-		}
-		if !strings.Contains(errText, "rotation registry group 'refresh.rotate' needs a local auth refresh after rotation") {
-			t.Errorf("%v: stderr = %q", args, errText)
-		}
-		if !strings.Contains(errText, "'refresh-local-auth' was not found on PATH") {
-			t.Errorf("%v: stderr = %q", args, errText)
-		}
-		if !strings.Contains(errText, "this host's nexus pin predates allod/nexus#52") {
-			t.Errorf("%v: stderr = %q", args, errText)
-		}
-		if rf.encryptCalls != 0 || rf.decryptCalls != 0 {
-			t.Errorf("%v: encrypt=%d decrypt=%d, want 0 and 0 — refused before any value was read", args, rf.encryptCalls, rf.decryptCalls)
-		}
-	}
-	if got := rf.head(t); got != beforeHead {
-		t.Error("a commit was made despite the refusal")
-	}
-	if got := rf.status(t); got != "" {
-		t.Errorf("tree is not clean after a refusal:\n%s", got)
-	}
-}
-
-// TestSecretRotateWithoutLocalAuthRefreshIgnoresARefreshLocalAuthGate pins
-// that the new PATH gate is scoped to groups that actually carry a
-// local_auth_refresh entry: an ordinary group still rotates on the exact
-// PATH the previous test shows refuses one that does carry one.
-func TestSecretRotateWithoutLocalAuthRefreshIgnoresARefreshLocalAuthGate(t *testing.T) {
-	rf := newRotateFixture(t)
-	rf.addGroup(t, "plain.rotate", forgejoGroup("plain.rotate"),
-		rotateGroupCredential{name: "plain-cred", system: "dev-a", kind: "dev-vm", deployedPath: "/home/fixture-user/token", verify: "forge token verify < /home/fixture-user/token"})
-	rf.pipe("tok-fixture\n")
-	t.Setenv("PATH", pathWithoutRefreshLocalAuth(t))
-
-	_, errText, code := rf.run(t, "secret", "rotate", "plain-cred")
-	if code != 0 {
-		t.Fatalf("exit %d, stderr: %s", code, errText)
+	if strings.Contains(inPlaceOut, "Revocation gate\nAfter every rebuild") {
+		t.Errorf("an in-place group printed the ordinary revocation gate:\n%s", inPlaceOut)
 	}
 }
 
@@ -917,9 +772,9 @@ func TestSecretRotatePrintsVerificationThroughTheHostNameSeam(t *testing.T) {
 func TestSecretRotateRestoresAllCiphertextsWhenChecksFail(t *testing.T) {
 	rf := newRotateFixture(t)
 	rf.addGroup(t, "shared.rotate", forgejoGroup("shared.rotate"),
-		rotateGroupCredential{name: "cred-a", system: "fixture-host", kind: "nixos-host", deployedPath: "/root/.git-credentials", verify: "allod site check",
+		rotateGroupCredential{name: "cred-a", system: "fixture-host", kind: "nixos-host", deployedPath: "/run/credentials/fixture-url", verify: "allod site check",
 			value: &credentialValue{Template: "https://fixture-user:{secret}@example.test"}},
-		rotateGroupCredential{name: "cred-b", system: "dev-a", kind: "dev-vm", deployedPath: "/root/.git-credentials", verify: "allod site check",
+		rotateGroupCredential{name: "cred-b", system: "dev-a", kind: "dev-vm", deployedPath: "/run/credentials/fixture-url", verify: "allod site check",
 			value: &credentialValue{Template: "https://fixture-user:{secret}@example.test"}})
 	beforeA, beforeB := rf.file(t, "secrets/cred-a.age"), rf.file(t, "secrets/cred-b.age")
 	before := rf.head(t)
@@ -1003,9 +858,9 @@ func TestSecretRotateRefusesWhenTheBranchChangedDuringTheFlakeCheck(t *testing.T
 func TestSecretRotateRestoresCiphertextsWhenCommitFails(t *testing.T) {
 	rf := newRotateFixture(t)
 	rf.addGroup(t, "shared.rotate", forgejoGroup("shared.rotate"),
-		rotateGroupCredential{name: "cred-a", system: "fixture-host", kind: "nixos-host", deployedPath: "/root/.git-credentials", verify: "allod site check",
+		rotateGroupCredential{name: "cred-a", system: "fixture-host", kind: "nixos-host", deployedPath: "/run/credentials/fixture-url", verify: "allod site check",
 			value: &credentialValue{Template: "https://fixture-user:{secret}@example.test"}},
-		rotateGroupCredential{name: "cred-b", system: "dev-a", kind: "dev-vm", deployedPath: "/root/.git-credentials", verify: "allod site check",
+		rotateGroupCredential{name: "cred-b", system: "dev-a", kind: "dev-vm", deployedPath: "/run/credentials/fixture-url", verify: "allod site check",
 			value: &credentialValue{Template: "https://fixture-user:{secret}@example.test"}})
 	beforeA, beforeB := rf.file(t, "secrets/cred-a.age"), rf.file(t, "secrets/cred-b.age")
 	installFailingPreCommit(t, rf.secretFixture)

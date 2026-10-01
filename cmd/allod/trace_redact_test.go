@@ -17,7 +17,7 @@ func TestTraceRedact(t *testing.T) {
 		{"aws", "access key AKIAABCDEFGHIJKLMNOP in the log"},
 		{"age", "identity AGE-SECRET-KEY-1QYQSZQGPQYQSZQGPQYQSZQGPQYQSZQGPQYQSZQGPQYQSZQGPQYQSZQGPQY in the log"},
 		{"pem", "-----BEGIN RSA PRIVATE KEY-----\nZmFrZWtleWRhdGE=\n-----END RSA PRIVATE KEY-----"},
-		{"netrc", "machine example.com login agent password hunter2verylong"},
+		{"password-field", "service example.com login agent password hunter2verylong"},
 		{"authorization", "Authorization: Basic dXNlcjpwYXNz"},
 		{"url-credential", "fetching https://user:hunter2@example.com/path"},
 	}

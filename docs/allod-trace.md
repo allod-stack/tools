@@ -75,7 +75,7 @@ Redaction runs once over the whole rendered trace, before it is written, replaci
 | `aws` | `AKIA` followed by 16 uppercase-alphanumeric characters |
 | `age` | `AGE-SECRET-KEY-1` followed by base32 |
 | `pem` | `-----BEGIN … PRIVATE KEY-----` through the matching `-----END … PRIVATE KEY-----` line |
-| `netrc` | `password ` followed by a non-space run, or `password=…` |
+| `password-field` | `password ` followed by a non-space run, or `password=…` |
 | `authorization` | An `Authorization:` header and the rest of its line |
 | `url-credential` | `://user:pass@` inside a URL |
 

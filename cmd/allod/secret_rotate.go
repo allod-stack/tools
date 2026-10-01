@@ -5,14 +5,9 @@ package main
 // 'allod secret rotate' replaces a credential's value on the host: the same
 // landing 'create' and 'rekey' do, applied to the third case — a value that
 // already has a ciphertext and whose recipients are not changing. It ports
-// the group-rotation half of nexus's rotate-token (about 1450 lines of
-// bash): group resolution, dry run, and the printed deploy, verify, and
-// revocation steps. Out of the port: rotate-token's
-// --group/--forgejo-token/--allow-single-secret selectors (a credential name
-// is the only selector here, and it always names its whole registry group,
-// the way '--group' rotates a shared token today), and refresh-local-auth,
-// now its own host script of that name (it installs root-owned files under
-// sudo, a privilege this command does not hold; see printDeploySteps).
+// the group-rotation half of nexus's rotate-token: group resolution, dry run,
+// and the printed deploy, verify, and revocation steps. A credential name is
+// the only selector, and it always names its whole registry group.
 //
 // What this does not port is rotate-token's per-format switch. A
 // credential's non-secret text is declared in the registry as a template
@@ -32,19 +27,15 @@ package main
 //
 // A dry run reads and decrypts nothing: it runs every gate this command
 // applies to the group (branch, clean tree, active state, ciphertext
-// present, recipients, registry shape, declared value, declared
-// verification, and — for a group with a local_auth_refresh entry —
-// 'refresh-local-auth' resolving on PATH) but not the repository's own nix
-// flake check, which only a real landing runs.
+// present, recipients, registry shape, declared value, and declared
+// verification) but not the repository's own nix flake check, which only a
+// real landing runs.
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 )
@@ -70,15 +61,7 @@ repository's own checks, which run only on a real landing; it prints the
 group, its targets, the deploy and verification steps, and the revocation
 gate, describing what a live run would do rather than instructing it, and
 reads no value, decrypts nothing, and writes nothing. rotation_state does
-not change. A group with a local_auth_refresh entry gets one more printed
-step naming 'refresh-local-auth --group <alias>' — an instruction on a live
-run, phrased as what a live run would print on a dry run — because that
-stays a separate host script: it installs root-owned files under sudo, a
-privilege this command does not hold. Such a group also requires
-'refresh-local-auth' to resolve on PATH, checked before the value is read
-and on a dry run too, so a host whose nexus pin predates allod/nexus#52 is
-refused before a live run lands a rotation the operator could not finish.
-The branch is re-verified immediately before writing and again
+not change. The branch is re-verified immediately before writing and again
 immediately before committing, refusing (with every ciphertext already
 written restored) if the checkout moved in between.
 
@@ -191,109 +174,12 @@ var (
 	validRegistryTargetKind = map[string]bool{"nixos-host": true, "dev-vm": true, "privacy-vm": true, "service-vm": true}
 )
 
-// credentialStoreURLGrammar is the compiled form of the secrets flake's
-// 'lib.credentialStoreUrl' export: the one template shape the local auth
-// refresh contract can consume (a single netrc-consumable
-// 'https://<user>:{secret}@<host>' line) and the blank-line class a
-// template's padding lines are measured against. The grammar is data read
-// from the secrets flake, not a hand-written copy: this repo's own
-// 'credential-store-url-parity' flake check pins the testdata copy under
-// cmd/allod/testdata to the file this grammar is compiled from.
-type credentialStoreURLGrammar struct {
-	line      *regexp.Regexp
-	blankLine *regexp.Regexp
-}
-
-// credentialStoreURLGrammarJSON is the shape 'lib.credentialStoreUrl'
-// renders. Only the two regexes are read here; the vectors are the shared
-// witness table each consumer's own test suite reads, not something this
-// loader consumes.
-type credentialStoreURLGrammarJSON struct {
-	Line      string `json:"line"`
-	BlankLine string `json:"blank_line"`
-}
-
-// secretEvalCredentialStoreURL is the test seam nixEvalCredentialStoreURL
-// implements, matching the secretEvalEncodings pattern in secret.go.
-var secretEvalCredentialStoreURL = nixEvalCredentialStoreURL
-
-// nixEvalCredentialStoreURL evaluates and compiles the secrets checkout's
-// 'lib.credentialStoreUrl'. A checkout that predates allod/secrets#29 does
-// not export it, and nix eval's own "does not provide attribute" refusal
-// names the attribute, so that case is turned into a message this
-// command's caller does not have to reverse-engineer from nix's wording.
-func nixEvalCredentialStoreURL(checkout string) (credentialStoreURLGrammar, error) {
-	data, err := nixEvalJSON(checkout, "lib.credentialStoreUrl")
-	return decodeCredentialStoreURLGrammar(data, err)
-}
-
-// decodeCredentialStoreURLGrammar is the pure half of
-// nixEvalCredentialStoreURL: given the eval's raw output and error, it
-// decides what grammar (or refusal) they mean. Kept apart from the eval
-// call so a test can drive every branch, including the exact nix wording
-// for a checkout that predates allod/secrets#29, without invoking nix.
-func decodeCredentialStoreURLGrammar(data []byte, err error) (credentialStoreURLGrammar, error) {
-	if err != nil {
-		// Matched on both substrings together, not either alone: "does not
-		// provide attribute" alone fires on any missing attribute, and
-		// "lib.credentialStoreUrl" alone could appear in an unrelated
-		// message quoting the attribute path this call asked for.
-		if strings.Contains(err.Error(), "does not provide attribute") && strings.Contains(err.Error(), "lib.credentialStoreUrl") {
-			return credentialStoreURLGrammar{}, fmt.Errorf("the secrets checkout does not export lib.credentialStoreUrl and predates allod/secrets#29")
-		}
-		return credentialStoreURLGrammar{}, err
-	}
-	var raw credentialStoreURLGrammarJSON
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return credentialStoreURLGrammar{}, fmt.Errorf("lib.credentialStoreUrl is not the expected shape: %w", err)
-	}
-	// A missing or null field decodes to "", and regexp.Compile("") succeeds
-	// and matches every string, which would turn a missing export's fields
-	// into a predicate that accepts anything. Refuse before compiling.
-	if raw.Line == "" {
-		return credentialStoreURLGrammar{}, fmt.Errorf("lib.credentialStoreUrl.line is empty")
-	}
-	if raw.BlankLine == "" {
-		return credentialStoreURLGrammar{}, fmt.Errorf("lib.credentialStoreUrl.blank_line is empty")
-	}
-	line, err := regexp.Compile(raw.Line)
-	if err != nil {
-		return credentialStoreURLGrammar{}, fmt.Errorf("lib.credentialStoreUrl.line does not compile: %w", err)
-	}
-	blankLine, err := regexp.Compile(raw.BlankLine)
-	if err != nil {
-		return credentialStoreURLGrammar{}, fmt.Errorf("lib.credentialStoreUrl.blank_line does not compile: %w", err)
-	}
-	return credentialStoreURLGrammar{line: line, blankLine: blankLine}, nil
-}
-
-// isCredentialStoreURLSource reports whether a credential can be a
-// local_auth_refresh source: a declared value template that renders exactly
-// one credential-store line, judged against a grammar read from the
-// secrets flake rather than a copy kept in step by review.
-func isCredentialStoreURLSource(credential registryCredential, grammar credentialStoreURLGrammar) bool {
-	if credential.Format != "" || credential.Value == nil || credential.Value.Encode != "" {
-		return false
-	}
-	template := credential.Value.Template
-	if strings.Count(template, credentialSecretPlaceholder) != 1 {
-		return false
-	}
-	var nonEmpty []string
-	for _, line := range strings.Split(template, "\n") {
-		if !grammar.blankLine.MatchString(line) {
-			nonEmpty = append(nonEmpty, line)
-		}
-	}
-	return len(nonEmpty) == 1 && grammar.line.MatchString(nonEmpty[0])
-}
-
 // validateGroupMetadata checks the registry shape rotate-token's
 // validate_group_metadata checks, minus the two vocabularies this contract
 // retired: a credential's format and a target's verify type. A group
 // missing a field this command needs is refused with what is wrong rather
 // than a blank line in the printed steps.
-func validateGroupMetadata(alias string, group registryGroup, grammar credentialStoreURLGrammar) {
+func validateGroupMetadata(alias string, group registryGroup) {
 	fail := func(reason string) {
 		die(1, "rotation registry group '%s' has unsupported metadata: %s", alias, reason)
 	}
@@ -326,28 +212,6 @@ func validateGroupMetadata(alias string, group registryGroup, grammar credential
 			if !validRegistryTargetKind[target.Kind] {
 				fail(fmt.Sprintf("a target of credential '%s' has unsupported kind '%s'", credential.Credential, target.Kind))
 			}
-		}
-	}
-	for _, refresh := range group.LocalAuthRefresh {
-		if refresh.Contract != "nixos-netrc-from-root-git-credentials" {
-			fail(fmt.Sprintf("local_auth_refresh entry has unsupported contract '%s'", refresh.Contract))
-		}
-		if refresh.System == "" || refresh.LocalUsername == "" || refresh.SourceCredential == "" {
-			fail("a local_auth_refresh entry is missing system, local_username, or source_credential")
-		}
-		matches := 0
-		for _, credential := range group.Credentials {
-			if credential.Credential != refresh.SourceCredential || !isCredentialStoreURLSource(credential, grammar) {
-				continue
-			}
-			for _, target := range credential.Targets {
-				if target.System == refresh.System && target.DeployedPath == "/root/.git-credentials" {
-					matches++
-				}
-			}
-		}
-		if matches != 1 {
-			fail(fmt.Sprintf("local_auth_refresh source_credential '%s' does not name exactly one credential-store URL target at %s:/root/.git-credentials", refresh.SourceCredential, refresh.System))
 		}
 	}
 }
@@ -410,25 +274,10 @@ func secretRotate(args []string) {
 	// clean-tree check.
 	branch := requireLandingBranch(checkout)
 
-	grammar, err := secretEvalCredentialStoreURL(checkout)
-	if err != nil {
-		die(1, "could not evaluate lib.credentialStoreUrl in %s: %s", checkout, err)
-	}
-
 	alias, group, groups := selectRotationGroup(checkout, name)
-	validateGroupMetadata(alias, group, grammar)
+	validateGroupMetadata(alias, group)
 	assertUniformGroupEncoding(alias, group.Credentials)
 	verifyGroupMembersUnique(group, groups)
-	// Checked before the value is ever read, and on a dry run too: the
-	// printed deploy step below tells the operator to run
-	// 'refresh-local-auth' next, and a live run has already landed the
-	// rotated secret by the time that step would fail, leaving the group
-	// rotated with no way to finish the job.
-	if len(group.LocalAuthRefresh) > 0 {
-		if _, err := exec.LookPath("refresh-local-auth"); err != nil {
-			die(1, "rotation registry group '%s' needs a local auth refresh after rotation, and 'refresh-local-auth' was not found on PATH; this host's nexus pin predates allod/nexus#52", alias)
-		}
-	}
 
 	encodings, err := secretEvalEncodings(checkout)
 	if err != nil {
@@ -469,7 +318,7 @@ func secretRotate(args []string) {
 	if dryRun {
 		fmt.Fprintln(stderr, "Dry run: no prompt, decrypt, or encrypt will run.")
 		printGroupSummary(stderr, alias, group)
-		printDeploySteps(stderr, checkout, alias, branch, group, commitSubject, deployStepsDryRun)
+		printDeploySteps(stderr, checkout, branch, group, commitSubject, deployStepsDryRun)
 		printVerification(stderr, group)
 		printRevocationGate(stderr, group)
 		return
@@ -546,8 +395,8 @@ func secretRotate(args []string) {
 	}
 
 	// landCommitOrReportPush, not landCommit: a push failure still leaves
-	// this group's deploy, verify, refresh-local-auth, and revocation steps
-	// worth printing (the commit is real; a rebuild and a manual push are
+	// this group's deploy, verify, and revocation steps worth printing (the
+	// commit is real; a rebuild and a manual push are
 	// still the operator's next move), so the steps print unconditionally
 	// below and the push failure is reported, and the command exits
 	// non-zero on it, only after that. landCommitOrReportPush re-verifies
@@ -570,7 +419,7 @@ func secretRotate(args []string) {
 	if !pushed {
 		deploySteps = deployStepsLandedNotPushed
 	}
-	printDeploySteps(stderr, checkout, alias, branch, group, commitSubject, deploySteps)
+	printDeploySteps(stderr, checkout, branch, group, commitSubject, deploySteps)
 	printVerification(stderr, group)
 	printRevocationGate(stderr, group)
 
@@ -599,10 +448,7 @@ func credentialValueShape(credential registryCredential) string {
 
 // printGroupSummary ports rotate-token's print_group_summary: the group,
 // its service, strategy, every affected secret and its value shape, and
-// every target with the command that verifies it. The local-auth-refresh
-// timing prose bash prints in this function is not ported: the printed
-// deploy step is the whole of what 'rotate' says about refresh-local-auth
-// (see printDeploySteps).
+// every target with the command that verifies it.
 func printGroupSummary(w io.Writer, alias string, group registryGroup) {
 	if group.Service == "forgejo" {
 		fmt.Fprintf(w, "Forgejo group: %s\n", alias)
@@ -691,25 +537,11 @@ const (
 // Unlike rotate-token, this command has already landed the commit by the
 // time it prints (or, in a dry run, will land it exactly this way on a real
 // run), so the "commit and push" step describes what happened instead of
-// instructing the operator to run git themselves. When the group carries
-// local_auth_refresh entries, step 1 names 'refresh-local-auth --group
-// <alias>' as the operator's next step; 'rotate' never runs it (see
-// secret_rotate.go's file comment).
-func printDeploySteps(w io.Writer, checkout, alias, branch string, group registryGroup, commitSubject string, landing deployStepsLandingState) {
+// instructing the operator to run git themselves.
+func printDeploySteps(w io.Writer, checkout, branch string, group registryGroup, commitSubject string, landing deployStepsLandingState) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "--- Deployment steps ---")
 	step := 1
-	if len(group.LocalAuthRefresh) > 0 {
-		if landing == deployStepsDryRun {
-			// No ciphertext has been rotated by a dry run, so this cannot
-			// read as something to do now: it describes what the printed
-			// steps will say once a live run actually lands the secret.
-			fmt.Fprintf(w, "%d. After the real run lands the rotated secret, refresh declared local auth before any git push, flake-lock update, or rebuild fetch:\n   refresh-local-auth --group %s\n\n", step, alias)
-		} else {
-			fmt.Fprintf(w, "%d. Refresh declared local auth from the rotated encrypted secret before any git push, flake-lock update, or rebuild fetch:\n   refresh-local-auth --group %s\n\n", step, alias)
-		}
-		step++
-	}
 
 	switch landing {
 	case deployStepsLandedPushed:
