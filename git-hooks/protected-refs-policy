@@ -25,6 +25,7 @@ protected_branches_file="$HOME/.config/git/protected-branches"
 signing_required_branches_file="$HOME/.config/git/signing-required-branches"
 active_pr_branches_file="$HOME/.config/git/active-pr-branches"
 allowed_external_remotes_file="$HOME/.config/git/allowed-external-remotes"
+forge_hosts_file="$HOME/.config/git/forge-hosts"
 
 hook_stdin=""
 if [ "$hook" = "pre-push" ]; then
@@ -178,10 +179,53 @@ is_active_pr_branch() {
   return 1
 }
 
+# Host an ssh://, http(s):// or scp-like ([user@]host:path) remote URL names,
+# with brackets around an IPv6 host stripped. A bare path, or anything else
+# with no recognizable host, prints nothing.
+extract_remote_host() {
+  local url="$1" rest host
+  case "$url" in
+    ssh://*|http://*|https://*)
+      rest="${url#*://}"
+      rest="${rest%%/*}"
+      rest="${rest##*@}"
+      ;;
+    /*)
+      printf '\n'; return 0 ;;
+    *:*)
+      rest="${url##*@}"
+      ;;
+    *)
+      printf '\n'; return 0 ;;
+  esac
+  case "$rest" in
+    \[*) host="${rest#\[}"; host="${host%%]*}" ;;
+    *) host="${rest%%:*}" ;;
+  esac
+  printf '%s\n' "$host"
+}
+
+# Exact-line, case-insensitive match against forge-hosts: the hosts of this
+# deployment's own forge and every remote the registry declares, rendered by
+# the dev builder in allod/archetypes. Comments and blank lines ignored.
+host_in_forge_hosts() {
+  local host="$1"
+  [ -n "$host" ] || return 1
+  [ -r "$forge_hosts_file" ] || return 1
+  PRP_HOST="$host" awk '
+      BEGIN { host = tolower(ENVIRON["PRP_HOST"]) }
+      /^[[:space:]]*(#|$)/ { next }
+      { line = $0; sub(/^[[:space:]]+/, "", line); sub(/[[:space:]]+$/, "", line) }
+      tolower(line) == host { found = 1 }
+      END { exit found ? 0 : 1 }
+    ' "$forge_hosts_file"
+}
+
 is_allowed_external_remote() {
   remote_url="$1"
-  # Personal forge is always allowed
-  case "$remote_url" in *forge.anarch.diy*) return 0 ;; esac
+  local host
+  host="$(extract_remote_host "$remote_url")"
+  host_in_forge_hosts "$host" && return 0
   [ -r "$allowed_external_remotes_file" ] || return 1
   while IFS= read -r pattern; do
     case "$pattern" in \#*|"") continue ;; esac
@@ -277,6 +321,7 @@ case "$hook" in
 
     if ! is_allowed_external_remote "$remote_url"; then
       echo "ERROR: Push to '$remote_url' is not authorized." >&2
+      echo "Checked '$forge_hosts_file' and '$allowed_external_remotes_file'." >&2
       exit 1
     fi
 

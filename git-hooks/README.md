@@ -14,7 +14,17 @@ Policy is driven by config files under `~/.config/git/`:
 - `protected-branches` -- branches where direct commits are blocked
 - `signing-required-branches` -- branches requiring GPG-signed commits
 - `active-pr-branches` -- remote branches requiring GPG-signed pushes
-- `allowed-external-remotes` -- remotes permitted for push (forge.anarch.diy always allowed)
+- `allowed-external-remotes` -- remote URL patterns permitted for push, by substring
+- `forge-hosts` -- hosts of this deployment's own forge and of every remote
+  the registry declares, one per line; rendered by the dev builder in
+  `allod/archetypes`, read here only
+
+A push's remote URL is checked by host first: if `forge-hosts` is readable
+and lists the remote's host as an exact line (case-insensitive), the push is
+allowed. Otherwise `allowed-external-remotes` is checked as before, by
+substring against the whole URL. A missing `forge-hosts` means no deployment
+forge is known here, so only the allowlist applies -- there is no hardcoded
+fallback host. A refused push names both files it consulted.
 
 Also blocks non-fast-forward (force) pushes on `agent/*` and active PR branches.
 

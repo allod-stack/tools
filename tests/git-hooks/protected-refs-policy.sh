@@ -14,6 +14,7 @@ mkdir -p "$HOME/.config/git" "$HOME/work/test-repo"
 cat > "$HOME/.config/git/protected-branches" <<'FIXTURE'
 work/test-repo main
 FIXTURE
+printf 'forge.fixture.invalid\n::1\n' > "$HOME/.config/git/forge-hosts"
 
 git -C "$HOME/work/test-repo" init --initial-branch=main >/dev/null 2>&1
 git -C "$HOME/work/test-repo" config user.name "Test User"
@@ -67,7 +68,7 @@ assert_same_commit() {
   fi
 }
 
-forge_url="ssh://git@forge.anarch.diy:2222/vnprc/repo.git"
+forge_url="ssh://git@forge.fixture.invalid:2222/acme/repo.git"
 zero="0000000000000000000000000000000000000000"
 # Resolved, not '#!/usr/bin/env bash': the fixture hooks below are written at run
 # time, so patchShebangs cannot reach them and a sandbox has no /usr/bin/env.
@@ -151,6 +152,72 @@ printf '%s %s %s %s\n' \
   "refs/heads/agent/new" "$divergent_sha" "refs/heads/agent/new" "$zero" \
   | assert_allows "pre-push: allows new branch push to agent/* (no remote history)" \
     bash "$policy" pre-push origin "$forge_url"
+
+# --- Pre-push: forge-hosts drives the own-forge allowance ---
+#
+# Sabotage proof: with the forge-hosts fix stashed, the "unlisted host
+# refused" case below fails, because master always allows forge.anarch.diy.
+
+ref_line() { printf '%s %s %s %s\n' refs/heads/agent/x "$zero" refs/heads/agent/x "$zero"; }
+
+ref_line | assert_allows "forge-hosts: ssh:// with port to a listed host is allowed" \
+  bash "$policy" pre-push origin "ssh://git@forge.fixture.invalid:2222/acme/repo.git"
+
+ref_line | assert_blocks "forge-hosts: ssh:// with port to an unlisted host is refused" \
+  bash "$policy" pre-push origin "ssh://git@unlisted.fixture.invalid:2222/acme/repo.git"
+
+ref_line | assert_allows "forge-hosts: scp form to a listed host is allowed" \
+  bash "$policy" pre-push origin "git@forge.fixture.invalid:acme/repo.git"
+
+ref_line | assert_blocks "forge-hosts: scp form to an unlisted host is refused" \
+  bash "$policy" pre-push origin "git@unlisted.fixture.invalid:acme/repo.git"
+
+ref_line | assert_allows "forge-hosts: https:// to a listed host is allowed" \
+  bash "$policy" pre-push origin "https://forge.fixture.invalid/acme/repo.git"
+
+ref_line | assert_blocks "forge-hosts: https:// to an unlisted host is refused" \
+  bash "$policy" pre-push origin "https://unlisted.fixture.invalid/acme/repo.git"
+
+ref_line | assert_allows "forge-hosts: IPv6 host in brackets, listed, is allowed" \
+  bash "$policy" pre-push origin "ssh://git@[::1]:2222/acme/repo.git"
+
+ref_line | assert_blocks "forge-hosts: IPv6 host in brackets, unlisted, is refused" \
+  bash "$policy" pre-push origin "ssh://git@[::2]:2222/acme/repo.git"
+
+ref_line | assert_blocks "forge-hosts: a host containing a listed host as a substring is refused" \
+  bash "$policy" pre-push origin "ssh://git@forge.fixture.invalid.evil.invalid:2222/acme/repo.git"
+
+ref_line | assert_allows "forge-hosts: host match is case-insensitive" \
+  bash "$policy" pre-push origin "ssh://git@FORGE.FIXTURE.INVALID:2222/acme/repo.git"
+
+ref_line | assert_blocks "forge-hosts: refusal names both files consulted" \
+  bash "$policy" pre-push origin "ssh://git@unlisted.fixture.invalid:2222/acme/repo.git"
+if grep -qF "$HOME/.config/git/forge-hosts" "$test_stderr" \
+  && grep -qF "$HOME/.config/git/allowed-external-remotes" "$test_stderr"; then
+  pass "forge-hosts: refusal message names both files"
+else
+  fail "forge-hosts: refusal message names both files" "stderr:" "$(cat "$test_stderr")"
+fi
+
+# --- Pre-push: forge-hosts absent means no fallback ---
+#
+# forge.anarch.diy is the public forge name master hardcodes as always
+# allowed; this is the case the sabotage proof in the report turns on.
+
+former_forge_url="ssh://git@forge.anarch.diy:2222/acme/repo.git"
+
+rm -f "$HOME/.config/git/forge-hosts"
+
+ref_line | assert_blocks "forge-hosts absent: push to the former forge is refused" \
+  bash "$policy" pre-push origin "$former_forge_url"
+
+printf 'forge.anarch.diy\n' > "$HOME/.config/git/allowed-external-remotes"
+
+ref_line | assert_allows "forge-hosts absent: an allowlist pattern still allows" \
+  bash "$policy" pre-push origin "$former_forge_url"
+
+rm -f "$HOME/.config/git/allowed-external-remotes"
+printf 'forge.fixture.invalid\n::1\n' > "$HOME/.config/git/forge-hosts"
 
 # --- Non-protected repo ---
 
