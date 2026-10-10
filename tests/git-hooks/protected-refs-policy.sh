@@ -14,7 +14,7 @@ mkdir -p "$HOME/.config/git" "$HOME/work/test-repo"
 cat > "$HOME/.config/git/protected-branches" <<'FIXTURE'
 work/test-repo main
 FIXTURE
-printf 'forge.fixture.invalid\n::1\n' > "$HOME/.config/git/forge-hosts"
+printf 'forge.fixture.invalid\n::1\nfile\n' > "$HOME/.config/git/forge-hosts"
 
 git -C "$HOME/work/test-repo" init --initial-branch=main >/dev/null 2>&1
 git -C "$HOME/work/test-repo" config user.name "Test User"
@@ -155,8 +155,8 @@ printf '%s %s %s %s\n' \
 
 # --- Pre-push: forge-hosts drives the own-forge allowance ---
 #
-# Sabotage proof: with the forge-hosts fix stashed, the "unlisted host
-# refused" case below fails, because master always allows forge.anarch.diy.
+# Sabotage proof: see "forge-hosts absent: push to the former forge is
+# refused" below.
 
 ref_line() { printf '%s %s %s %s\n' refs/heads/agent/x "$zero" refs/heads/agent/x "$zero"; }
 
@@ -171,6 +171,12 @@ ref_line | assert_allows "forge-hosts: scp form to a listed host is allowed" \
 
 ref_line | assert_blocks "forge-hosts: scp form to an unlisted host is refused" \
   bash "$policy" pre-push origin "git@unlisted.fixture.invalid:acme/repo.git"
+
+ref_line | assert_blocks "forge-hosts: scp form does not let a path spoof the host via a later @" \
+  bash "$policy" pre-push origin "evil.invalid:repo@forge.fixture.invalid:path"
+
+ref_line | assert_blocks "forge-hosts: file:// never yields a host, even one named 'file'" \
+  bash "$policy" pre-push origin "file:///tmp/repo.git"
 
 ref_line | assert_allows "forge-hosts: https:// to a listed host is allowed" \
   bash "$policy" pre-push origin "https://forge.fixture.invalid/acme/repo.git"

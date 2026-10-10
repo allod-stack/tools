@@ -179,35 +179,39 @@ is_active_pr_branch() {
   return 1
 }
 
-# Host an ssh://, http(s):// or scp-like ([user@]host:path) remote URL names,
-# with brackets around an IPv6 host stripped. A bare path, or anything else
-# with no recognizable host, prints nothing.
+# Host an ssh://, git://, http(s):// or scp-like ([user@]host:path) remote URL
+# names. Any other scheme (file://, ...) never yields a host, so it cannot
+# spoof forge-hosts. scp-form host ends at the FIRST colon, not the last '@':
+# a path containing '@' and ':' must never relocate the host/user split.
 extract_remote_host() {
-  local url="$1" rest host
+  local url="$1" authority host_part host
   case "$url" in
-    ssh://*|http://*|https://*)
-      rest="${url#*://}"
-      rest="${rest%%/*}"
-      rest="${rest##*@}"
+    ssh://*|git://*|http://*|https://*)
+      authority="${url#*://}"
+      authority="${authority%%/*}"
+      authority="${authority##*@}"
+      case "$authority" in
+        \[*) host="${authority#\[}"; host="${host%%]*}" ;;
+        *) host="${authority%%:*}" ;;
+      esac
       ;;
-    /*)
-      printf '\n'; return 0 ;;
+    *://*|/*)
+      host="" ;;
     *:*)
-      rest="${url##*@}"
+      host_part="${url%%:*}"
+      case "$host_part" in
+        *@*) host="${host_part#*@}" ;;
+        *) host="$host_part" ;;
+      esac
       ;;
     *)
-      printf '\n'; return 0 ;;
-  esac
-  case "$rest" in
-    \[*) host="${rest#\[}"; host="${host%%]*}" ;;
-    *) host="${rest%%:*}" ;;
+      host="" ;;
   esac
   printf '%s\n' "$host"
 }
 
-# Exact-line, case-insensitive match against forge-hosts: the hosts of this
-# deployment's own forge and every remote the registry declares, rendered by
-# the dev builder in allod/archetypes. Comments and blank lines ignored.
+# Exact-line, case-insensitive match against forge-hosts (rendered by the
+# dev builder in allod/archetypes). Trailing whitespace/CRLF is trimmed.
 host_in_forge_hosts() {
   local host="$1"
   [ -n "$host" ] || return 1
