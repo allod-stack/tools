@@ -381,6 +381,11 @@ func patchFetch(args []string) {
 		fmt.Fprintf(stderr, "allod: remote temp dir (requires manual cleanup): %s\n", remoteDir)
 		die(1, "manifest.json is missing, a symlink, or not a regular file")
 	}
+	if err := recordSourceRepo(manifestPath, sourceRepo); err != nil {
+		_ = os.RemoveAll(staging)
+		fmt.Fprintf(stderr, "allod: remote temp dir (requires manual cleanup): %s\n", remoteDir)
+		die(1, "failed to record source spec in manifest")
+	}
 	if needsRename {
 		if err := os.Rename(staging, finalOutput); err != nil {
 			_ = os.RemoveAll(staging)
@@ -413,6 +418,7 @@ type patchEntry struct {
 
 type patchManifest struct {
 	RepoRemote string       `json:"repo_remote"`
+	SourceRepo string       `json:"source_repo"`
 	BaseCommit *string      `json:"base_commit"`
 	HeadCommit string       `json:"head_commit"`
 	RootExport bool         `json:"root_export"`
@@ -438,8 +444,40 @@ func readManifest(path string) (patchManifest, error) {
 	return manifest, err
 }
 
+// recordSourceRepo adds the source spec as given on the command line (a
+// registry id or a path, never the remote-resolved form) to the local
+// manifest copy, so apply can compare it against the destination's id.
+func recordSourceRepo(manifestPath, sourceRepo string) error {
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	raw, err := json.Marshal(sourceRepo)
+	if err != nil {
+		return err
+	}
+	fields["source_repo"] = raw
+	updated, err := json.Marshal(fields)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(manifestPath, updated, 0o644)
+}
+
 var fullHex = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
 var digestHex = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// validBaseSources is the complete set of values remoteGenerateScript may
+// write for base_source; anything else fails the manifest, so it never
+// reaches apply's summary line.
+var validBaseSources = map[string]bool{
+	"explicit": true, "upstream": true, "origin-branch": true,
+	"origin-default": true, "destination-head": true, "root": true,
+}
 
 func validateManifest(data []byte) (patchManifest, string) {
 	var fields map[string]json.RawMessage
@@ -463,6 +501,20 @@ func validateManifest(data []byte) (patchManifest, string) {
 		if json.Unmarshal(fields["root_export"], &value) != nil {
 			return patchManifest{}, "root_export: expected boolean"
 		}
+	}
+	if raw, ok := fields["source_repo"]; ok {
+		var value string
+		if json.Unmarshal(raw, &value) != nil {
+			return patchManifest{}, "source_repo: expected string"
+		}
+		manifest.SourceRepo = value
+	}
+	if raw, ok := fields["base_source"]; ok {
+		var value string
+		if json.Unmarshal(raw, &value) != nil || !validBaseSources[value] {
+			return patchManifest{}, "invalid base_source in manifest"
+		}
+		manifest.BaseSource = value
 	}
 	var repoRemote string
 	if json.Unmarshal(fields["repo_remote"], &repoRemote) != nil {
@@ -581,6 +633,19 @@ func remotesMatch(left, right string) bool {
 	return leftOK && rightOK && leftID == rightID
 }
 
+// patchRegistryID reports whether value is a registry id (not a path form)
+// that resolves in the registry, returning it unchanged. A path, or an id
+// the registry does not know, is not a registry id for this purpose.
+func patchRegistryID(value string) (string, bool) {
+	if value == "" || isPatchRepoPath(value) {
+		return "", false
+	}
+	if _, ok := registryCheckout(value); !ok {
+		return "", false
+	}
+	return value, true
+}
+
 func patchApply(args []string) {
 	artifact, repoPath := "", ""
 	for len(args) > 0 {
@@ -684,10 +749,18 @@ func patchApply(args []string) {
 		exit(14)
 	}
 	destRemote, _ := gitOutput(repo, "remote", "get-url", "origin")
-	// An empty manifest remote means no origin at export time: a root export
-	// (destHasHead is already false here, checked above) or a host-provided
-	// checkout, whose identity is the shared base commit verified below.
+	// No origin to compare: the registry-id check right below, and the
+	// base-commit check further down, establish identity instead.
 	allowMissing := manifest.RepoRemote == ""
+	if allowMissing {
+		if sourceID, ok := patchRegistryID(manifest.SourceRepo); ok {
+			if destID, ok := patchRegistryID(repoPath); ok && destID != sourceID {
+				fmt.Fprintln(stderr, "allod: repo identity mismatch")
+				fmt.Fprintf(stderr, "allod: source id %s and destination id %s differ; name the destination by path to relay across repositories\n", sourceID, destID)
+				exit(13)
+			}
+		}
+	}
 	if !allowMissing && !remotesMatch(destRemote, manifest.RepoRemote) {
 		fmt.Fprintln(stderr, "allod: repo identity mismatch")
 		fmt.Fprintf(stderr, "allod: manifest remote: %s\n", manifest.RepoRemote)
@@ -821,6 +894,18 @@ func patchReceive(args []string) {
 	if destination == "" {
 		die(1, "patch receive requires <destination-repo>")
 	}
+	// A shared base commit is not identity enough across this deployment's
+	// private forks, which share history with their public originals: two
+	// registry ids named on the command line must agree before fetching.
+	if colon := strings.IndexByte(target, ':'); colon >= 0 {
+		if sourceID, ok := patchRegistryID(target[colon+1:]); ok {
+			if destID, ok := patchRegistryID(destination); ok && destID != sourceID {
+				fmt.Fprintln(stderr, "allod: repo identity mismatch")
+				fmt.Fprintf(stderr, "allod: source id %s and destination id %s differ; name the destination by path to relay across repositories\n", sourceID, destID)
+				exit(13)
+			}
+		}
+	}
 	destination = resolvePatchDestinationArg(destination)
 	parent, err := makeTempDir("/tmp", "allod-patch-receive.", 10)
 	if err != nil {
@@ -831,9 +916,8 @@ func patchReceive(args []string) {
 	if baseSet {
 		fetchArgs = append(fetchArgs, "--base", base)
 	}
-	// The destination's own HEAD lets fetch's export recover a base when the
-	// source is a host-provided checkout (no remote, so no upstream or origin
-	// branch to find one by): shared history is relayed instead of root export.
+	// --fallback-base lets fetch recover a base for a host-provided checkout
+	// (no remote, so no upstream or origin branch) instead of root export.
 	if destHead, ok := gitOutput(destination, "rev-parse", "--verify", "HEAD^{commit}"); ok {
 		fetchArgs = append(fetchArgs, "--fallback-base", destHead)
 	}

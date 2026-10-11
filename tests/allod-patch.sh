@@ -1528,7 +1528,10 @@ assert_contains "$CAPTURE_OUTPUT" "unknown option for patch receive: --push" "re
 # registry id resolution tests
 # ================================================================
 
-# --- receive: registry-id source and registry-id destination ---
+# --- receive: registry-id source, path destination ---
+# The destination is named by path, not by a second (necessarily different)
+# registry id: with a registry-id source, a differently-named id is now
+# refused on principle (below), whatever it actually points to.
 reg_source="$HOME/work/registry-source-checkout"
 init_repo "$reg_source" master
 add_commit "$reg_source" "registry receive change" "registry receive content"
@@ -1536,14 +1539,14 @@ add_commit "$reg_source" "registry receive change" "registry receive content"
 reg_dest="$HOME/work/registry-dest-checkout"
 clone_repo "$reg_source" "$reg_dest"
 
-write_registry "registry/source" "registry-source-checkout" "registry/dest" "registry-dest-checkout"
+write_registry "registry/source" "registry-source-checkout"
 
 reset_mock_ssh
-capture_with_path "$MOCK_PATH" "$ALLOD" patch receive "testhost:registry/source" "registry/dest"
-assert_status 0 "receive with registry-id source and destination exits 0"
+capture_with_path "$MOCK_PATH" "$ALLOD" patch receive "testhost:registry/source" "$reg_dest"
+assert_status 0 "receive with registry-id source and path destination exits 0"
 recv_content=$(cat "$reg_dest/tracked.txt")
 assert_equal "$recv_content" "registry receive content" \
-  "receive registry ids apply to the registry checkout"
+  "receive registry-id source applies to the path destination"
 clear_registry
 
 # --- apply --repo <id> resolves to the registry checkout ---
@@ -1817,6 +1820,90 @@ hp_root_artifact=$(printf '%s' "$CAPTURE_OUTPUT" | grep 'artifact dir:' | sed 's
 assert_equal "$(jq -r '.base_source' "$hp_root_artifact/manifest.json")" "root" \
   "root export records base_source root"
 rm -rf "$hp_root_artifact"
+
+# ================================================================
+# Registry-id identity fix round
+# ================================================================
+# A shared base commit alone is not proof of identity: this deployment's
+# private forks share history with their public originals, so two
+# registry ids named on the command line must agree, or the relay refuses.
+
+# --- receive: mismatched registry ids are refused before fetching ---
+fr_mismatch_source="$HOME/work/fix-round-mismatch-source"
+init_repo "$fr_mismatch_source" master
+add_commit "$fr_mismatch_source" "fix round mismatch change"
+
+fr_mismatch_dest="$HOME/work/fix-round-mismatch-dest"
+clone_repo "$fr_mismatch_source" "$fr_mismatch_dest"
+fr_mismatch_head_before=$(git -C "$fr_mismatch_dest" rev-parse HEAD)
+
+write_registry "fixround/mismatch-a" "fix-round-mismatch-source" \
+  "fixround/mismatch-b" "fix-round-mismatch-dest"
+
+reset_mock_ssh
+capture_with_path "$MOCK_PATH" "$ALLOD" patch receive "testhost:fixround/mismatch-a" "fixround/mismatch-b"
+assert_status 13 "receive refuses mismatched registry ids before fetching"
+assert_contains "$CAPTURE_OUTPUT" "source id fixround/mismatch-a and destination id fixround/mismatch-b differ" \
+  "receive id mismatch names both ids"
+assert_equal "$(get_ssh_call_count)" "0" "receive id mismatch makes no SSH calls"
+fr_mismatch_head_after=$(git -C "$fr_mismatch_dest" rev-parse HEAD)
+assert_equal "$fr_mismatch_head_after" "$fr_mismatch_head_before" "receive id mismatch leaves destination unchanged"
+clear_registry
+
+# --- receive: a path source is exempt, even with a registry-id destination ---
+fr_path_source="$TMP/repos/fix-round-path-source"
+init_repo "$fr_path_source" master
+add_commit "$fr_path_source" "fix round path source change" "fix round path content"
+
+fr_path_dest="$HOME/work/fix-round-path-dest"
+clone_repo "$fr_path_source" "$fr_path_dest"
+
+write_registry "fixround/path-dest" "fix-round-path-dest"
+
+reset_mock_ssh
+capture_with_path "$MOCK_PATH" "$ALLOD" patch receive "testhost:$fr_path_source" "fixround/path-dest"
+assert_status 0 "receive with a path source and registry-id destination is exempt from the id check"
+fr_path_content=$(cat "$fr_path_dest/tracked.txt")
+assert_equal "$fr_path_content" "fix round path content" \
+  "receive path-source-exempt case still applies the patch"
+clear_registry
+
+# --- apply: a manifest source id matching the destination id is accepted ---
+fr_match_source="$TMP/repos/fix-round-match-source"
+init_repo "$fr_match_source" master
+add_commit "$fr_match_source" "fix round match change" "fix round match content"
+
+fr_match_dest="$HOME/work/fix-round-match-dest"
+clone_repo "$fr_match_source" "$fr_match_dest"
+
+fr_match_artifact="$TMP/artifacts/fix-round-match"
+make_artifact "$fr_match_source" "$fr_match_artifact"
+# Simulate the manifest a host-provided (no-origin) source would carry: an
+# empty repo_remote recording the registry id it was fetched by.
+fr_match_manifest="$fr_match_artifact/manifest.json"
+jq '.repo_remote = "" | .source_repo = "fixround/match"' "$fr_match_manifest" > "$fr_match_manifest.tmp"
+mv "$fr_match_manifest.tmp" "$fr_match_manifest"
+
+write_registry "fixround/match" "fix-round-match-dest"
+
+capture "$ALLOD" patch apply "$fr_match_artifact" --repo "fixround/match"
+assert_status 0 "apply accepts a manifest source id matching the destination id"
+clear_registry
+rm -rf "$fr_match_artifact"
+
+# --- base_source is validated against the known set ---
+bad_base_source_dest="$TMP/repos/fix-round-bad-base-source-dest"
+init_repo "$bad_base_source_dest" master
+bad_base_source_sha=$(git -C "$bad_base_source_dest" rev-parse HEAD)
+bad_base_source_artifact="$TMP/artifacts/fix-round-bad-base-source"
+mkdir -p "$bad_base_source_artifact"
+cat > "$bad_base_source_artifact/manifest.json" <<BADJSON
+{"repo_remote":"x","base_commit":"${bad_base_source_sha}","head_commit":"${bad_base_source_sha}","base_source":"root\nEVIL","patch_count":0,"patches":[]}
+BADJSON
+capture "$ALLOD" patch apply "$bad_base_source_artifact" --repo "$bad_base_source_dest"
+assert_status 12 "apply invalid base_source exits 12"
+assert_contains "$CAPTURE_OUTPUT" "invalid base_source in manifest" "apply invalid base_source message"
+rm -rf "$bad_base_source_artifact"
 
 # ================================================================
 # Summary
