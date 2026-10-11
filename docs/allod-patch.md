@@ -9,11 +9,16 @@ Transfer committed changes between environments as `git format-patch` artifacts,
 Fetch patches from a remote source repo via SSH.
 
 ```
-allod patch fetch <ssh-host>:<source-repo> [--base <ref>] [--output <dir>]
+allod patch fetch <ssh-host>:<source-repo> [--base <ref>] [--fallback-base <sha>] [--output <dir>]
 ```
 
-- `--base <ref>` - Base ref for patch range (default: source branch upstream, same-named origin branch, or origin default branch; if none exists, export from root)
+- `--base <ref>` - Base ref for patch range (default: source branch upstream, same-named origin branch, or origin default branch; if none exists, fall back to `--fallback-base` and then to export from root)
+- `--fallback-base <sha>` - Used only when `--base` and the default resolution both find nothing, and only if the commit exists in the source and is an ancestor of its HEAD. `receive` sets this to the destination's own HEAD automatically.
 - `--output <dir>` - Local directory for artifacts (default: auto-generated in `/tmp`)
+
+### Host-provided source
+
+A host-provided checkout (how every repository on a forge-less dev VM is made: `git init`, then the host pushes its own history into it over SSH) has no remote, so the default base resolution — upstream, same-named origin branch, origin default branch — always finds nothing. `receive` passes the destination's own HEAD as `--fallback-base`; when that commit exists in the source and is an ancestor of its HEAD, it becomes the base (`base_source: destination-head` in the manifest, below) and only the VM's own new commits are exported, instead of the whole history from root. `apply`'s identity check accepts the source's empty remote in this case because the shared base commit, not an origin URL, is the proof the two repos are the same one.
 
 SSHes into the source VM, validates the worktree is clean, checks the export range for whitespace errors, generates `git format-patch` artifacts, transfers them via tar, and cleans up the remote temp dir.
 
@@ -29,7 +34,9 @@ allod patch apply <artifact-dir> [--repo <destination-repo>]
 
 - `--repo <path>` - Destination repo (default: current directory)
 
-Validates the manifest and checksums, verifies the destination repo matches the source's origin URL, and applies patches with `git am --3way`. Common equivalent remote URL forms such as `https://github.com/org/repo.git`, `git@github.com:org/repo.git`, and `ssh://git@github.com/org/repo.git` are normalized before comparison. Root exports can only be applied to an empty destination history; if a root-export source has no `origin`, the remote identity check is skipped only for that empty-destination bootstrap case.
+Validates the manifest and checksums, verifies the destination repo matches the source's origin URL, and applies patches with `git am --3way`. Common equivalent remote URL forms such as `https://github.com/org/repo.git`, `git@github.com:org/repo.git`, and `ssh://git@github.com/org/repo.git` are normalized before comparison. Root exports can only be applied to an empty destination history. When the manifest's source remote is empty, the identity check is skipped: for a root export, only onto an empty destination (the bootstrap case above); for any other export, the base commit's presence in the destination (checked next, regardless) is the identity instead — the shared commit a host-provided source and its destination both have.
+
+The summary line names `base_source` from the manifest — `explicit`, `upstream`, `origin-branch`, `origin-default`, `destination-head`, or `root` — so a relay from a host-provided checkout is visible as such.
 
 After `git am`, the same `git diff --check` runs over the applied range. Because `fetch` already refuses a range that fails it, this only fires for an artifact that did not come through `fetch`. It reports the offending lines on stderr and does not fail: the applied commits stay applied, and the human pushes.
 
@@ -62,6 +69,7 @@ An id that resolves to the wrong clone is not a silent misapply: `apply`'s origi
   "repo_remote": "ssh://git@forge.example:2222/org/repo.git",
   "base_commit": "abc123...",
   "head_commit": "def456...",
+  "base_source": "upstream",
   "patch_count": 2,
   "patches": [
     {"filename": "0001-some-change.patch", "sha256": "..."},
@@ -70,6 +78,7 @@ An id that resolves to the wrong clone is not a silent misapply: `apply`'s origi
 }
 ```
 
+- `base_source` records how `base_commit` was chosen: `explicit` (`--base`), `upstream`, `origin-branch`, `origin-default`, `destination-head` (the `--fallback-base` case), or `root`.
 - `base_commit` and `head_commit` are full lowercase hex Git object IDs (40 or 64 characters).
 - Each `sha256` is the lowercase hex digest from `sha256sum -b`.
 - Filenames are basenames ending in `.patch` with no path separators or traversal.

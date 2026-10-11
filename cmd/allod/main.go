@@ -182,13 +182,19 @@ Commands:
   apply    Apply fetched patches to a local destination repo
   receive  Fetch and apply patches in one step
 
-  allod patch fetch <ssh-host>:<source-repo> [--base <ref>] [--output <dir>]
+  allod patch fetch <ssh-host>:<source-repo> [--base <ref>] [--fallback-base <sha>] [--output <dir>]
   allod patch apply <artifact-dir> [--repo <destination-repo>]
   allod patch receive <ssh-host>:<source-repo> <destination-repo> [--base <ref>]
 
 '--base <ref>' sets the base ref for the patch range (default: source branch
-upstream, same-named origin branch, or origin default branch; if none
-exists, export from root).
+upstream, same-named origin branch, or origin default branch; if none of
+those exist, fall back to '--fallback-base' and then to export from root).
+'--fallback-base <sha>' is used only when '--base' and the default
+resolution both find nothing, and only if the commit exists in the source
+and is an ancestor of its HEAD; 'receive' sets this to the destination's own
+HEAD automatically, so a source with no remote at all — a host-provided
+checkout, every repository on a forge-less dev VM — still relays by shared
+history instead of exporting from root.
 '--output <dir>' sets the local directory for a fetched artifact (default:
 auto-generated in /tmp).
 '--repo <destination-repo>' sets the apply destination (default: current

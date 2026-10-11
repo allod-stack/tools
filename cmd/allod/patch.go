@@ -45,15 +45,19 @@ const remoteGenerateScript = `set -eu
 read -r b64_repo
 read -r b64_base
 read -r b64_base_set
+read -r b64_fallback_base
 repo=$(printf '%s' "$b64_repo" | base64 -d)
 base=$(printf '%s' "$b64_base" | base64 -d)
 base_set=$(printf '%s' "$b64_base_set" | base64 -d)
+fallback_base=$(printf '%s' "$b64_fallback_base" | base64 -d)
 case "$repo" in *"
 "*) printf 'allod: source repo path contains newline\n' >&2; exit 1 ;; esac
 case "$repo" in /*) ;; *) repo="$HOME/$repo" ;; esac
 case "$base" in *"
 "*) printf 'allod: base ref contains newline\n' >&2; exit 1 ;; esac
 case "$base_set" in true|false) ;; *) printf 'allod: invalid base mode\n' >&2; exit 1 ;; esac
+case "$fallback_base" in *"
+"*) printf 'allod: fallback base contains newline\n' >&2; exit 1 ;; esac
 if ! git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
   printf 'allod: not a git repository: %s\n' "$repo" >&2; exit 1
 fi
@@ -71,16 +75,16 @@ resolve_default_base() {
   branch=$(git -C "$repo" branch --show-current 2>/dev/null || true)
   upstream=$(git -C "$repo" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)
   if [ -n "$upstream" ] && git -C "$repo" rev-parse --verify "$upstream^{commit}" >/dev/null 2>&1; then
-    printf '%s\n' "$upstream"
+    printf 'upstream\n%s\n' "$upstream"
     return 0
   fi
   if [ -n "$branch" ] && git -C "$repo" rev-parse --verify "refs/remotes/origin/${branch}^{commit}" >/dev/null 2>&1; then
-    printf 'refs/remotes/origin/%s\n' "$branch"
+    printf 'origin-branch\nrefs/remotes/origin/%s\n' "$branch"
     return 0
   fi
   default_branch=$(git -C "$repo" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||' || true)
   if [ -n "$default_branch" ] && git -C "$repo" rev-parse --verify "refs/remotes/origin/${default_branch}^{commit}" >/dev/null 2>&1; then
-    printf 'refs/remotes/origin/%s\n' "$default_branch"
+    printf 'origin-default\nrefs/remotes/origin/%s\n' "$default_branch"
     return 0
   fi
   return 1
@@ -88,21 +92,31 @@ resolve_default_base() {
 
 root_export=false
 base_commit=
+base_source=
 if [ "$base_set" = true ]; then
+  base_source=explicit
   base_ref="$base"
   base_commit=$(git -C "$repo" rev-parse --verify "$base_ref^{commit}" 2>/dev/null) || {
     printf 'allod: cannot resolve base ref: %s\n' "$base_ref" >&2; exit 11
   }
+elif resolved=$(resolve_default_base); then
+  base_source=$(printf '%s\n' "$resolved" | sed -n '1p')
+  base_ref=$(printf '%s\n' "$resolved" | sed -n '2p')
+  base_commit=$(git -C "$repo" rev-parse --verify "$base_ref^{commit}" 2>/dev/null) || {
+    printf 'allod: cannot resolve base ref: %s\n' "$base_ref" >&2; exit 11
+  }
+elif [ -n "$fallback_base" ] \
+  && fallback_commit=$(git -C "$repo" rev-parse --verify "${fallback_base}^{commit}" 2>/dev/null) \
+  && git -C "$repo" merge-base --is-ancestor "$fallback_commit" HEAD 2>/dev/null; then
+  base_source=destination-head
+  base_commit="$fallback_commit"
+  base_ref="<destination HEAD>"
+  printf 'allod: base from destination HEAD %s\n' "$(git -C "$repo" rev-parse --short "$base_commit")" >&2
 else
-  if base_ref=$(resolve_default_base); then
-    base_commit=$(git -C "$repo" rev-parse --verify "$base_ref^{commit}" 2>/dev/null) || {
-      printf 'allod: cannot resolve base ref: %s\n' "$base_ref" >&2; exit 11
-    }
-  else
-    root_export=true
-    base_ref="<root>"
-    printf 'allod: no source base ref found; exporting full history from root\n' >&2
-  fi
+  root_export=true
+  base_source=root
+  base_ref="<root>"
+  printf 'allod: no source base ref found; exporting full history from root\n' >&2
 fi
 
 if [ "$root_export" = true ]; then
@@ -162,8 +176,9 @@ jq -n \
   --arg head_commit "$head_commit" \
   --argjson root_export "$root_export" \
   --argjson patch_count "$patch_count" \
+  --arg base_source "$base_source" \
   --slurpfile patches "$tmpdir/.patches.jsonl" \
-  '{repo_remote: $repo_remote, base_commit: (if $root_export then null else $base_commit end), head_commit: $head_commit, root_export: $root_export, patch_count: $patch_count, patches: $patches}' \
+  '{repo_remote: $repo_remote, base_commit: (if $root_export then null else $base_commit end), head_commit: $head_commit, root_export: $root_export, base_source: $base_source, patch_count: $patch_count, patches: $patches}' \
   > "$tmpdir/manifest.json"
 rm -f "$tmpdir/.patches.jsonl"
 trap - EXIT
@@ -240,7 +255,7 @@ func writableDirectory(path string) bool {
 }
 
 func patchFetch(args []string) {
-	target, base, output := "", "", ""
+	target, base, output, fallbackBase := "", "", "", ""
 	baseSet, outputSet := false, false
 	for len(args) > 0 {
 		switch args[0] {
@@ -250,6 +265,12 @@ func patchFetch(args []string) {
 				die(1, "--base cannot be empty")
 			}
 			base, baseSet, args = args[1], true, args[2:]
+		case "--fallback-base":
+			requireValue(args, args[0])
+			if args[1] == "" {
+				die(1, "--fallback-base cannot be empty")
+			}
+			fallbackBase, args = args[1], args[2:]
 		case "--output":
 			requireValue(args, args[0])
 			output, outputSet, args = args[1], true, args[2:]
@@ -287,6 +308,9 @@ func patchFetch(args []string) {
 	if strings.Contains(base, "\n") {
 		die(1, "--base value must not contain newlines")
 	}
+	if strings.Contains(fallbackBase, "\n") {
+		die(1, "--fallback-base value must not contain newlines")
+	}
 
 	outputParent, finalOutput := "/tmp", ""
 	needsRename := false
@@ -316,7 +340,7 @@ func patchFetch(args []string) {
 	if baseSet {
 		baseMode = "true"
 	}
-	generateInput := encoded(remoteSourceRepo) + "\n" + encoded(base) + "\n" + encoded(baseMode) + "\n"
+	generateInput := encoded(remoteSourceRepo) + "\n" + encoded(base) + "\n" + encoded(baseMode) + "\n" + encoded(fallbackBase) + "\n"
 	remoteDir, status := sshCapture(host, remoteGenerateScript, generateInput)
 	if status != 0 {
 		if status == 10 || status == 11 || status == 17 {
@@ -392,6 +416,7 @@ type patchManifest struct {
 	BaseCommit *string      `json:"base_commit"`
 	HeadCommit string       `json:"head_commit"`
 	RootExport bool         `json:"root_export"`
+	BaseSource string       `json:"base_source"`
 	PatchCount int          `json:"patch_count"`
 	Patches    []patchEntry `json:"patches"`
 }
@@ -659,7 +684,10 @@ func patchApply(args []string) {
 		exit(14)
 	}
 	destRemote, _ := gitOutput(repo, "remote", "get-url", "origin")
-	allowMissing := manifest.RepoRemote == "" && manifest.RootExport && !destHasHead
+	// An empty manifest remote means no origin at export time: a root export
+	// (destHasHead is already false here, checked above) or a host-provided
+	// checkout, whose identity is the shared base commit verified below.
+	allowMissing := manifest.RepoRemote == ""
 	if !allowMissing && !remotesMatch(destRemote, manifest.RepoRemote) {
 		fmt.Fprintln(stderr, "allod: repo identity mismatch")
 		fmt.Fprintf(stderr, "allod: manifest remote: %s\n", manifest.RepoRemote)
@@ -718,7 +746,11 @@ func patchApply(args []string) {
 		appliedRange = preHead + "..HEAD"
 		diffStatus = runCommand(repo, nil, &whitespace, stderr, "git", "diff", "--check", appliedRange)
 	}
-	fmt.Fprintf(stdout, "allod: applied %d patch(es)\n", manifest.PatchCount)
+	baseSourceLabel := manifest.BaseSource
+	if baseSourceLabel == "" {
+		baseSourceLabel = "unknown"
+	}
+	fmt.Fprintf(stdout, "allod: applied %d patch(es) (base: %s)\n", manifest.PatchCount, baseSourceLabel)
 	if preHead == "<unborn>" {
 		if status := gitInherit(repo, "log", "--oneline", "HEAD"); status != 0 {
 			exit(status)
@@ -798,6 +830,12 @@ func patchReceive(args []string) {
 	fetchArgs := []string{target, "--output", artifact}
 	if baseSet {
 		fetchArgs = append(fetchArgs, "--base", base)
+	}
+	// The destination's own HEAD lets fetch's export recover a base when the
+	// source is a host-provided checkout (no remote, so no upstream or origin
+	// branch to find one by): shared history is relayed instead of root export.
+	if destHead, ok := gitOutput(destination, "rev-parse", "--verify", "HEAD^{commit}"); ok {
+		fetchArgs = append(fetchArgs, "--fallback-base", destHead)
 	}
 	fetchStatus := captureExit(func() { patchFetch(fetchArgs) })
 	if fetchStatus != 0 {

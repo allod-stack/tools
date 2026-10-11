@@ -1694,6 +1694,131 @@ chmod 755 "$unwritable_parent"
 rm -rf "$unwritable_parent"
 
 # ================================================================
+# Host-provided checkout relay tests (--fallback-base)
+# ================================================================
+# A host-provided checkout (allod/nexus's host-provided-checkout.sh) is
+# `git init -b <branch>` with receive.denyCurrentBranch=updateInstead, pushed
+# into from the host's history, and never given a remote. Built directly
+# here rather than by sourcing the nexus script.
+
+make_host_provided_source() {
+  local dest="$1" source="$2" branch="${3:-master}"
+  mkdir -p "$(dirname "$source")"
+  git init -q -b "$branch" "$source"
+  git -C "$source" config receive.denyCurrentBranch updateInstead
+  git -C "$source" config user.name "Test User"
+  git -C "$source" config user.email "test@example.invalid"
+  git -c core.hooksPath=/dev/null -C "$dest" push -q "$source" "HEAD:$branch"
+}
+
+# --- Host-provided source, one new commit ---
+hp_dest="$TMP/repos/hp-one-dest"
+init_repo "$hp_dest" master
+add_commit "$hp_dest" "shared point"
+
+hp_source="$TMP/repos/hp-one-source"
+make_host_provided_source "$hp_dest" "$hp_source" master
+add_commit "$hp_source" "vm-made change" "vm content"
+
+dest_origin_before=$(git -C "$hp_dest" remote get-url origin)
+
+reset_mock_ssh
+capture_with_path "$MOCK_PATH" "$ALLOD" patch receive "testhost:$hp_source" "$hp_dest"
+assert_status 0 "host-provided source with one new commit relays"
+assert_contains "$CAPTURE_OUTPUT" "applied 1 patch" "host-provided one commit applies exactly one patch"
+assert_contains "$CAPTURE_OUTPUT" "destination-head" "host-provided one commit summary names destination-head"
+hp_one_content=$(cat "$hp_dest/tracked.txt")
+assert_equal "$hp_one_content" "vm content" "host-provided one commit produces correct content"
+dest_origin_after=$(git -C "$hp_dest" remote get-url origin)
+assert_equal "$dest_origin_after" "$dest_origin_before" "host-provided one commit leaves destination origin untouched"
+
+# --- Host-provided source, two new commits ---
+hp_dest2="$TMP/repos/hp-two-dest"
+init_repo "$hp_dest2" master
+add_commit "$hp_dest2" "shared point two"
+
+hp_source2="$TMP/repos/hp-two-source"
+make_host_provided_source "$hp_dest2" "$hp_source2" master
+add_commit "$hp_source2" "vm change one" "vm one"
+add_commit "$hp_source2" "vm change two" "vm two"
+
+reset_mock_ssh
+capture_with_path "$MOCK_PATH" "$ALLOD" patch receive "testhost:$hp_source2" "$hp_dest2"
+assert_status 0 "host-provided source with two new commits relays"
+assert_contains "$CAPTURE_OUTPUT" "applied 2 patch" "host-provided two commits applies both patches"
+hp_two_content=$(cat "$hp_dest2/tracked.txt")
+assert_equal "$hp_two_content" "vm two" "host-provided two commits applies them in order"
+
+# --- Host-provided source whose history the destination lacks ---
+# The destination advances on its own after the push into the VM, so the VM
+# never has that commit: the fallback cannot resolve in the source and the
+# export falls back to root, which a non-empty destination still refuses.
+hp_dest3="$TMP/repos/hp-missing-dest"
+init_repo "$hp_dest3" master
+add_commit "$hp_dest3" "shared point three"
+
+hp_source3="$TMP/repos/hp-missing-source"
+make_host_provided_source "$hp_dest3" "$hp_source3" master
+add_commit "$hp_dest3" "destination moves on without the VM"
+hp3_head_before=$(git -C "$hp_dest3" rev-parse HEAD)
+
+reset_mock_ssh
+capture_with_path "$MOCK_PATH" "$ALLOD" patch receive "testhost:$hp_source3" "$hp_dest3"
+assert_status 14 "host-provided source whose destination HEAD it lacks is refused"
+assert_contains "$CAPTURE_OUTPUT" "empty destination history" "host-provided missing-history refusal names why"
+hp3_head_after=$(git -C "$hp_dest3" rev-parse HEAD)
+assert_equal "$hp3_head_after" "$hp3_head_before" "host-provided missing-history refusal leaves destination HEAD unchanged"
+
+# --- Forge-backed source with an upstream: the fallback is ignored ---
+hp_upstream_source="$TMP/repos/hp-upstream-source"
+init_repo "$hp_upstream_source" master
+add_commit "$hp_upstream_source" "forge-backed change" "forge content"
+
+hp_upstream_dest="$TMP/repos/hp-upstream-dest"
+clone_repo "$hp_upstream_source" "$hp_upstream_dest"
+
+reset_mock_ssh
+capture_with_path "$MOCK_PATH" "$ALLOD" patch receive "testhost:$hp_upstream_source" "$hp_upstream_dest"
+assert_status 0 "forge-backed source with an upstream relays unchanged"
+assert_contains "$CAPTURE_OUTPUT" "upstream" "forge-backed relay summary names upstream, not the fallback"
+
+# --- An explicit --base still wins over the fallback ---
+hp_explicit_source="$TMP/repos/hp-explicit-source"
+init_repo "$hp_explicit_source" master
+add_commit "$hp_explicit_source" "before tag"
+git -C "$hp_explicit_source" tag v1.0
+add_commit "$hp_explicit_source" "after tag"
+
+reset_mock_ssh
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:$hp_explicit_source" --base v1.0 \
+  --fallback-base 0000000000000000000000000000000000000000
+assert_status 0 "fetch --base wins over a --fallback-base"
+hp_explicit_artifact=$(printf '%s' "$CAPTURE_OUTPUT" | grep 'artifact dir:' | sed 's/.*artifact dir: //')
+assert_equal "$(jq -r '.base_source' "$hp_explicit_artifact/manifest.json")" "explicit" \
+  "fetch --base records base_source explicit over the fallback"
+rm -rf "$hp_explicit_artifact"
+
+# --- Root export still records base_source root ---
+hp_root_source="$TMP/repos/hp-root-source"
+hp_root_remote="$TMP/remotes/hp-root.git"
+git init -q --bare -b main "$hp_root_remote"
+git init -q -b main "$hp_root_source"
+git -C "$hp_root_source" config user.name "Test User"
+git -C "$hp_root_source" config user.email "test@example.invalid"
+printf 'root base source\n' > "$hp_root_source/tracked.txt"
+git -C "$hp_root_source" add tracked.txt
+git -C "$hp_root_source" commit -qm "root base source initial"
+git -C "$hp_root_source" remote add origin "$hp_root_remote"
+
+reset_mock_ssh
+capture_with_path "$MOCK_PATH" "$ALLOD" patch fetch "testhost:$hp_root_source"
+assert_status 0 "root export fetch still succeeds"
+hp_root_artifact=$(printf '%s' "$CAPTURE_OUTPUT" | grep 'artifact dir:' | sed 's/.*artifact dir: //')
+assert_equal "$(jq -r '.base_source' "$hp_root_artifact/manifest.json")" "root" \
+  "root export records base_source root"
+rm -rf "$hp_root_artifact"
+
+# ================================================================
 # Summary
 # ================================================================
 
