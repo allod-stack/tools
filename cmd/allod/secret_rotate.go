@@ -272,7 +272,7 @@ func secretRotate(args []string) {
 	// a dry run's whole purpose is to surface a refusal before the value is
 	// ever asked for, so it does not get bash's dry-run exemption from the
 	// clean-tree check.
-	branch := requireLandingBranch(checkout)
+	branch, defaultBranch := requireLandingBranch(checkout)
 
 	alias, group, groups := selectRotationGroup(checkout, name)
 	validateGroupMetadata(alias, group)
@@ -318,7 +318,7 @@ func secretRotate(args []string) {
 	if dryRun {
 		fmt.Fprintln(stderr, "Dry run: no prompt, decrypt, or encrypt will run.")
 		printGroupSummary(stderr, alias, group)
-		printDeploySteps(stderr, checkout, branch, group, commitSubject, deployStepsDryRun)
+		printDeploySteps(stderr, checkout, branch, defaultBranch, group, commitSubject, deployStepsDryRun)
 		printVerification(stderr, group)
 		printRevocationGate(stderr, group)
 		return
@@ -353,7 +353,7 @@ func secretRotate(args []string) {
 	// checkout to a different branch — or dirtied it — while this one was
 	// blocked reading input, and landing on whatever branch happens to be
 	// checked out now would be the wrong commit on the wrong branch.
-	if current := requireLandingBranch(checkout); current != branch {
+	if current, _ := requireLandingBranch(checkout); current != branch {
 		die(1, "%s moved from branch '%s' to '%s' while rotate was waiting for the value; refusing to land on a branch nobody asked for. Start over on '%s'", checkout, branch, current, branch)
 	}
 
@@ -407,11 +407,14 @@ func secretRotate(args []string) {
 	for _, item := range items {
 		fmt.Fprintf(stdout, "Wrote %s, encrypted to %d recipients from secrets.nix\n", item.target.path, len(item.target.recipients))
 	}
+	// The landing line goes with the steps, not with the "Wrote" results:
+	// on stdout alone it read as the whole outcome once stderr was
+	// redirected away, and the merge step was never seen (allod/tools#270).
 	pushed := pushStatus == 0
 	if pushed {
-		fmt.Fprintf(stdout, "Committed %s on %s and pushed to origin; merging is yours\n", commit, branch)
+		fmt.Fprintf(stderr, "Committed %s on %s and pushed to origin.\n", commit, branch)
 	} else {
-		fmt.Fprintf(stdout, "Committed %s on %s; the push failed (see below)\n", commit, branch)
+		fmt.Fprintf(stderr, "Committed %s on %s; the push failed (see below).\n", commit, branch)
 	}
 
 	printGroupSummary(stderr, alias, group)
@@ -419,7 +422,7 @@ func secretRotate(args []string) {
 	if !pushed {
 		deploySteps = deployStepsLandedNotPushed
 	}
-	printDeploySteps(stderr, checkout, branch, group, commitSubject, deploySteps)
+	printDeploySteps(stderr, checkout, branch, defaultBranch, group, commitSubject, deploySteps)
 	printVerification(stderr, group)
 	printRevocationGate(stderr, group)
 
@@ -520,11 +523,9 @@ func printRebuildCommand(w io.Writer, deployCheckout, system, kind string) {
 	}
 }
 
-// deployStepsLandingState says what printDeploySteps's "land the commit"
-// step should say: rotate has already committed and pushed by the time it
-// prints its steps (or dry-run mode ran nothing at all), so this step never
-// instructs the operator to run git themselves — that would contradict what
-// the command just did, or claim it did something a dry run did not.
+// deployStepsLandingState says how far the command itself took the branch
+// before step 1 hands the rest to the operator: committed and pushed,
+// committed with the push failed, or nothing yet on a dry run.
 type deployStepsLandingState int
 
 const (
@@ -534,27 +535,35 @@ const (
 )
 
 // printDeploySteps ports rotate-token's print_group_deploy_instructions.
-// Unlike rotate-token, this command has already landed the commit by the
-// time it prints (or, in a dry run, will land it exactly this way on a real
-// run), so the "commit and push" step describes what happened instead of
-// instructing the operator to run git themselves.
-func printDeploySteps(w io.Writer, checkout, branch string, group registryGroup, commitSubject string, landing deployStepsLandingState) {
+// Step 1 is the merge, as commands under a sentence like steps 2 and 3,
+// never as a clause after "pushed": that clause was read as done, the lock
+// in step 2 pinned the unmerged default branch, and the rebuild deployed the
+// old ciphertext (allod/tools#270). The command itself never merges.
+func printDeploySteps(w io.Writer, checkout, branch, defaultBranch string, group registryGroup, commitSubject string, landing deployStepsLandingState) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "--- Deployment steps ---")
 	step := 1
 
+	fmt.Fprintf(w, "%d. ", step)
 	switch landing {
 	case deployStepsLandedPushed:
-		fmt.Fprintf(w, "%d. %s is committed (%q) and pushed to origin; merge it into its default branch when you are ready.\n", step, branch, commitSubject)
+		fmt.Fprintf(w, "%s is committed (%q) and pushed to origin. Merge it into %s", branch, commitSubject, defaultBranch)
 	case deployStepsLandedNotPushed:
-		fmt.Fprintf(w, "%d. %s is committed (%q) but the push failed; push it yourself (the error follows below), then merge it into its default branch.\n", step, branch, commitSubject)
+		fmt.Fprintf(w, "%s is committed (%q) but the push failed (its error follows below). Push it, then merge it into %s", branch, commitSubject, defaultBranch)
 	default: // deployStepsDryRun
-		fmt.Fprintf(w, "%d. A live run commits", step)
+		fmt.Fprint(w, "A live run commits")
 		for _, credential := range group.Credentials {
 			fmt.Fprintf(w, " %s", credential.SecretPath)
 		}
-		fmt.Fprintf(w, " in %s as %q and pushes %s to origin; merging stays your act.\n", checkout, commitSubject, branch)
+		fmt.Fprintf(w, " in %s as %q and pushes %s to origin; the merge into %s stays yours", checkout, commitSubject, branch, defaultBranch)
 	}
+	fmt.Fprintf(w, "; nothing below works until it is done, because step %d pins whatever %s holds and a rebuild before the merge deploys the old ciphertext:\n", step+1, defaultBranch)
+	fmt.Fprintf(w, "   cd %s\n", checkout)
+	if landing == deployStepsLandedNotPushed {
+		fmt.Fprintf(w, "   git push origin %s\n", branch)
+	}
+	fmt.Fprintf(w, "   git checkout %s && git pull --ff-only\n", defaultBranch)
+	fmt.Fprintf(w, "   git merge --ff-only %s && git push\n", branch)
 	step++
 
 	deployCheckout := deployCheckoutRelative()

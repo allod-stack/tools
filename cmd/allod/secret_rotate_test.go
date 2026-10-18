@@ -483,6 +483,25 @@ func TestSecretRotateRendersEveryGroupMemberFromOneValue(t *testing.T) {
 	if strings.Contains(out+errText, "tok-fixture") {
 		t.Error("the value was printed")
 	}
+	// The landing line and the steps share a stream, so a redirect cannot
+	// separate "pushed" from the merge it still needs.
+	landed := rf.head(t)
+	if strings.Contains(out, "Committed") {
+		t.Errorf("the landing line went to stdout, away from the steps:\n%s", out)
+	}
+	landingLine, _, _ := strings.Cut(errText, "\n")
+	if fields := strings.Fields(landingLine); len(fields) < 2 || fields[0] != "Committed" || !strings.HasPrefix(landed, fields[1]) || !strings.HasSuffix(landingLine, " on agent/landing and pushed to origin.") {
+		t.Errorf("stderr does not open with the landing line for %s\ngot: %q", landed, landingLine)
+	}
+	if want := "nothing below works until it is done, because step 2 pins whatever master holds"; !strings.Contains(errText, want) {
+		t.Errorf("stderr lacks %q\ngot: %q", want, errText)
+	}
+	// Step 1 is executable: run exactly the lines it prints, and the
+	// rotation must be on origin's master afterwards with nothing inferred.
+	runPrintedStep(t, errText, 1)
+	if got := rf.originHead(t, "master"); got != landed {
+		t.Errorf("after running the printed step 1, origin master = %q, want the rotation commit %q", got, landed)
+	}
 }
 
 func TestSecretRotateMissingRcloneIsClearFailure(t *testing.T) {
@@ -560,7 +579,10 @@ func TestSecretRotateDryRunPrintsStepsWithoutWriting(t *testing.T) {
 		"fixture-host (nixos-host)",
 		"dev-a (dev-vm)",
 		`A live run commits secrets/cred-a.age secrets/cred-b.age`,
-		`as "rotate shared.rotate Forgejo token" and pushes agent/landing to origin; merging stays your act.`,
+		`as "rotate shared.rotate Forgejo token" and pushes agent/landing to origin; the merge into master stays yours`,
+		"nothing below works until it is done, because step 2 pins whatever master holds",
+		"git checkout master && git pull --ff-only",
+		"git merge --ff-only agent/landing && git push",
 		"nix flake update secrets",
 		"sudo nixos-rebuild switch --flake ~/work/allod/deploy#fixture-host",
 		"rebuild-vm dev-a",
@@ -579,6 +601,34 @@ func TestSecretRotateDryRunPrintsStepsWithoutWriting(t *testing.T) {
 		if strings.Contains(errText, notWanted) {
 			t.Errorf("dry run instructed manual git on the secrets repo with %q\ngot: %q", notWanted, errText)
 		}
+	}
+}
+
+// runPrintedStep runs the indented command lines printed under step n of
+// the deployment steps, as one shell script and from no particular
+// directory, the way an operator pasting them would. A step with no
+// command lines fails the test: a step that is only a sentence is the shape
+// allod/tools#270 removed.
+func runPrintedStep(t *testing.T, errText string, n int) {
+	t.Helper()
+	marker := fmt.Sprintf("\n%d. ", n)
+	at := strings.Index(errText, marker)
+	if at < 0 {
+		t.Fatalf("stderr has no step %d\ngot: %q", n, errText)
+	}
+	var lines []string
+	for _, line := range strings.Split(errText[at+len(marker):], "\n")[1:] {
+		if !strings.HasPrefix(line, "   ") {
+			break
+		}
+		lines = append(lines, strings.TrimSpace(line))
+	}
+	if len(lines) == 0 {
+		t.Fatalf("step %d prints no command lines\ngot: %q", n, errText)
+	}
+	cmd := exec.Command("bash", "-ec", strings.Join(lines, "\n"))
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("the printed step %d failed: %v\n%s\nscript:\n%s", n, err, output, strings.Join(lines, "\n"))
 	}
 }
 
@@ -923,8 +973,9 @@ func TestSecretRotateReportsPushFailureAndKeepsCommit(t *testing.T) {
 	for _, want := range []string{
 		"Forgejo group: raw.rotate",
 		"is committed",
-		"but the push failed; push it yourself (the error follows below)",
-		"then merge it into its default branch",
+		"but the push failed (its error follows below). Push it, then merge it into master",
+		"git push origin agent/landing",
+		"git merge --ff-only agent/landing && git push",
 		"Update the deploy flake lock",
 		"Rebuild affected target(s):",
 		"Verification",

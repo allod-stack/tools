@@ -94,6 +94,8 @@ A push failure after the commit is reported with the commit kept; the landing ha
 
 Nothing is decrypted. Every credential in the group must already be `active` with a ciphertext on disk, and each new ciphertext is built in memory, written by temp-file-and-rename so a file is always old or new bytes, and gated by one `nix flake check` before one commit and push. A failed check restores every ciphertext and creates no commit. A push failure keeps the commit, still prints every step, and exits non-zero.
 
+The command never merges. Step 1 of the printed deployment steps is the merge into the default branch, as the commands to run, and it says that nothing below it works until it is done: the lock bump in step 2 pins whatever the default branch holds, so a rebuild before the merge deploys the old ciphertext. The landing line and the steps go to stderr together, so a redirect cannot separate "pushed" from the merge it still needs.
+
 `--dry-run` runs every gate — branch, clean tree, active state, ciphertext present, recipients, registry shape, unique group membership, declared value and verification — reads no value, decrypts nothing, encrypts nothing, runs no checks, and writes nothing. It still refuses a dirty tree. It prints the group, its targets, the deploy and verification steps, and the revocation gate, phrased as what a live run would do.
 
 The printed steps come from the registry: the rebuild command per target kind, the verification command per target, and the revocation gate with Forgejo wording only for a `forgejo` group and none at all for an `in-place` strategy.

@@ -237,8 +237,10 @@ type secretTarget struct {
 // that is not the default one, and a tree with nothing in it that the commit
 // would not own. A leftover ciphertext from a failed attempt is 'dirty' here
 // too, and is named as such rather than silently swept into the landing.
-func requireLandingBranch(checkout string) string {
-	branch := currentBranch(checkout)
+// The default branch comes back with it: that is where the printed merge
+// step sends the landing.
+func requireLandingBranch(checkout string) (branch, defaultBranch string) {
+	branch = currentBranch(checkout)
 	defaultBranch, ok := defaultRemoteBranch(checkout)
 	if !ok {
 		die(1, "could not resolve the default branch of %s; run: git -C %s remote set-head origin -a", checkout, checkout)
@@ -254,7 +256,7 @@ func requireLandingBranch(checkout string) string {
 		fmt.Fprintf(stderr, "allod: %s has uncommitted or untracked changes:\n%s\n", checkout, status)
 		die(1, "commit or remove them first; the landing must be the only change in its commit")
 	}
-	return branch
+	return branch, defaultBranch
 }
 
 func ageIdentityPath() string {
@@ -464,7 +466,7 @@ func matchingBrace(text string, start int) int {
 func secretCreate(args []string) {
 	name, checkoutArg := parseSecretArgs("create", args)
 	checkout := resolveSecretsCheckout(checkoutArg)
-	branch := requireLandingBranch(checkout)
+	branch, _ := requireLandingBranch(checkout)
 	target := lookupSecret(checkout, name)
 	groups, err := secretEvalRegistry(checkout)
 	if err != nil {
@@ -560,7 +562,7 @@ func secretCreate(args []string) {
 func secretRekey(args []string) {
 	name, checkoutArg := parseSecretArgs("rekey", args)
 	checkout := resolveSecretsCheckout(checkoutArg)
-	branch := requireLandingBranch(checkout)
+	branch, _ := requireLandingBranch(checkout)
 	target := lookupSecret(checkout, name)
 	target.branch = branch
 	if target.state == "pending" {
