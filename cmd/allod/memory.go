@@ -1,0 +1,222 @@
+package main
+
+// The 'memory' namespace drives the memory-backpass skill
+// (skills/memory-backpass/SKILL.md in allod/memory) as code: a nightly timer
+// runs this command and spends a model only on the skill's two prompts
+// (bulk analysis, synthesis) instead of asking a headless session to follow
+// the skill's ten steps by hand. The skill text stays the spec; this file
+// and memory_backpass_*.go cite its step numbers in names and comments.
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+func init() {
+	registerNamespace(namespace{
+		name:    "memory",
+		summary: "Run the memory backward pass over session traces (backpass)",
+		main:    memoryMain,
+	})
+}
+
+const memoryUsageText = `Usage:
+  allod memory backpass --traces <dir>... [--public <dir>] [--private <dir>]
+      [--bulk-seat <cmd>] [--fallback-seat <cmd>] [--synthesis-seat <cmd>]
+      [--timeout <seconds>] [--jobs <n>] [--report-only]
+
+See docs/allod-memory.md for the full contract: the seats, the state file,
+what each mode writes, and the report shape.
+`
+
+func memoryMain(args []string) {
+	if len(args) == 0 {
+		fmt.Fprint(stderr, memoryUsageText)
+		exit(1)
+	}
+	command, args := args[0], args[1:]
+	switch command {
+	case "backpass":
+		memoryBackpass(args)
+	case "-h", "--help":
+		fmt.Fprint(stdout, memoryUsageText)
+	default:
+		die(1, "unknown memory command: %s", command)
+	}
+}
+
+const memoryBackpassUsageText = memoryUsageText
+
+// backpassConfig is the fully resolved, validated configuration for one run:
+// every directory is an existing git repository and every seat required for
+// the chosen mode is non-empty by the time memoryBackpass hands this to
+// runBackpass.
+type backpassConfig struct {
+	tracesDirs    []string
+	publicDir     string
+	privateDir    string
+	bulkSeat      string
+	fallbackSeat  string
+	synthesisSeat string
+	timeout       time.Duration
+	jobs          int
+	reportOnly    bool
+}
+
+func memoryBackpass(args []string) {
+	var tracesDirs []string
+	publicDir, publicSet := "", false
+	privateDir, privateSet := "", false
+	bulkSeat, bulkSet := "", false
+	fallbackSeat, fallbackSet := "", false
+	synthesisSeat, synthesisSet := "", false
+	timeoutSeconds := 600
+	jobs := 1
+	reportOnly := false
+
+	for len(args) > 0 {
+		switch args[0] {
+		case "--traces":
+			requireValue(args, args[0])
+			if strings.HasPrefix(args[1], "-") {
+				die(1, "%s requires a value", args[0])
+			}
+			args = args[1:]
+			for len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+				tracesDirs = append(tracesDirs, args[0])
+				args = args[1:]
+			}
+		case "--":
+			tracesDirs = append(tracesDirs, args[1:]...)
+			args = nil
+		case "--public":
+			requireValue(args, args[0])
+			publicDir, publicSet, args = args[1], true, args[2:]
+		case "--private":
+			requireValue(args, args[0])
+			privateDir, privateSet, args = args[1], true, args[2:]
+		case "--bulk-seat":
+			requireValue(args, args[0])
+			bulkSeat, bulkSet, args = args[1], true, args[2:]
+		case "--fallback-seat":
+			requireValue(args, args[0])
+			fallbackSeat, fallbackSet, args = args[1], true, args[2:]
+		case "--synthesis-seat":
+			requireValue(args, args[0])
+			synthesisSeat, synthesisSet, args = args[1], true, args[2:]
+		case "--timeout":
+			requireValue(args, args[0])
+			n, err := strconv.Atoi(args[1])
+			if err != nil || n <= 0 {
+				die(1, "--timeout requires a positive whole number of seconds")
+			}
+			timeoutSeconds, args = n, args[2:]
+		case "--jobs":
+			requireValue(args, args[0])
+			n, err := strconv.Atoi(args[1])
+			if err != nil || n < 1 {
+				die(1, "--jobs requires a positive whole number")
+			}
+			jobs, args = n, args[2:]
+		case "--report-only":
+			reportOnly, args = true, args[1:]
+		case "-h", "--help":
+			fmt.Fprint(stdout, memoryBackpassUsageText)
+			return
+		default:
+			if strings.HasPrefix(args[0], "-") {
+				die(1, "unknown option for memory backpass: %s", args[0])
+			}
+			die(1, "memory backpass accepts no positional arguments")
+		}
+	}
+
+	if len(tracesDirs) == 0 {
+		die(1, "memory backpass requires --traces <dir>...")
+	}
+	for i, dir := range tracesDirs {
+		tracesDirs[i] = resolveGitRepo(dir)
+	}
+
+	if !publicSet {
+		publicDir = defaultPublicMemoryDir()
+	}
+	publicDir = resolveGitRepo(publicDir)
+
+	if !privateSet {
+		resolved, err := defaultPrivateMemoryDir()
+		if err != nil {
+			die(1, "%v", err)
+		}
+		privateDir = resolved
+	}
+	privateDir = resolveGitRepo(privateDir)
+
+	if !bulkSet {
+		bulkSeat = os.Getenv("ALLOD_BACKPASS_BULK_SEAT")
+	}
+	if bulkSeat == "" {
+		die(1, "memory backpass requires a bulk seat: pass --bulk-seat or set ALLOD_BACKPASS_BULK_SEAT")
+	}
+	if !fallbackSet {
+		fallbackSeat = os.Getenv("ALLOD_BACKPASS_FALLBACK_SEAT")
+	}
+	if !synthesisSet {
+		synthesisSeat = os.Getenv("ALLOD_BACKPASS_SYNTHESIS_SEAT")
+	}
+	if synthesisSeat == "" && !reportOnly {
+		die(1, "memory backpass requires a synthesis seat unless --report-only: pass --synthesis-seat or set ALLOD_BACKPASS_SYNTHESIS_SEAT")
+	}
+
+	runBackpass(backpassConfig{
+		tracesDirs:    tracesDirs,
+		publicDir:     publicDir,
+		privateDir:    privateDir,
+		bulkSeat:      bulkSeat,
+		fallbackSeat:  fallbackSeat,
+		synthesisSeat: synthesisSeat,
+		timeout:       time.Duration(timeoutSeconds) * time.Second,
+		jobs:          jobs,
+		reportOnly:    reportOnly,
+	})
+}
+
+// defaultPublicMemoryDir is <workDir>/<registry checkout of allod/memory>,
+// falling back to the literal checkout name when the registry has no entry
+// for it (a standalone build with no inventory).
+func defaultPublicMemoryDir() string {
+	checkout, ok := registryCheckout("allod/memory")
+	if !ok {
+		checkout = "allod/memory"
+	}
+	return filepath.Join(workDir(), checkout)
+}
+
+// defaultPrivateMemoryDir resolves to the one registry entry marked
+// "memory": true other than allod/memory; zero or more than one is a
+// refusal naming what was found, since the command cannot guess which one
+// an operator meant.
+func defaultPrivateMemoryDir() (string, error) {
+	var ids []string
+	for _, id := range memoryRegistryIds() {
+		if id != "allod/memory" {
+			ids = append(ids, id)
+		}
+	}
+	switch len(ids) {
+	case 1:
+		checkout, ok := registryCheckout(ids[0])
+		if !ok {
+			return "", fmt.Errorf("registry entry %s has no checkout path", ids[0])
+		}
+		return filepath.Join(workDir(), checkout), nil
+	case 0:
+		return "", fmt.Errorf(`no private memory registry entry found ("memory": true, other than allod/memory); pass --private`)
+	default:
+		return "", fmt.Errorf(`multiple private memory registry entries found (%s); pass --private`, strings.Join(ids, ", "))
+	}
+}
