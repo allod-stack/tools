@@ -99,7 +99,7 @@ them:
 | 3 | Whitespace-fold every returned quote and the trace; keep an item only when its folded quote is a non-empty substring of the folded trace. |
 | 4 | One private `ledger.md` line per surviving rule and session: `gap`, `ignored` (non-compliance), or `harm`; corroborate an existing line instead of duplicating it; never ledger an `irrelevant` item. |
 | 5 | Fold the evidence: per-instruction counts and relevance, per-ledger-rule session counts, and every surviving quote grouped by rule, for the synthesis prompt. |
-| 6 | Prune pre-run private and public `ledger.md` lines that are over 90 days old (every cited session's trace found and that old) or already covered by a topic file. |
+| 6 | Prune pre-run private `ledger.md` lines that are over 90 days old (every cited session's trace found and that old) or a `gap` line already covered by a topic file. A public line that qualifies is never edited — it is only listed under "To relay" as `prune: <line>` for a human to apply. |
 | 7 | (write mode) Open a private worktree, write the ledger changes, run the synthesis seat there, and apply any relayed public edits as plain commits in a second, unpushed worktree. |
 | 8 | Run `.hooks/memory-budget --worktree` in the private worktree; on failure, one fix call to the synthesis seat, then one more check; still over cap drops every edit this run proposed, caps never raised. |
 | 9 | `allod change record` then `allod change submit` from the private worktree; label the PR `relay` when anything was proposed for relay. |
@@ -143,7 +143,11 @@ for a human (or `allod patch receive`) to move.
 ## Exit status
 
 - `0` — every step completed and every trace analyzed.
-- `1` — a refusal or a fatal setup error, before or during the run.
+- `1` — a refusal or a fatal setup error, before or during the run, or
+  `allod change record`/`submit` failing from the private worktree. In the
+  latter case `analyzed.txt` is written and committed nowhere: every trace
+  this run analyzed stays pending, since the next run's fresh worktree
+  carries the same ledger lines.
 - `3` — the run completed, but at least one trace failed analysis (bulk
   seat, retry, and fallback all failed or timed out). The rest of the run
   still happens; a failed trace stays pending for the next run.
@@ -156,9 +160,11 @@ Plain text, `## ` headings, no colour, in this order: unrelayed public
 edits; seats (which seat analyzed which trace); the funnel (traces
 analyzed, items returned, dropped for a missing quote, malformed, ledger
 entries corroborated, ledger lines added, prunes, edits proposed); failures,
-when any; then the mode-specific sections — would-add/would-corroborate/
-would-prune for `--report-only`, or the PR URL, any claimed-but-absent or
-edited-but-unclaimed paths, and the relay worktree's outcome for write mode.
+when any; then the mode-specific sections — in `--report-only`, the fold
+(the same text the synthesis prompt would have received) followed by
+would-add/would-corroborate/would-prune; in write mode, the PR URL, any
+claimed-but-absent or edited-but-unclaimed paths, and the relay worktree's
+outcome.
 
 The funnel is the alarm this command is built around: a drop rate for
 missing quotes far above a few percent means the input (a trace, a prompt

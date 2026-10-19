@@ -155,18 +155,25 @@ func TestLedgerBuilderNegativePublicCandidateSuffix(t *testing.T) {
 
 func TestPruneByAgeRequiresEveryCitedTraceOldAndFound(t *testing.T) {
 	today := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
-	dates := map[string]string{"claude old-session": "2026-01-01"}
+	dates := map[string]string{
+		"claude old-session":    "2026-01-01",
+		"claude recent-session": "2026-05-20",
+	}
 	oldLine := `gap: x | claude old-session | "q"`
 	if !pruneByAge(oldLine, dates, today) {
 		t.Error("a line citing only an old, found session should prune")
 	}
 	recentLine := `gap: x | claude recent-session | "q"`
 	if pruneByAge(recentLine, dates, today) {
-		t.Error("a line citing a session with no trace found should never prune")
+		t.Error("a line citing a found but not-old-enough session should never prune")
 	}
 	mixedLine := `gap: x | claude old-session | "q" | claude recent-session | "q2"`
 	if pruneByAge(mixedLine, dates, today) {
 		t.Error("a line with any not-old-enough citation should not prune")
+	}
+	missingLine := `gap: x | claude old-session | "q" | claude missing-session | "q2"`
+	if pruneByAge(missingLine, dates, today) {
+		t.Error("a line citing a session with no trace found should never prune")
 	}
 }
 
@@ -178,6 +185,47 @@ func TestPruneByCoverageMatchesFoldedSubstring(t *testing.T) {
 	}
 	if pruneByCoverage("a rule nowhere present", dir) {
 		t.Error("coverage check should not match unrelated text")
+	}
+}
+
+func TestPruneByCoverageIgnoresLedgerAndExemptFiles(t *testing.T) {
+	dir := t.TempDir()
+	rule := "an uncovered private gap rule"
+	backpassWriteFile(t, dir+"/memory.md", "# Memory\n")
+	backpassWriteFile(t, dir+"/ledger.md", "- gap: "+rule+` | claude s | "q"`+"\n")
+	if pruneByCoverage(rule, dir) {
+		t.Error("coverage must not read ledger.md: a line's own text is not coverage")
+	}
+	backpassWriteFile(t, dir+"/topic.md", "# Topic\n\n"+rule+"\n")
+	if !pruneByCoverage(rule, dir) {
+		t.Error("a genuinely covering topic file should still count")
+	}
+}
+
+// TestApplyPrunesKeepsUncoveredDropsCovered is the regression test for the
+// ledger.md self-match: an untouched pre-run gap with no real coverage
+// survives, and one a topic file actually covers is pruned.
+func TestApplyPrunesKeepsUncoveredDropsCovered(t *testing.T) {
+	privateDir, publicDir := t.TempDir(), t.TempDir()
+	backpassWriteFile(t, privateDir+"/memory.md", "# Memory\n")
+	backpassWriteFile(t, privateDir+"/topic.md", "# Topic\n\nCovered rule text.\n")
+	backpassWriteFile(t, privateDir+"/ledger.md", strings.Join([]string{
+		"# Ledger", "",
+		`- gap: Covered rule text. | claude old-covered | "q"`,
+		`- gap: Uncovered rule text. | claude old-uncovered | "q"`, "",
+	}, "\n"))
+
+	b := newLedgerBuilder(privateDir, nil, nil)
+	today := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	if pruned := b.applyPrunes(map[string]string{}, today, privateDir, publicDir); pruned != 1 {
+		t.Fatalf("pruned = %d, want 1", pruned)
+	}
+	rendered := b.renderFile()
+	if strings.Contains(rendered, "Covered rule text.") {
+		t.Error("the covered line should have been pruned")
+	}
+	if !strings.Contains(rendered, "Uncovered rule text.") {
+		t.Error("the uncovered line should survive untouched")
 	}
 }
 

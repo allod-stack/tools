@@ -138,6 +138,13 @@ func TestMemoryBackpassReportOnlyFunnelAndLedger(t *testing.T) {
 		}
 	}
 
+	if !strings.Contains(out, "#101") {
+		t.Errorf("unrelayed public edits should list the merged, unchecked PR #101\n%s", out)
+	}
+	if strings.Contains(out, "#102") {
+		t.Errorf("#102 is closed but unmerged; it must not be listed as unrelayed\n%s", out)
+	}
+
 	if !strings.Contains(out, "Would add to private ledger") {
 		t.Error("report-only should list would-be private ledger additions")
 	}
@@ -260,6 +267,48 @@ func TestMemoryBackpassTimeout(t *testing.T) {
 	if !strings.Contains(out, "traces analyzed: 0") {
 		t.Errorf("every trace should have failed to analyze\n%s", out)
 	}
+	state := readAnalyzedState(fx.traces)
+	if len(state) != 0 {
+		t.Errorf("analyzed.txt should list none of the traces after every analysis failed, got: %v", state)
+	}
+}
+
+// TestMemoryBackpassPartialFailure garbles every attempt against one trace
+// only (bulk, bulk, fallback), leaving the other two traces to analyze
+// normally: the funnel and the state file must tell the two apart.
+func TestMemoryBackpassPartialFailure(t *testing.T) {
+	fx := backpassSetup(t)
+	backpassSetupForge(t)
+	binDir := t.TempDir()
+	bulkSeat := backpassSeat(t, binDir, backpassResponsesDir(t))
+	fallbackSeat := backpassWriteScript(t, binDir, "fallback-seat.sh", backpassFakeSeatScript) + " " + backpassResponsesDir(t)
+
+	t.Setenv("FAKE_SEAT_GARBAGE_N", "3")
+	t.Setenv("FAKE_SEAT_GARBAGE_BASENAME", "2026-09-01-session-a.md")
+	t.Setenv("FAKE_SEAT_COUNTER_DIR", t.TempDir())
+
+	out, errText, code := runAllod(t, "memory", "backpass", "--traces", fx.traces,
+		"--public", fx.public, "--private", fx.private,
+		"--bulk-seat", bulkSeat, "--fallback-seat", fallbackSeat, "--report-only")
+	if code != 3 {
+		t.Fatalf("exit code = %d, want 3, stderr = %q", code, errText)
+	}
+	if !strings.Contains(out, "traces analyzed: 2") {
+		t.Errorf("the other two traces should still analyze\n%s", out)
+	}
+	if !strings.Contains(out, "devbox/claude/2026-09-01-session-a.md") {
+		t.Errorf("the failed trace should be named under Failures\n%s", out)
+	}
+
+	state := readAnalyzedState(fx.traces)
+	if _, ok := state["devbox/claude/2026-09-01-session-a.md"]; ok {
+		t.Error("the failed trace must not be marked analyzed")
+	}
+	for _, path := range []string{"devbox/claude/2026-09-02-session-b.md", "devbox/pi/2026-09-03-session-c.md"} {
+		if _, ok := state[path]; !ok {
+			t.Errorf("%s should be marked analyzed", path)
+		}
+	}
 }
 
 func TestMemoryBackpassWriteMode(t *testing.T) {
@@ -267,7 +316,10 @@ func TestMemoryBackpassWriteMode(t *testing.T) {
 	forgeLog := backpassSetupForge(t)
 	binDir := t.TempDir()
 	bulkSeat := backpassSeat(t, binDir, backpassResponsesDir(t))
+	promptCopy := filepath.Join(t.TempDir(), "synthesis-prompt-received.md")
+	t.Setenv("FAKE_PROMPT_COPY", promptCopy)
 	synthesisSeat := backpassWriteScript(t, binDir, "fake-synthesis.sh", `#!/bin/sh
+if [ -n "$FAKE_PROMPT_COPY" ]; then cp "$1" "$FAKE_PROMPT_COPY"; fi
 echo "- Fixture synthesis edit." >> memory.md
 cat <<'EOF'
 {"edits":[{"title":"Fixture synthesis edit","paths":["memory.md"],"rationale":"evidence supports it","evidence":[{"source":"claude a","quote":"q1"}]}],"toRelay":[{"title":"Fixture relay edit","diff":"--- a/memory.md\n+++ b/memory.md\n@@ -7,2 +7,3 @@\n - Write a test before merging a change to the fixture tool.\n - Keep fixture bullets short so the index stays easy to read.\n+- Fixture relay edit landed.\n","rationale":"evidence supports relaying it","evidence":[{"source":"claude a","quote":"q1"}]}]}
@@ -275,6 +327,7 @@ EOF
 `)
 
 	publicOriginBefore, _ := gitOutput(fx.public, "ls-remote", "--heads", "origin")
+	privateMainBefore, _ := gitOutput(fx.private, "rev-parse", "origin/main")
 
 	out, errText, code := runAllod(t, "memory", "backpass", "--traces", fx.traces,
 		"--public", fx.public, "--private", fx.private,
@@ -285,16 +338,34 @@ EOF
 	if !strings.Contains(out, "PR: http://forge.example") {
 		t.Errorf("report should carry the PR URL\n%s", out)
 	}
-
-	today := time.Now().UTC().Format("2006-01-02")
-	branch := "agent/memory-backpass-" + today
-	if !localRefExists(fx.private, branch) {
-		t.Errorf("branch %s should exist in the private fixture repo", branch)
+	if !strings.Contains(out, "#101") {
+		t.Errorf("write mode should also run the relay check\n%s", out)
 	}
+
+	promptReceived, err := os.ReadFile(promptCopy)
+	if err != nil {
+		t.Fatalf("synthesis seat never received a prompt file: %v", err)
+	}
+	if !strings.Contains(string(promptReceived), "memory-backpass: 2026-08-01 (rejected)") {
+		t.Error("synthesis prompt should list the closed, unmerged PR under rejected titles")
+	}
+	if strings.Contains(string(promptReceived), "memory-backpass: 2026-09-01") {
+		t.Error("synthesis prompt must not list the merged PR as a rejected title")
+	}
+
+	branch := backpassFindAgentBranch(t, fx.private)
 	diff, _ := gitOutput(fx.private, "diff", "main", branch, "--", "ledger.md")
 	if diff == "" {
 		t.Error("the private branch should carry a ledger.md change")
 	}
+	// Proves the budget hook actually ran against this worktree (in the
+	// sandbox, with the old #!/usr/bin/env bash shebang, it silently did
+	// not): the kept edit only lands on the branch once the hook passes it.
+	memoryDiff, _ := gitOutput(fx.private, "diff", "main", branch, "--", "memory.md")
+	if !strings.Contains(memoryDiff, "Fixture synthesis edit") {
+		t.Errorf("the kept edit should be on the branch's memory.md, diff = %q", memoryDiff)
+	}
+
 	if !localRefExists(fx.public, branch) {
 		t.Errorf("branch %s should exist in the public fixture repo (the relay worktree)", branch)
 	}
@@ -309,8 +380,8 @@ EOF
 		t.Fatal(err)
 	}
 	log := string(logData)
-	if !strings.Contains(log, "pr create") || !strings.Contains(log, "memory-backpass: "+today) {
-		t.Errorf("forge log missing a 'pr create' with the run's title\n%s", log)
+	if !strings.Contains(log, "pr create") {
+		t.Errorf("forge log missing a 'pr create' call\n%s", log)
 	}
 	if !strings.Contains(log, "issue edit") || !strings.Contains(log, "--add-label relay") {
 		t.Errorf("forge log missing 'issue edit ... --add-label relay'\n%s", log)
@@ -322,6 +393,10 @@ EOF
 	privateOriginAfter, _ := gitOutput(fx.private, "ls-remote", "--heads", "origin", branch)
 	if privateOriginAfter == "" {
 		t.Error("the private agent branch should have been pushed by 'change submit'")
+	}
+	privateMainAfter, _ := gitOutput(fx.private, "rev-parse", "origin/main")
+	if privateMainBefore != privateMainAfter {
+		t.Errorf("private origin's default branch moved: before %q, after %q", privateMainBefore, privateMainAfter)
 	}
 	publicOriginAfter, _ := gitOutput(fx.public, "ls-remote", "--heads", "origin")
 	if publicOriginBefore != publicOriginAfter {
@@ -349,5 +424,15 @@ EOF
 	}
 	if !strings.Contains(out, "every edit dropped") {
 		t.Errorf("report should say every edit was dropped after the budget stayed over cap\n%s", out)
+	}
+
+	branch := backpassFindAgentBranch(t, fx.private)
+	memoryDiff, _ := gitOutput(fx.private, "diff", "main", branch, "--", "memory.md")
+	if memoryDiff != "" {
+		t.Errorf("the dropped edit must not reach the branch's memory.md, diff = %q", memoryDiff)
+	}
+	worktree := backpassWorktreePathForBranch(t, fx.private, branch)
+	if status, _ := gitOutput(worktree, "status", "--porcelain"); status != "" {
+		t.Errorf("the worktree should be clean of the seat's files after the drop, status = %q", status)
 	}
 }

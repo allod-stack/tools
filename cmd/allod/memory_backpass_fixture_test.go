@@ -110,8 +110,9 @@ func backpassSetup(t *testing.T) backpassFixtures {
 // backpassFakeSeatScript is the fake seat shared by every seat test: it
 // reads the "Path: " line from the prompt file, optionally sleeps
 // (FAKE_SEAT_SLEEP) or answers garbage for its first FAKE_SEAT_GARBAGE_N
-// calls against a given trace (tracked per trace in FAKE_SEAT_COUNTER_DIR),
-// and otherwise prints <responses-dir>/<trace-basename>.json.
+// calls (tracked per trace in FAKE_SEAT_COUNTER_DIR), scoped to one trace's
+// basename when FAKE_SEAT_GARBAGE_BASENAME is set, and otherwise prints
+// <responses-dir>/<trace-basename>.json.
 const backpassFakeSeatScript = `#!/bin/sh
 responses="$1"
 prompt="$2"
@@ -120,7 +121,11 @@ base=$(basename "$tracepath")
 if [ -n "$FAKE_SEAT_SLEEP" ]; then
   sleep "$FAKE_SEAT_SLEEP"
 fi
-if [ -n "$FAKE_SEAT_GARBAGE_N" ] && [ -n "$FAKE_SEAT_COUNTER_DIR" ]; then
+garbage_applies=1
+if [ -n "$FAKE_SEAT_GARBAGE_BASENAME" ] && [ "$base" != "$FAKE_SEAT_GARBAGE_BASENAME" ]; then
+  garbage_applies=0
+fi
+if [ -n "$FAKE_SEAT_GARBAGE_N" ] && [ -n "$FAKE_SEAT_COUNTER_DIR" ] && [ "$garbage_applies" = 1 ]; then
   mkdir -p "$FAKE_SEAT_COUNTER_DIR"
   counter="$FAKE_SEAT_COUNTER_DIR/$base.count"
   count=0
@@ -198,10 +203,14 @@ LISTEOF
   "pr view")
     case "$3" in
       101)
-        printf '{"title":"memory-backpass: 2026-09-01","body":"Paragraph.\n\n## To relay\n\n- [ ] allod patch receive fixture-host:/some/path allod/memory\n"}'
+        cat <<'VIEWEOF'
+{"title":"memory-backpass: 2026-09-01","body":"Paragraph.\n\n## To relay\n\n- [ ] allod patch receive fixture-host:/some/path allod/memory\n"}
+VIEWEOF
         ;;
       102)
-        printf '{"title":"memory-backpass: 2026-08-01 (rejected)","body":"Paragraph.\n"}'
+        cat <<'VIEWEOF'
+{"title":"memory-backpass: 2026-08-01 (rejected)","body":"Paragraph.\n"}
+VIEWEOF
         ;;
       *)
         printf '{"title":"","body":""}'
@@ -248,6 +257,40 @@ func backpassGitWithoutForge(t *testing.T) {
 		t.Fatalf("symlink git: %v", err)
 	}
 	t.Setenv("PATH", dir)
+}
+
+// backpassFindAgentBranch finds the one agent/memory-backpass-* branch a
+// write-mode run created, without recomputing "today" at assertion time —
+// which can straddle midnight relative to when the command actually ran.
+func backpassFindAgentBranch(t *testing.T, repo string) string {
+	t.Helper()
+	out, ok := gitOutput(repo, "for-each-ref", "--format=%(refname:short)", "refs/heads/agent/memory-backpass-*")
+	if !ok {
+		t.Fatalf("git for-each-ref failed in %s", repo)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 1 || lines[0] == "" {
+		t.Fatalf("expected exactly one agent/memory-backpass-* branch in %s, got: %q", repo, out)
+	}
+	return lines[0]
+}
+
+// backpassWorktreePathForBranch locates the linked worktree a branch is
+// checked out in, via the same 'git worktree list --porcelain' parser
+// change.go's own 'change list' uses.
+func backpassWorktreePathForBranch(t *testing.T, repo, branch string) string {
+	t.Helper()
+	listing, ok := gitOutput(repo, "worktree", "list", "--porcelain")
+	if !ok {
+		t.Fatalf("git worktree list failed in %s", repo)
+	}
+	for _, rec := range parseWorktrees(listing) {
+		if rec.branch == branch {
+			return rec.path
+		}
+	}
+	t.Fatalf("no worktree found for branch %s in %s", branch, repo)
+	return ""
 }
 
 func backpassLookPath(t *testing.T, name string) string {
