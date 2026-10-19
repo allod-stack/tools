@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# memory-budget - the always-loaded memory surface has a byte budget.
+#
+# Every byte of memory.md is read at the start of every session, forever, and
+# the more it holds the less of it is followed. The rules are an index under
+# the cap, a topic file under the larger cap, and no ISO date such as
+# `2026-09-08` in `memory.md`: dates are narration, and memory records state
+# while the forge records history.
+#
+#   memory-budget             check the files staged for commit (the pre-commit hook)
+#   memory-budget --worktree  check the files on disk (by hand, or from a timer)
+#
+# Exempt: README.md, LICENSE, ledger.md, retired.md, and everything under a
+# directory (adapters/, skills/, templates/), none of which is read at session
+# start. The two append-only logs have no cap: capping a file that only grows
+# would fail the pass that writes it, with nothing it could move elsewhere.
+set -euo pipefail
+
+INDEX_MAX_BYTES=16384
+TOPIC_MAX_BYTES=24576
+DATE_PATTERN='20[0-9][0-9]-[01][0-9]-[0-3][0-9]'
+
+mode=staged
+case "${1:-}" in
+  --worktree) mode=worktree ;;
+  -h|--help) sed -n '2,${/^#/!q; s/^# \{0,1\}//; p;}' "$0"; exit 0 ;;
+  "") ;;
+  *) echo "memory-budget: unknown option: $1" >&2; exit 2 ;;
+esac
+
+repo="$(git rev-parse --show-toplevel)"
+cd "$repo"
+
+list_files() {
+  if [ "$mode" = staged ]; then
+    git diff --cached --name-only --diff-filter=ACMR -- '*.md'
+  else
+    git ls-files -- '*.md'
+  fi
+}
+
+size_of() {
+  if [ "$mode" = staged ]; then
+    if ! git cat-file -s ":$1"; then
+      printf 'memory-budget: cannot read staged blob for %s\n' "$1" >&2
+      return 1
+    fi
+  else
+    wc -c < "$1"
+  fi
+}
+
+content_of() {
+  if [ "$mode" = staged ]; then git show ":$1"; else cat "$1"; fi
+}
+
+status=0
+fail() { printf 'memory-budget: %s\n' "$1" >&2; status=1; }
+
+files="$(list_files)"
+while IFS= read -r f; do
+  [ -n "$f" ] || continue
+  case "$f" in
+    */*) continue ;;
+    README.md|LICENSE|ledger.md|retired.md) continue ;;
+  esac
+  bytes="$(size_of "$f")"
+  if [ "$f" = memory.md ]; then
+    if [ "$bytes" -gt "$INDEX_MAX_BYTES" ]; then
+      fail "memory.md is $bytes bytes, cap $INDEX_MAX_BYTES: move a section to a topic file and leave a one-line pointer"
+    fi
+    content="$(content_of "$f")"
+    dated="$(printf '%s\n' "$content" | grep -nE "$DATE_PATTERN" || true)"
+    if [ -n "$dated" ]; then
+      fail "memory.md carries dated lines; drop the date or move the entry to a topic file or the ledger:"
+      printf '%s\n' "$dated" | sed 's/^/  /' >&2
+    fi
+  elif [ "$bytes" -gt "$TOPIC_MAX_BYTES" ]; then
+    fail "$f is $bytes bytes, cap $TOPIC_MAX_BYTES: split it or retire landed entries"
+  fi
+done <<< "$files"
+
+if [ "$status" -ne 0 ]; then
+  echo "memory-budget: the rules are in memory.md under Memory File Hygiene; the caps are the two constants at the top of $0." >&2
+fi
+exit "$status"

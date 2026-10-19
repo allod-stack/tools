@@ -1,0 +1,12 @@
+{
+  "positive": [],
+  "negative": [
+    {"id": "PUB-001", "moment": "turn 1", "effect": "merged without a test", "class": "non-compliance", "quote": "skipped writing a test"},
+    {"id": "PUB-001", "moment": "turn 1", "effect": "bad class", "class": "weird", "quote": "skipped writing a test"}
+  ],
+  "gaps": [
+    {"mistake": "skipped test", "proposedInstruction": "Always write a fixture test before merging.", "recurrenceRisk": "high", "quote": "which the fixture rule says to always do"},
+    {"mistake": "skipped test again", "proposedInstruction": "Always write a fixture test before merging.", "recurrenceRisk": "high", "quote": "which the fixture rule says to always do"},
+    {"mistake": "no quote", "proposedInstruction": "Unquotable gap.", "recurrenceRisk": "low", "quote": ""}
+  ]
+}

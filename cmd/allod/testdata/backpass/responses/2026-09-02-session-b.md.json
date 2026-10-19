@@ -1,0 +1,7 @@
+{
+  "positive": [],
+  "negative": [],
+  "gaps": [
+    {"mistake": "did not preserve a placeholder once", "proposedInstruction": "Preserve literal placeholder text such as {{TRACE}} when asked.", "recurrenceRisk": "medium", "quote": "kept A & B and the {{TRACE}} placeholder untouched"}
+  ]
+}

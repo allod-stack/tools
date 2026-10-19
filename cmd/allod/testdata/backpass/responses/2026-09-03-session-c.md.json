@@ -1,0 +1,7 @@
+{
+  "positive": [],
+  "negative": [],
+  "gaps": [
+    {"mistake": "skipped test again", "proposedInstruction": "Always write a fixture test before merging.", "recurrenceRisk": "high", "quote": "test writing was skipped again, same as before"}
+  ]
+}
