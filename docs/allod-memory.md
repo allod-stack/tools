@@ -32,12 +32,14 @@ allod memory backpass --traces <dir>... [--public <dir>] [--private <dir>]
   `"memory": true` other than `allod/memory`. Zero or more than one such
   entry is a refusal naming what was found; pass `--private` explicitly.
   Both `--public` and `--private` must be git repositories.
-- `--bulk-seat <cmd>` (env `ALLOD_BACKPASS_BULK_SEAT`) — required always.
-- `--fallback-seat <cmd>` (env `ALLOD_BACKPASS_FALLBACK_SEAT`) — optional;
-  without it the fallback attempt is skipped and the report says "no
-  fallback seat".
-- `--synthesis-seat <cmd>` (env `ALLOD_BACKPASS_SYNTHESIS_SEAT`) — required
-  unless `--report-only`.
+- `--bulk-seat <cmd>` (env `ALLOD_BACKPASS_BULK_SEAT`) and `--synthesis-seat
+  <cmd>` (env `ALLOD_BACKPASS_SYNTHESIS_SEAT`) — when neither the option nor
+  the environment variable is set, each defaults to the built-in `pi` seat
+  (below).
+- `--fallback-seat <cmd>` (env `ALLOD_BACKPASS_FALLBACK_SEAT`) — optional,
+  with no default of its own; without it the fallback attempt is skipped
+  and the report says "no fallback seat". Pass `pi` to use the built-in
+  there too.
 - `--timeout <seconds>` (default 600) — bounds every seat call.
 - `--jobs <n>` (default 1) — analysis calls in flight at once. The report's
   ordering never depends on completion order: traces are always processed
@@ -65,6 +67,28 @@ appended as the seat's last argument. Stdin is `/dev/null`, stdout is read
 back as the model's answer, and stderr is forwarded to this command's own
 stderr, one line at a time, each prefixed `seat <name>: ` where `<name>` is
 the seat value exactly as given.
+
+### The built-in `pi` seat
+
+A seat value of exactly `pi` — the default for the bulk and synthesis seats
+when neither the option nor its environment variable is set, or an explicit
+choice for any seat including the fallback — runs `pi` itself, with its own
+configured default provider and model, instead of a deployment's wrapper
+script. It is implemented as `script -qec "pi -p '@<prompt file>'"
+/dev/null`: `pi` prints nothing without a terminal, so `script` gives it
+one, and it takes the prompt as an `@path` argument (both measured on this
+VM, not documented `pi` behavior). A prompt file path containing a single
+quote is refused before any call, since it sits inside that inner shell's
+single quotes — scratch directories never produce one. `pi -p` runs with
+its tools enabled by default, which the synthesis call into a worktree
+needs; this command never passes `--no-tools`.
+
+The run report names the built-in `pi (<defaultProvider>/<defaultModel>)`,
+the two values read from `$HOME/.pi/agent/settings.json` (keys
+`defaultProvider`, `defaultModel`); when the file or either key is missing,
+it is named `pi (configured default)` instead. Selecting the built-in for
+any seat is a refusal up front, before any call, when `pi` or `script` is
+not on `PATH` — the message names which.
 
 The seat's exit status is never the gate; only its stdout content is. A
 call under `--timeout` runs in its own process group, and on expiry the
@@ -173,9 +197,11 @@ fill) is corrupted, not that the model is having a bad day.
 ## Pointing a deployment at its models
 
 `agent-roster` (in the deployment's private memory, or wherever a fork
-keeps it) owns which model fills which seat. A deployment's timer module
-passes `--bulk-seat`, `--fallback-seat`, and `--synthesis-seat` as one
-wrapper script per model — the thing that knows how to invoke that
+keeps it) owns which model fills which seat. Leaving a seat unset uses the
+built-in `pi` seat above, which is enough when `pi`'s own configured
+default provider and model is the roster's choice. Otherwise a deployment's
+timer module passes `--bulk-seat`, `--fallback-seat`, and `--synthesis-seat`
+as one wrapper script per model — the thing that knows how to invoke that
 provider's CLI non-interactively, with its input from `/dev/null` and its
 answer on stdout — never a bare model name: this command treats a seat as
 an opaque command, and the wrapper is where a deployment's own invocation

@@ -424,3 +424,65 @@ EOF
 		t.Errorf("the worktree should be clean of the seat's files after the drop, status = %q", status)
 	}
 }
+
+// TestMemoryBackpassBuiltinPiSeatDefault proves the default (no seat flags,
+// no ALLOD_BACKPASS_* env) runs the built-in 'pi' seat through 'script -qec'
+// and names it from pi's own settings.json.
+func TestMemoryBackpassBuiltinPiSeatDefault(t *testing.T) {
+	fx := backpassSetup(t)
+	backpassSetupForge(t)
+	binDir := t.TempDir()
+	backpassWriteScript(t, binDir, "script", `#!/bin/sh
+cmd="$2"
+exec sh -c "$cmd"
+`)
+	backpassWriteScript(t, binDir, "pi", `#!/bin/sh
+for last in "$@"; do :; done
+promptfile=$(echo "$last" | sed 's/^@//')
+tracepath=$(grep '^Path: ' "$promptfile" | head -1 | sed 's/^Path: //')
+base=$(basename "$tracepath")
+cat "$FAKE_PI_RESPONSES_DIR/$base.json"
+`)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("FAKE_PI_RESPONSES_DIR", backpassResponsesDir(t))
+
+	settingsDir := filepath.Join(fx.root, "home", ".pi", "agent")
+	if err := os.MkdirAll(settingsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(settingsDir, "settings.json"),
+		[]byte(`{"defaultProvider":"fixture","defaultModel":"model-x"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, errText, code := runAllod(t, "memory", "backpass", "--traces", fx.traces,
+		"--public", fx.public, "--private", fx.private, "--report-only")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0, stderr = %q", code, errText)
+	}
+	if !strings.Contains(out, "pi (fixture/model-x)") {
+		t.Errorf("seats section should name the built-in by its configured defaults\n%s", out)
+	}
+	if !strings.Contains(out, "traces analyzed: 3") {
+		t.Errorf("the built-in seat should have analyzed every trace\n%s", out)
+	}
+}
+
+func TestMemoryBackpassBuiltinSeatMissingToolsRefuses(t *testing.T) {
+	fx := backpassSetup(t)
+	gitPath := backpassLookPath(t, "git")
+	dir := t.TempDir()
+	if err := os.Symlink(gitPath, filepath.Join(dir, "git")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+
+	_, errText, code := runAllod(t, "memory", "backpass", "--traces", fx.traces,
+		"--public", fx.public, "--private", fx.private, "--report-only")
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(errText, "pi") || !strings.Contains(errText, "script") {
+		t.Errorf("stderr = %q, want it to name both missing tools", errText)
+	}
+}
