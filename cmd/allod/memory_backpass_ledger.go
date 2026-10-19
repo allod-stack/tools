@@ -314,22 +314,23 @@ func pruneByAge(line string, traceDates map[string]string, today time.Time) bool
 // checking it against the index would prune every such line on sight. Only
 // a gap's proposed instruction is a genuinely new rule that coverage can
 // retire.
+// pruneCoverageExempt is .hooks/memory-budget's own exempt list: none of
+// these is an index or a topic file, and ledger.md trivially "contains" any
+// rule text pulled from one of its own lines, which pruned every untouched
+// line on sight before this exemption existed.
+var pruneCoverageExempt = map[string]bool{"README.md": true, "LICENSE": true, "ledger.md": true, "retired.md": true}
+
 func pruneByCoverage(ruleText, checkoutDir string) bool {
 	folded := foldWhitespace(ruleText)
 	if folded == "" {
 		return false
-	}
-	for _, name := range []string{"memory.md"} {
-		if data, err := readFileOrEmpty(checkoutDir + "/" + name); err == nil && strings.Contains(foldWhitespace(data), folded) {
-			return true
-		}
 	}
 	entries, err := readDirNames(checkoutDir)
 	if err != nil {
 		return false
 	}
 	for _, name := range entries {
-		if name == "memory.md" || !strings.HasSuffix(name, ".md") {
+		if !strings.HasSuffix(name, ".md") || pruneCoverageExempt[name] {
 			continue
 		}
 		if data, err := readFileOrEmpty(checkoutDir + "/" + name); err == nil && strings.Contains(foldWhitespace(data), folded) {

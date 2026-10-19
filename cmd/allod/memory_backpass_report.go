@@ -37,6 +37,23 @@ type reportData struct {
 	funnel       funnelStats
 	failures     []failureRecord
 	publicPrunes []string
+	foldQuotes   map[string]bool
+}
+
+// foldedQuoteSet is the set of folded quotes this run actually supplied to
+// the synthesis prompt's FOLD section, so an edit's claimed evidence can be
+// checked against what was really offered rather than trusted blind.
+func foldedQuoteSet(outcomes []traceOutcome) map[string]bool {
+	set := map[string]bool{}
+	for _, oc := range outcomes {
+		if !oc.analyzed {
+			continue
+		}
+		for _, item := range oc.items {
+			set[foldWhitespace(item.quote)] = true
+		}
+	}
+	return set
 }
 
 func computeFunnel(outcomes []traceOutcome, corroborations, ledgerAdded, prunes int) funnelStats {
@@ -112,7 +129,7 @@ func renderFailures(failures []failureRecord) string {
 
 // renderReport is the run report printed to stdout in every mode: unrelayed
 // public edits, seats, funnel, failures, then the mode-specific sections.
-func renderReport(cfg backpassConfig, rep reportData, outcomes []traceOutcome, ledger *ledgerBuilder, result writeResult, scratchKept string) string {
+func renderReport(cfg backpassConfig, rep reportData, outcomes []traceOutcome, ledger *ledgerBuilder, result writeResult, scratchKept, fold string) string {
 	var b strings.Builder
 	b.WriteString("## Unrelayed public edits\n\n")
 	if len(rep.unrelayed) == 0 {
@@ -149,6 +166,10 @@ func renderReport(cfg backpassConfig, rep reportData, outcomes []traceOutcome, l
 	}
 
 	if cfg.reportOnly {
+		b.WriteString("\n## Fold\n\n")
+		b.WriteString(fold)
+		b.WriteString("\n")
+
 		b.WriteString("\n## Would add to private ledger\n\n")
 		added := ledger.addedLines()
 		if len(added) == 0 {
@@ -189,7 +210,7 @@ func renderReport(cfg backpassConfig, rep reportData, outcomes []traceOutcome, l
 
 	b.WriteString("\n## Write mode\n\n")
 	if result.submitFailed {
-		fmt.Fprintf(&b, "change record/submit failed in %s\n", result.privateWorktree)
+		fmt.Fprintf(&b, "%s failed in %s\n", result.failedStep, result.privateWorktree)
 		return b.String()
 	}
 	fmt.Fprintf(&b, "PR: %s\n", result.prURL)
@@ -223,16 +244,45 @@ func renderReport(cfg backpassConfig, rep reportData, outcomes []traceOutcome, l
 	return b.String()
 }
 
+// editEvidenceStats counts, for one kept edit, the distinct
+// "<harness> <session id>" sources and the total quotes among its claimed
+// evidence whose folded quote actually appears in this run's fold — the
+// skill's synthesis gates enforced as a reviewer-facing count rather than
+// by reverting a hunk the model may have had good (if unverifiable) reason
+// for: the human reading the PR is the actual gate.
+func editEvidenceStats(e editProposal, foldQuotes map[string]bool) (sessions, quotes int) {
+	sources := map[string]bool{}
+	for _, ev := range e.Evidence {
+		if foldQuotes[foldWhitespace(ev.Quote)] {
+			quotes++
+			sources[ev.Source] = true
+		}
+	}
+	return len(sources), quotes
+}
+
 // renderPRBody is step 9's PR body, built before 'change submit' runs.
 func renderPRBody(date string, cfg backpassConfig, rep reportData, result writeResult, fold string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Sessions read: %d. Findings kept: %d, dropped for a missing quote: %d. Edits proposed: %d.\n",
+	fmt.Fprintf(&b, "Sessions read: %d. Findings kept: %d, dropped for a missing quote: %d. Edits proposed: %d.",
 		rep.funnel.tracesAnalyzed, rep.funnel.itemsReturned-rep.funnel.droppedQuote, rep.funnel.droppedQuote, len(result.keptEdits))
+	if len(result.keptEdits) > 5 {
+		b.WriteString(" over the five-edit limit.")
+	}
+	b.WriteString("\n")
 
 	for _, e := range result.keptEdits {
 		fmt.Fprintf(&b, "\n## %s\n\n", e.Title)
 		fmt.Fprintf(&b, "Paths: %s\n\n", strings.Join(e.Paths, ", "))
 		fmt.Fprintf(&b, "%s\n\n", e.Rationale)
+		sessions, quotes := editEvidenceStats(e, rep.foldQuotes)
+		fmt.Fprintf(&b, "evidence: %d sessions, %d quotes\n", sessions, quotes)
+		if sessions < 2 {
+			b.WriteString("one-session exception: needs the safety reason in the rationale\n")
+		}
+		if quotes == 0 {
+			b.WriteString("no quoted evidence from this run\n")
+		}
 		for _, ev := range e.Evidence {
 			fmt.Fprintf(&b, "%s: %s\n", ev.Source, quoteWrap(ev.Quote))
 		}
@@ -419,16 +469,30 @@ func runBackpass(cfg backpassConfig) {
 	ledgerText := renderLedgerEntries(publicLedgerLines, privateLedgerLines)
 
 	// Step 2: discover every pending trace across every --traces checkout.
+	// The checkout's index (not just its basename, which two checkouts can
+	// share) is stamped onto every trace here, once, for the prompt-file
+	// naming under --jobs.
 	var allTraces, pending []pendingTrace
+	var unreadableOutcomes []traceOutcome
 	tracesByCheckout := map[string][]pendingTrace{}
-	for _, dir := range cfg.tracesDirs {
-		all, pend, err := pendingTracesIn(dir)
+	for i, dir := range cfg.tracesDirs {
+		all, pend, badOutcomes, err := pendingTracesIn(dir)
 		if err != nil {
 			die(1, "cannot walk traces checkout %s: %v", dir, err)
+		}
+		for j := range all {
+			all[j].checkoutIndex = i
+		}
+		for j := range pend {
+			pend[j].checkoutIndex = i
+		}
+		for j := range badOutcomes {
+			badOutcomes[j].trace.checkoutIndex = i
 		}
 		tracesByCheckout[dir] = all
 		allTraces = append(allTraces, all...)
 		pending = append(pending, pend...)
+		unreadableOutcomes = append(unreadableOutcomes, badOutcomes...)
 	}
 	sortTracesByPath(pending)
 
@@ -439,6 +503,8 @@ func runBackpass(cfg backpassConfig) {
 
 	// Steps 2 and 3: analyze and quote-check every pending trace.
 	outcomes := analyzeAllTraces(cfg, pending, analysisTemplate, indexText, ledgerText, validIDs, scratchDir)
+	outcomes = append(outcomes, unreadableOutcomes...)
+	sort.Slice(outcomes, func(i, j int) bool { return outcomes[i].trace.tracePath() < outcomes[j].trace.tracePath() })
 
 	anyFailed := false
 	for _, oc := range outcomes {
@@ -470,13 +536,21 @@ func runBackpass(cfg backpassConfig) {
 
 	funnel := computeFunnel(outcomes, corroborations, len(builder.addedLines()), prunedCount)
 	failures := computeFailures(outcomes)
-	rep := reportData{unrelayed: unrelayed, funnel: funnel, failures: failures, publicPrunes: publicPruneCandidates}
+	rep := reportData{
+		unrelayed: unrelayed, funnel: funnel, failures: failures,
+		publicPrunes: publicPruneCandidates, foldQuotes: foldedQuoteSet(outcomes),
+	}
 
 	var result writeResult
 	if !cfg.reportOnly {
 		date := today.Format("2006-01-02")
 		result = writeBackpass(cfg, date, builder, publicBullets, privateBullets, prs, fold, scratchDir, rep)
 		rep.funnel.editsProposed = len(result.keptEdits)
+		if result.submitFailed {
+			rep.failures = append(rep.failures, failureRecord{
+				path: result.privateWorktree, reason: result.failedStep + " failed",
+			})
+		}
 	}
 
 	// The scratch dir also held step 7/8's synthesis prompt files, so
@@ -488,26 +562,33 @@ func runBackpass(cfg backpassConfig) {
 		os.RemoveAll(scratchDir)
 	}
 
-	fmt.Fprint(stdout, renderReport(cfg, rep, outcomes, builder, result, scratchKept))
+	fmt.Fprint(stdout, renderReport(cfg, rep, outcomes, builder, result, scratchKept, fold))
 
 	// Step 10 (both modes): commit the state-file update per traces checkout.
-	for _, dir := range cfg.tracesDirs {
-		outcomesByRel := map[string]traceOutcome{}
-		analyzedHere := 0
-		for _, oc := range outcomes {
-			if oc.trace.checkoutDir == dir {
-				outcomesByRel[oc.trace.relPath] = oc
-				if oc.analyzed {
-					analyzedHere++
+	// Skipped entirely when record/submit failed: the next run's fresh
+	// worktree gets the same ledger lines, so the traces must stay pending.
+	if !result.submitFailed {
+		for _, dir := range cfg.tracesDirs {
+			outcomesByRel := map[string]traceOutcome{}
+			analyzedHere := 0
+			for _, oc := range outcomes {
+				if oc.trace.checkoutDir == dir {
+					outcomesByRel[oc.trace.relPath] = oc
+					if oc.analyzed {
+						analyzedHere++
+					}
 				}
 			}
-		}
-		changedState, newState := computeAnalyzedState(dir, tracesByCheckout[dir], outcomesByRel)
-		if changedState && writeAnalyzedState(dir, newState) {
-			commitAnalyzedState(dir, analyzedHere)
+			changedState, newState := computeAnalyzedState(dir, tracesByCheckout[dir], outcomesByRel)
+			if changedState && writeAnalyzedState(dir, newState) {
+				commitAnalyzedState(dir, analyzedHere)
+			}
 		}
 	}
 
+	if result.submitFailed {
+		exit(1)
+	}
 	if anyFailed {
 		exit(3)
 	}

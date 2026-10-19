@@ -19,14 +19,15 @@ import (
 
 // pendingTrace is one candidate session file under a --traces checkout.
 type pendingTrace struct {
-	checkoutDir  string
-	checkoutBase string
-	relPath      string // slash-separated, relative to checkoutDir
-	absPath      string
-	harness      string
-	sessionID    string
-	date         string // YYYY-MM-DD, from the filename
-	hash         string // sha256 hex of the current file content
+	checkoutDir   string
+	checkoutBase  string
+	checkoutIndex int    // this trace's position in cfg.tracesDirs
+	relPath       string // slash-separated, relative to checkoutDir
+	absPath       string
+	harness       string
+	sessionID     string
+	date          string // YYYY-MM-DD, from the filename
+	hash          string // sha256 hex of the current file content
 }
 
 // tracePath is the TRACE_PATH value: the checkout's basename joined with
@@ -54,6 +55,10 @@ func discoverTraces(checkoutDir string) ([]pendingTrace, error) {
 			return nil
 		}
 		if strings.HasPrefix(name, ".") || filepath.Ext(name) != ".md" {
+			return nil
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			fmt.Fprintf(stderr, "allod: memory backpass: skipping symlink: %s\n", path)
 			return nil
 		}
 		segs := strings.Split(filepath.ToSlash(rel), "/")
@@ -104,18 +109,24 @@ func readAnalyzedState(checkoutDir string) map[string]string {
 	return state
 }
 
-// pendingTracesIn returns checkout's candidate traces (all) and, among
-// them, the ones pending: no analyzed.txt line, or a hash that no longer
-// matches (the file grew or changed since it was last read).
-func pendingTracesIn(checkoutDir string) (all, pending []pendingTrace, err error) {
+// pendingTracesIn returns checkout's candidate traces (all), the ones
+// pending among them (no analyzed.txt line, or a hash that no longer
+// matches — the file grew or changed since it was last read), and a failed
+// outcome for any trace whose hash could not even be computed, so a
+// permissions error or a vanished file shows up in the funnel and the exit
+// status instead of being silently dropped from the run.
+func pendingTracesIn(checkoutDir string) (all, pending []pendingTrace, unreadable []traceOutcome, err error) {
 	all, err = discoverTraces(checkoutDir)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	state := readAnalyzedState(checkoutDir)
 	for i := range all {
 		hash, hashErr := sha256File(all[i].absPath)
 		if hashErr != nil {
+			unreadable = append(unreadable, traceOutcome{
+				trace: all[i], failReason: fmt.Sprintf("could not read trace: %v", hashErr),
+			})
 			continue
 		}
 		all[i].hash = hash
@@ -123,7 +134,7 @@ func pendingTracesIn(checkoutDir string) (all, pending []pendingTrace, err error
 			pending = append(pending, all[i])
 		}
 	}
-	return all, pending, nil
+	return all, pending, unreadable, nil
 }
 
 // evidenceItem is one surviving positive, negative, or gap item, with the
@@ -285,7 +296,9 @@ func analyzeOneTrace(cfg backpassConfig, pt pendingTrace, analysisTemplate, inde
 	if err != nil {
 		return traceOutcome{trace: pt, failReason: fmt.Sprintf("template fill: %v", err)}
 	}
-	promptPath := filepath.Join(scratchDir, strings.ReplaceAll(pt.tracePath(), "/", "_")+".prompt.md")
+	// The checkout index, not just its basename, disambiguates the prompt
+	// file name: two --traces checkouts can share a basename.
+	promptPath := filepath.Join(scratchDir, fmt.Sprintf("t%d_%s.prompt.md", pt.checkoutIndex, strings.ReplaceAll(pt.tracePath(), "/", "_")))
 	if err := os.WriteFile(promptPath, []byte(filled), 0600); err != nil {
 		return traceOutcome{trace: pt, failReason: fmt.Sprintf("could not write prompt file: %v", err)}
 	}

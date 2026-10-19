@@ -102,8 +102,13 @@ func readMemoryBudgetCaps(dir string) (indexMax, topicMax int, ok bool) {
 	return indexMax, topicMax, hasIndex && hasTopic
 }
 
-func runMemoryBudgetWorktree(dir string) (ok bool, output string) {
-	out, status := captureCommand(dir, nil, true, dir+"/.hooks/memory-budget", "--worktree")
+// runMemoryBudgetWorktree runs the hook from mainCheckout, never the
+// worktree's own copy (which the synthesis seat can rewrite), with cwd set
+// to worktree so the hook's own `git rev-parse --show-toplevel` finds it.
+// Invoked through `bash` explicitly: the hook's "#!/usr/bin/env bash"
+// shebang has no `env` to resolve in the nix sandbox.
+func runMemoryBudgetWorktree(mainCheckout, worktree string) (ok bool, output string) {
+	out, status := captureCommand(worktree, nil, true, "bash", mainCheckout+"/.hooks/memory-budget", "--worktree")
 	return status == 0, out
 }
 
@@ -178,31 +183,55 @@ func evidenceLines(evidence []evidenceRef) string {
 	return strings.Join(lines, "\n")
 }
 
-// inProcessRecordAndSubmit is step 9: 'change record' then 'change submit',
-// both in process from the private worktree, stdout captured so the PR URL
-// in submit's output can be read back and printed.
-func inProcessRecordAndSubmit(worktreePath, title, bodyFile string) (submitOut string, ok bool) {
+// runChangeInWorktree runs one 'allod change' subcommand in process with
+// cwd set to worktree, stdout captured, both restored afterward: the one
+// seam 'change record', 'change submit', and the ledger pre-commit below
+// all go through, so none of them duplicates the chdir/stdout-swap dance.
+func runChangeInWorktree(worktree string, args []string) (output string, code int) {
 	cwd, err := os.Getwd()
 	if err != nil {
-		return "", false
+		return "", 1
 	}
 	defer os.Chdir(cwd)
-	if err := os.Chdir(worktreePath); err != nil {
-		return "", false
+	if err := os.Chdir(worktree); err != nil {
+		return "", 1
 	}
 	var buf bytes.Buffer
 	prevOut := stdout
 	stdout = &buf
-	code := run([]string{"change", "record", "-m", title})
+	code = run(append([]string{"change"}, args...))
 	stdout = prevOut
-	if code != 0 {
-		return buf.String(), false
+	return buf.String(), code
+}
+
+// commitLedgerChanges is step 7's ledger pre-commit, made before the
+// synthesis seat ever runs: a later budget-failure drop can then revert
+// everything the seat did with 'git checkout -- .' and 'git clean -fd'
+// without touching the ledger lines this run already decided on. A no-op
+// run (no ledger change at all) fails harmlessly here; record's own
+// "nothing to commit" refusal is not escalated.
+func commitLedgerChanges(worktree string) {
+	runChangeInWorktree(worktree, []string{"record", "-m", "memory-backpass: ledger"})
+}
+
+// changeRecordNothingToCommit is change.go's exit code for "nothing staged
+// and no unpushed commits": when every edit this run proposed was dropped,
+// the ledger pre-commit already carries (and already pushed) the only
+// content there is, so this specific refusal from the final record call is
+// not a failure — submit still has a real branch to open a PR from.
+const changeRecordNothingToCommit = 4
+
+// inProcessRecordAndSubmit is step 9: 'change record' then 'change submit'.
+// failedStep names whichever one failed, for the Failures section.
+func inProcessRecordAndSubmit(worktreePath, title, bodyFile string) (submitOut, failedStep string, ok bool) {
+	if _, code := runChangeInWorktree(worktreePath, []string{"record", "-m", title}); code != 0 && code != changeRecordNothingToCommit {
+		return "", "change record", false
 	}
-	buf.Reset()
-	stdout = &buf
-	code = run([]string{"change", "submit", "-t", title, "-F", bodyFile})
-	stdout = prevOut
-	return buf.String(), code == 0
+	out, code := runChangeInWorktree(worktreePath, []string{"submit", "-t", title, "-F", bodyFile})
+	if code != 0 {
+		return out, "change submit", false
+	}
+	return out, "", true
 }
 
 var prNumberRe = regexp.MustCompile(`/(\d+)\s*$`)
@@ -238,6 +267,7 @@ type writeResult struct {
 	publicBudgetFailed              bool
 	prURL                           string
 	submitFailed                    bool
+	failedStep                      string
 	labelFailed                     bool
 	labelOutput                     string
 }
@@ -270,6 +300,7 @@ func writeBackpass(cfg backpassConfig, date string, ledger *ledgerBuilder, publi
 	if err := os.WriteFile(privatePath+"/ledger.md", []byte(ledger.renderFile()), 0644); err != nil {
 		die(1, "could not write ledger.md in %s: %v", privatePath, err)
 	}
+	commitLedgerChanges(privatePath)
 
 	indexMax, _, ok := readMemoryBudgetCaps(privatePath)
 	if !ok {
@@ -309,6 +340,9 @@ func writeBackpass(cfg backpassConfig, date string, ledger *ledgerBuilder, publi
 		answer = synthesisAnswer{}
 	}
 
+	// A path is marked claimed only once its whole edit is kept: an edit with
+	// one changed and one absent path must not hide the changed path from
+	// the "edited, unreported" sweep below by half-claiming it first.
 	changed := changedPaths(privatePath)
 	claimed := map[string]bool{}
 	for _, e := range answer.Edits {
@@ -317,12 +351,13 @@ func writeBackpass(cfg backpassConfig, date string, ledger *ledgerBuilder, publi
 			if !changed[p] {
 				result.claimedAbsent = append(result.claimedAbsent, fmt.Sprintf("%s (%s)", e.Title, p))
 				ok = false
-			} else {
-				claimed[p] = true
 			}
 		}
 		if ok {
 			result.keptEdits = append(result.keptEdits, e)
+			for _, p := range e.Paths {
+				claimed[p] = true
+			}
 		}
 	}
 	for p := range changed {
@@ -332,7 +367,7 @@ func writeBackpass(cfg backpassConfig, date string, ledger *ledgerBuilder, publi
 		result.editedUnreported = append(result.editedUnreported, p)
 	}
 
-	budgetOK, budgetOut := runMemoryBudgetWorktree(privatePath)
+	budgetOK, budgetOut := runMemoryBudgetWorktree(cfg.privateDir, privatePath)
 	if !budgetOK {
 		fixPrompt := composeFixPrompt(budgetOut)
 		fixPath := scratchDir + "/synthesis-fix-" + date + ".prompt.md"
@@ -340,20 +375,18 @@ func writeBackpass(cfg backpassConfig, date string, ledger *ledgerBuilder, publi
 			_ = os.WriteFile(fixPath, []byte(fixPrompt), 0600)
 			runSeat(cfg.synthesisSeat, fixPath, privatePath, cfg.timeout)
 		}
-		budgetOK, _ = runMemoryBudgetWorktree(privatePath)
+		budgetOK, _ = runMemoryBudgetWorktree(cfg.privateDir, privatePath)
 		if !budgetOK {
+			// The ledger commit above is already safe in HEAD; reverting
+			// every uncommitted change and untracked file removes exactly
+			// what the seat did and nothing this run decided on its own.
 			result.budgetFailed = true
 			result.allEditsDropped = true
-			paths := []string{}
-			for p := range claimed {
-				if p != "ledger.md" {
-					paths = append(paths, p)
-				}
-			}
-			if len(paths) > 0 {
-				runCommand(privatePath, nil, io.Discard, io.Discard, "git", append([]string{"checkout", "--"}, paths...)...)
-			}
+			runCommand(privatePath, nil, io.Discard, io.Discard, "git", "checkout", "--", ".")
+			runCommand(privatePath, nil, io.Discard, io.Discard, "git", "clean", "-fd")
 			result.keptEdits = nil
+			result.claimedAbsent = nil
+			result.editedUnreported = nil
 		}
 	}
 
@@ -372,7 +405,7 @@ func writeBackpass(cfg backpassConfig, date string, ledger *ledgerBuilder, publi
 					result.failedRelay = append(result.failedRelay, p.Title)
 				}
 			}
-			if ok, _ := runMemoryBudgetWorktree(publicPath); !ok {
+			if ok, _ := runMemoryBudgetWorktree(cfg.publicDir, publicPath); !ok {
 				result.publicBudgetFailed = true
 			}
 		}
@@ -388,9 +421,10 @@ func writeBackpass(cfg backpassConfig, date string, ledger *ledgerBuilder, publi
 	bodyFile.Close()
 
 	title := "memory-backpass: " + date
-	prOut, ok := inProcessRecordAndSubmit(privatePath, title, bodyFile.Name())
+	prOut, failedStep, ok := inProcessRecordAndSubmit(privatePath, title, bodyFile.Name())
 	if !ok {
 		result.submitFailed = true
+		result.failedStep = failedStep
 		return result
 	}
 	result.prURL = strings.TrimSpace(prOut)

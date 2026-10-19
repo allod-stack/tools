@@ -29,8 +29,25 @@ const memoryUsageText = `Usage:
       [--bulk-seat <cmd>] [--fallback-seat <cmd>] [--synthesis-seat <cmd>]
       [--timeout <seconds>] [--jobs <n>] [--report-only]
 
-See docs/allod-memory.md for the full contract: the seats, the state file,
-what each mode writes, and the report shape.
+'--traces <dir>' is required, space-separated and repeatable: each is a git
+checkout of distilled traces laid out <machine>/<harness>/<date>-<id>.md.
+
+'--public <dir>' default: <workDir>/<registry checkout of allod/memory>.
+'--private <dir>' default: the one registry entry marked "memory": true
+other than allod/memory; zero or more than one is a refusal.
+
+'--bulk-seat <cmd>' (env ALLOD_BACKPASS_BULK_SEAT) is required always.
+'--fallback-seat <cmd>' (env ALLOD_BACKPASS_FALLBACK_SEAT) is optional.
+'--synthesis-seat <cmd>' (env ALLOD_BACKPASS_SYNTHESIS_SEAT) is required
+unless --report-only. An option always wins over its environment variable.
+
+'--timeout <seconds>' bounds every seat call (default 600).
+'--jobs <n>' is analysis calls in flight at once (default 1).
+'--report-only' runs steps 1 to 6 and 10 only and writes nothing to either
+memory repository; it still commits analyzed.txt in each traces checkout.
+
+See docs/allod-memory.md for the full contract: the seat contract, the
+state file, what each mode writes, exit codes, and the report shape.
 `
 
 func memoryMain(args []string) {
