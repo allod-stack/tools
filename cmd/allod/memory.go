@@ -32,10 +32,12 @@ checkout of distilled traces laid out <machine>/<harness>/<date>-<id>.md.
 '--private <dir>' default: the one registry entry marked "memory": true
 other than allod/memory; zero or more than one is a refusal.
 
-'--bulk-seat <cmd>' (env ALLOD_BACKPASS_BULK_SEAT) is required always.
-'--fallback-seat <cmd>' (env ALLOD_BACKPASS_FALLBACK_SEAT) is optional.
-'--synthesis-seat <cmd>' (env ALLOD_BACKPASS_SYNTHESIS_SEAT) is required
-unless --report-only. An option always wins over its environment variable.
+'--bulk-seat <cmd>' (env ALLOD_BACKPASS_BULK_SEAT) and '--synthesis-seat
+<cmd>' (env ALLOD_BACKPASS_SYNTHESIS_SEAT) default, when neither is given,
+to the built-in 'pi' seat: pi with its own configured default provider and
+model, run under 'script' for a terminal. '--fallback-seat <cmd>' (env
+ALLOD_BACKPASS_FALLBACK_SEAT) has no default; pass 'pi' to use the
+built-in there too. An option always wins over its environment variable.
 
 '--timeout <seconds>' bounds every seat call (default 600).
 '--jobs <n>' is analysis calls in flight at once (default 1).
@@ -171,7 +173,7 @@ func memoryBackpass(args []string) {
 		bulkSeat = os.Getenv("ALLOD_BACKPASS_BULK_SEAT")
 	}
 	if bulkSeat == "" {
-		die(1, "memory backpass requires a bulk seat: pass --bulk-seat or set ALLOD_BACKPASS_BULK_SEAT")
+		bulkSeat = backpassBuiltinSeat
 	}
 	if !fallbackSet {
 		fallbackSeat = os.Getenv("ALLOD_BACKPASS_FALLBACK_SEAT")
@@ -180,7 +182,10 @@ func memoryBackpass(args []string) {
 		synthesisSeat = os.Getenv("ALLOD_BACKPASS_SYNTHESIS_SEAT")
 	}
 	if synthesisSeat == "" && !reportOnly {
-		die(1, "memory backpass requires a synthesis seat unless --report-only: pass --synthesis-seat or set ALLOD_BACKPASS_SYNTHESIS_SEAT")
+		synthesisSeat = backpassBuiltinSeat
+	}
+	if bulkSeat == backpassBuiltinSeat || fallbackSeat == backpassBuiltinSeat || synthesisSeat == backpassBuiltinSeat {
+		checkBuiltinSeatPath()
 	}
 
 	runBackpass(backpassConfig{

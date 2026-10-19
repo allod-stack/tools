@@ -78,7 +78,7 @@ func seatDescription(seat string) string {
 	if seat == "" {
 		return "no fallback seat"
 	}
-	return seat
+	return backpassSeatName(seat)
 }
 
 func perTraceSeats(outcomes []traceOutcome) string {
@@ -87,7 +87,7 @@ func perTraceSeats(outcomes []traceOutcome) string {
 		if !oc.analyzed {
 			continue
 		}
-		lines = append(lines, fmt.Sprintf("%s: %s", oc.trace.tracePath(), oc.seat))
+		lines = append(lines, fmt.Sprintf("%s: %s", oc.trace.tracePath(), backpassSeatName(oc.seat)))
 	}
 	sort.Strings(lines)
 	return strings.Join(lines, "\n")
@@ -129,10 +129,10 @@ func renderReport(cfg backpassConfig, rep reportData, outcomes []traceOutcome, l
 	}
 
 	b.WriteString("\n## Seats\n\n")
-	fmt.Fprintf(&b, "bulk: %s\n", cfg.bulkSeat)
+	fmt.Fprintf(&b, "bulk: %s\n", backpassSeatName(cfg.bulkSeat))
 	fmt.Fprintf(&b, "fallback: %s\n", seatDescription(cfg.fallbackSeat))
 	if cfg.synthesisSeat != "" {
-		fmt.Fprintf(&b, "synthesis: %s\n", cfg.synthesisSeat)
+		fmt.Fprintf(&b, "synthesis: %s\n", backpassSeatName(cfg.synthesisSeat))
 	}
 	if perTrace := perTraceSeats(outcomes); perTrace != "" {
 		b.WriteString(perTrace)
