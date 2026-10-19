@@ -13,24 +13,44 @@ step numbers and implements them.
 ## Command
 
 ```
-allod memory backpass --traces <dir>... [--public <dir>] [--private <dir>]
+allod memory backpass [--traces <dir>...] [--public <dir>] [--private <dir>]
     [--bulk-seat <cmd>] [--fallback-seat <cmd>] [--synthesis-seat <cmd>]
     [--timeout <seconds>] [--jobs <n>] [--report-only]
 ```
 
-- `--traces <dir>` (required, at least one) — a git checkout of distilled
-  traces laid out `<machine>/<harness>/<YYYY-MM-DD>-<session-id>.md`, the
-  shape `allod trace distill` writes. Space-separated and repeatable, the
-  same as `allod change record --files` (`cli-design.md`): a following
-  option ends the list, and `--` ends option parsing so a value starting
-  with `-` stays reachable. A directory that does not exist or is not a git
-  repository is a refusal before anything else runs.
-- `--public <dir>` — default `<workDir>/<registry checkout of
+A bare `allod memory backpass`, no options at all, works on any machine
+whose checkouts follow the registry convention: all three directories
+resolve through the same ordered steps — the option, then an
+`ALLOD_BACKPASS_*` environment variable, then a registry marker (or the
+existing single-private-entry rule), then a fixed-name convention path —
+and the run report's `## Inputs` section names what each one resolved to
+and which step found it (`option`, `env`, `registry <id>`, or
+`convention`).
+
+- `--traces <dir>` — a git checkout of distilled traces laid out
+  `<machine>/<harness>/<YYYY-MM-DD>-<session-id>.md`, the shape `allod
+  trace distill` writes. Space-separated and repeatable, the same as
+  `allod change record --files` (`cli-design.md`): a following option ends
+  the list, and `--` ends option parsing so a value starting with `-`
+  stays reachable. Resolution order: `--traces`; else
+  `ALLOD_BACKPASS_TRACES`, a colon-separated path list; else every
+  repository-registry entry marked `"traces": true` whose checkout exists
+  under `workDir`, in sorted id order — the way an inventory declares a
+  traces checkout without a flag; else `<workDir>/traces-<hostname>` if it
+  exists; else `<workDir>/traces` if it exists. Finding nothing by any of
+  these is a refusal listing every path and marker tried. A directory that
+  does not exist or is not a git repository is a refusal before anything
+  else runs.
+- `--public <dir>` — resolution order: `--public`; else
+  `ALLOD_BACKPASS_PUBLIC`; else `<workDir>/<registry checkout of
   allod/memory>`, falling back to the literal checkout name `allod/memory`
-  when the registry has no entry for it.
-- `--private <dir>` — default the one repository-registry entry marked
-  `"memory": true` other than `allod/memory`. Zero or more than one such
-  entry is a refusal naming what was found; pass `--private` explicitly.
+  when the registry has no entry for it. This step always finds something.
+- `--private <dir>` — resolution order: `--private`; else
+  `ALLOD_BACKPASS_PRIVATE`; else the one repository-registry entry marked
+  `"memory": true` other than `allod/memory` (zero or more than one such
+  entry is a refusal naming what was found; pass `--private` explicitly);
+  else `<workDir>/agent-memory` if it exists. Finding nothing by any of
+  these is a refusal listing what was tried.
   Both `--public` and `--private` must be git repositories.
 - `--bulk-seat <cmd>` (env `ALLOD_BACKPASS_BULK_SEAT`) and `--synthesis-seat
   <cmd>` (env `ALLOD_BACKPASS_SYNTHESIS_SEAT`) — when neither the option nor
@@ -180,8 +200,9 @@ The run report is printed to stdout in every mode and every exit status.
 
 ## Report
 
-Plain text, `## ` headings, no colour, in this order: unrelayed public
-edits; seats (which seat analyzed which trace); the funnel (traces
+Plain text, `## ` headings, no colour, in this order: inputs (each resolved
+directory and how it was found); unrelayed public edits; seats (which seat
+analyzed which trace); the funnel (traces
 analyzed, items returned, dropped for a missing quote, malformed, ledger
 entries corroborated, ledger lines added, prunes, edits proposed); failures,
 when any; then the mode-specific sections — in `--report-only`, the fold

@@ -8,14 +8,116 @@ import (
 	"time"
 )
 
-func TestMemoryBackpassRequiresTraces(t *testing.T) {
-	stubTools(t, "git", "forge")
-	_, errText, code := runAllod(t, "memory", "backpass")
+// TestMemoryBackpassTracesRefusalListsTried pins the "nothing found" case
+// of the traces resolver: every source it tried is named in the refusal.
+func TestMemoryBackpassTracesRefusalListsTried(t *testing.T) {
+	root, _ := backpassIsolatedEnv(t)
+	privateDir := filepath.Join(root, "refusal-private")
+	backpassBuildRepo(t, root, "refusal-private", "testdata/backpass/private", privateDir)
+	publicDir := filepath.Join(root, "refusal-public")
+	backpassBuildRepo(t, root, "refusal-public", "testdata/backpass/public", publicDir)
+
+	_, errText, code := runAllod(t, "memory", "backpass", "--private", privateDir, "--public", publicDir)
 	if code != 1 {
 		t.Errorf("exit code = %d, want 1", code)
 	}
-	if !strings.Contains(errText, "requires --traces") {
-		t.Errorf("stderr = %q, want it to mention --traces", errText)
+	for _, want := range []string{"--traces", "ALLOD_BACKPASS_TRACES", `"traces": true`, "traces"} {
+		if !strings.Contains(errText, want) {
+			t.Errorf("stderr = %q, want it to mention %q", errText, want)
+		}
+	}
+}
+
+// TestMemoryBackpassResolvesByConvention proves a bare invocation finds its
+// three inputs from fixed-name paths under WORK_DIR with no flags, env, or
+// registry entries at all.
+func TestMemoryBackpassResolvesByConvention(t *testing.T) {
+	root, workDirRoot := backpassIsolatedEnv(t)
+	host, err := os.Hostname()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tracesDir := filepath.Join(workDirRoot, "traces-"+host)
+	backpassBuildRepo(t, root, "conv-traces", "testdata/backpass/traces", tracesDir)
+	privateDir := filepath.Join(workDirRoot, "agent-memory")
+	backpassBuildRepo(t, root, "conv-private", "testdata/backpass/private", privateDir)
+	publicDir := filepath.Join(root, "conv-public")
+	backpassBuildRepo(t, root, "conv-public", "testdata/backpass/public", publicDir)
+
+	backpassSetupForge(t)
+	binDir := t.TempDir()
+	seat := backpassSeat(t, binDir, backpassResponsesDir(t))
+
+	out, errText, code := runAllod(t, "memory", "backpass", "--public", publicDir, "--bulk-seat", seat, "--report-only")
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %q", code, errText)
+	}
+	for _, want := range []string{tracesDir + ": convention", privateDir + ": convention"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("Inputs section missing %q\n%s", want, out)
+		}
+	}
+}
+
+// TestMemoryBackpassResolvesTracesByRegistryMarker proves a registry entry
+// marked "traces": true is found without --traces or the env variable.
+func TestMemoryBackpassResolvesTracesByRegistryMarker(t *testing.T) {
+	root, workDirRoot := backpassIsolatedEnv(t)
+	inventory := filepath.Join(root, "inventory")
+	t.Setenv("INVENTORY", inventory)
+	writeRegistryFixtureRaw(t, inventory, map[string]string{
+		"org/traces-fixture": `{"checkout": "traces-fixture", "traces": true}`,
+	})
+
+	tracesDir := filepath.Join(workDirRoot, "traces-fixture")
+	backpassBuildRepo(t, root, "reg-traces", "testdata/backpass/traces", tracesDir)
+	privateDir := filepath.Join(root, "reg-private")
+	backpassBuildRepo(t, root, "reg-private", "testdata/backpass/private", privateDir)
+	publicDir := filepath.Join(root, "reg-public")
+	backpassBuildRepo(t, root, "reg-public", "testdata/backpass/public", publicDir)
+
+	backpassSetupForge(t)
+	binDir := t.TempDir()
+	seat := backpassSeat(t, binDir, backpassResponsesDir(t))
+
+	out, errText, code := runAllod(t, "memory", "backpass", "--public", publicDir, "--private", privateDir,
+		"--bulk-seat", seat, "--report-only")
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %q", code, errText)
+	}
+	if !strings.Contains(out, tracesDir+": registry org/traces-fixture") {
+		t.Errorf("Inputs section missing the registry-marker resolution\n%s", out)
+	}
+}
+
+// TestMemoryBackpassResolvesByEnv proves the ALLOD_BACKPASS_* path
+// variables are the second resolution step for all three inputs.
+func TestMemoryBackpassResolvesByEnv(t *testing.T) {
+	root, _ := backpassIsolatedEnv(t)
+	tracesDir := filepath.Join(root, "env-traces")
+	backpassBuildRepo(t, root, "env-traces", "testdata/backpass/traces", tracesDir)
+	privateDir := filepath.Join(root, "env-private")
+	backpassBuildRepo(t, root, "env-private", "testdata/backpass/private", privateDir)
+	publicDir := filepath.Join(root, "env-public")
+	backpassBuildRepo(t, root, "env-public", "testdata/backpass/public", publicDir)
+
+	t.Setenv("ALLOD_BACKPASS_TRACES", tracesDir)
+	t.Setenv("ALLOD_BACKPASS_PRIVATE", privateDir)
+	t.Setenv("ALLOD_BACKPASS_PUBLIC", publicDir)
+
+	backpassSetupForge(t)
+	binDir := t.TempDir()
+	seat := backpassSeat(t, binDir, backpassResponsesDir(t))
+
+	out, errText, code := runAllod(t, "memory", "backpass", "--bulk-seat", seat, "--report-only")
+	if code != 0 {
+		t.Fatalf("exit code = %d, stderr = %q", code, errText)
+	}
+	for _, want := range []string{tracesDir + ": env", privateDir + ": env", publicDir + ": env"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("Inputs section missing %q\n%s", want, out)
+		}
 	}
 }
 

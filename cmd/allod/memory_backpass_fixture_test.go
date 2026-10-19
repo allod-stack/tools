@@ -262,6 +262,33 @@ func backpassWorktreePathForBranch(t *testing.T, repo, branch string) string {
 	return ""
 }
 
+// backpassIsolatedEnv sets up HOME, GIT_CONFIG_GLOBAL/SYSTEM, WORK_DIR, and
+// an empty INVENTORY, without building any fixture repo: the resolver
+// tests build their own, placed to exercise one resolution source at a
+// time.
+func backpassIsolatedEnv(t *testing.T) (root, workDirRoot string) {
+	t.Helper()
+	root = backpassWorkDir(t)
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_SYSTEM", "/dev/null")
+	workDirRoot = filepath.Join(root, "work")
+	t.Setenv("WORK_DIR", workDirRoot)
+	t.Setenv("INVENTORY", "")
+	if err := os.MkdirAll(filepath.Join(root, "home"), 0755); err != nil {
+		t.Fatalf("mkdir home: %v", err)
+	}
+	return root, workDirRoot
+}
+
+// backpassBuildRepo copies a testdata fixture tree to dst and turns it into
+// a git repo with a local bare origin, named uniquely under root.
+func backpassBuildRepo(t *testing.T, root, name, src, dst string) {
+	t.Helper()
+	backpassCopyTree(t, src, dst)
+	backpassGitRepo(t, root, name, dst)
+}
+
 func backpassLookPath(t *testing.T, name string) string {
 	t.Helper()
 	for _, dir := range strings.Split(os.Getenv("PATH"), string(os.PathListSeparator)) {
