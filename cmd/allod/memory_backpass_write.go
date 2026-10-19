@@ -289,7 +289,7 @@ func writeBackpass(cfg backpassConfig, date string, ledger *ledgerBuilder, publi
 		if err := os.WriteFile(promptPath, []byte(filled), 0600); err != nil {
 			return synthesisAnswer{}, err
 		}
-		out := runSeat(cfg.synthesisSeat, promptPath, privatePath, cfg.timeout)
+		out := runSeat(cfg.synthesisSeat, promptPath, privatePath, cfg.timeout, seatRoleSynthesis)
 		if out.timedOut {
 			return synthesisAnswer{}, fmt.Errorf("synthesis seat timed out")
 		}
@@ -337,7 +337,7 @@ func writeBackpass(cfg backpassConfig, date string, ledger *ledgerBuilder, publi
 		fixPath := scratchDir + "/synthesis-fix-" + date + ".prompt.md"
 		if err := checkTemplateHeader("fix prompt", fixPrompt); err == nil {
 			_ = os.WriteFile(fixPath, []byte(fixPrompt), 0600)
-			runSeat(cfg.synthesisSeat, fixPath, privatePath, cfg.timeout)
+			runSeat(cfg.synthesisSeat, fixPath, privatePath, cfg.timeout, seatRoleSynthesis)
 		}
 		budgetOK, _ = runMemoryBudgetWorktree(cfg.privateDir, privatePath)
 		if !budgetOK {

@@ -53,6 +53,9 @@ to the built-in 'pi' seat: pi with its own configured default provider and
 model, run under 'script' for a terminal. '--fallback-seat <cmd>' (env
 ALLOD_BACKPASS_FALLBACK_SEAT) has no default; pass 'pi' to use the
 built-in there too. An option always wins over its environment variable.
+The built-in runs the bulk and fallback calls with 'pi -p --no-tools', so
+analysis cannot wander into reading memory files instead of answering the
+prompt; the synthesis call keeps tools on, since it edits the worktree.
 
 '--timeout <seconds>' bounds every seat call (default 600).
 '--jobs <n>' is analysis calls in flight at once (default 1).

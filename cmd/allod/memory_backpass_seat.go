@@ -26,9 +26,18 @@ type seatOutcome struct {
 // The seat value that selects the built-in; the default for bulk and synthesis.
 const backpassBuiltinSeat = "pi"
 
-func runSeat(seat, promptFile, dir string, timeout time.Duration) seatOutcome {
+// seatRole distinguishes the analysis calls (bulk, fallback) from synthesis
+// (and its fix call), since only the built-in seat behaves differently per role.
+type seatRole int
+
+const (
+	seatRoleAnalysis seatRole = iota
+	seatRoleSynthesis
+)
+
+func runSeat(seat, promptFile, dir string, timeout time.Duration, role seatRole) seatOutcome {
 	if seat == backpassBuiltinSeat {
-		return runBuiltinPiSeat(promptFile, dir, timeout)
+		return runBuiltinPiSeat(promptFile, dir, timeout, role)
 	}
 	argv := strings.Fields(seat)
 	if len(argv) == 0 {
@@ -39,11 +48,17 @@ func runSeat(seat, promptFile, dir string, timeout time.Duration) seatOutcome {
 
 // pi prints nothing without a terminal and takes the prompt as @path, both
 // measured here. The path sits in the inner shell's single quotes.
-func runBuiltinPiSeat(promptFile, dir string, timeout time.Duration) seatOutcome {
+func runBuiltinPiSeat(promptFile, dir string, timeout time.Duration, role seatRole) seatOutcome {
 	if strings.Contains(promptFile, "'") {
 		return seatOutcome{err: fmt.Errorf("prompt file path contains a single quote: %s", promptFile)}
 	}
-	inner := fmt.Sprintf("pi -p '@%s'", promptFile)
+	// Analysis runs tools off: with tools on, pi reads this machine's harness
+	// memory-at-startup instruction instead of answering the prompt.
+	flag := ""
+	if role == seatRoleAnalysis {
+		flag = "--no-tools "
+	}
+	inner := fmt.Sprintf("pi -p %s'@%s'", flag, promptFile)
 	return runSeatArgv(backpassBuiltinSeat, []string{"script", "-qec", inner, "/dev/null"}, dir, timeout)
 }
 

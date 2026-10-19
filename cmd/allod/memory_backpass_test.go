@@ -529,24 +529,33 @@ EOF
 
 // TestMemoryBackpassBuiltinPiSeatDefault proves the default (no seat flags,
 // no ALLOD_BACKPASS_* env) runs the built-in 'pi' seat through 'script -qec'
-// and names it from pi's own settings.json.
+// and names it from pi's own settings.json. It also proves the analysis
+// (bulk) calls run with '--no-tools' and the synthesis call does not, by
+// having the stub 'pi' record its own argv.
 func TestMemoryBackpassBuiltinPiSeatDefault(t *testing.T) {
 	fx := backpassSetup(t)
 	backpassSetupForge(t)
 	binDir := t.TempDir()
+	argvLog := filepath.Join(t.TempDir(), "pi-argv.log")
 	backpassWriteScript(t, binDir, "script", `#!/bin/sh
 cmd="$2"
 exec sh -c "$cmd"
 `)
 	backpassWriteScript(t, binDir, "pi", `#!/bin/sh
+if [ -n "$FAKE_PI_ARGV_LOG" ]; then echo "$*" >> "$FAKE_PI_ARGV_LOG"; fi
 for last in "$@"; do :; done
 promptfile=$(echo "$last" | sed 's/^@//')
 tracepath=$(grep '^Path: ' "$promptfile" | head -1 | sed 's/^Path: //')
-base=$(basename "$tracepath")
-cat "$FAKE_PI_RESPONSES_DIR/$base.json"
+if [ -n "$tracepath" ]; then
+  base=$(basename "$tracepath")
+  cat "$FAKE_PI_RESPONSES_DIR/$base.json"
+else
+  echo '{"edits":[],"toRelay":[]}'
+fi
 `)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("FAKE_PI_RESPONSES_DIR", backpassResponsesDir(t))
+	t.Setenv("FAKE_PI_ARGV_LOG", argvLog)
 
 	settingsDir := filepath.Join(fx.root, "home", ".pi", "agent")
 	if err := os.MkdirAll(settingsDir, 0755); err != nil {
@@ -558,7 +567,7 @@ cat "$FAKE_PI_RESPONSES_DIR/$base.json"
 	}
 
 	out, errText, code := runAllod(t, "memory", "backpass", "--traces", fx.traces,
-		"--public", fx.public, "--private", fx.private, "--report-only")
+		"--public", fx.public, "--private", fx.private)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0, stderr = %q", code, errText)
 	}
@@ -567,6 +576,27 @@ cat "$FAKE_PI_RESPONSES_DIR/$base.json"
 	}
 	if !strings.Contains(out, "traces analyzed: 3") {
 		t.Errorf("the built-in seat should have analyzed every trace\n%s", out)
+	}
+	if !strings.Contains(out, "PR: http://forge.example") {
+		t.Errorf("write mode should have reached PR creation\n%s", out)
+	}
+
+	argvData, err := os.ReadFile(argvLog)
+	if err != nil {
+		t.Fatalf("pi never recorded its argv: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(argvData)), "\n")
+	if len(lines) < 4 {
+		t.Fatalf("want at least 4 pi invocations (3 bulk, 1 synthesis), got %d: %q", len(lines), lines)
+	}
+	bulkLines, synthesisLine := lines[:len(lines)-1], lines[len(lines)-1]
+	for _, l := range bulkLines {
+		if !strings.Contains(l, "--no-tools") {
+			t.Errorf("bulk call argv should carry --no-tools, got %q", l)
+		}
+	}
+	if strings.Contains(synthesisLine, "--no-tools") {
+		t.Errorf("synthesis call argv should not carry --no-tools, got %q", synthesisLine)
 	}
 }
 

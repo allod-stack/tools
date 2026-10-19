@@ -279,7 +279,7 @@ func analyzeOneTrace(cfg backpassConfig, pt pendingTrace, analysisTemplate, inde
 	reason := ""
 	try := func(seat string) (analysisAnswer, bool) {
 		attempts = append(attempts, seat)
-		out := runSeat(seat, promptPath, "", cfg.timeout)
+		out := runSeat(seat, promptPath, "", cfg.timeout, seatRoleAnalysis)
 		if out.timedOut {
 			reason = "timeout"
 			return analysisAnswer{}, false

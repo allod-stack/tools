@@ -99,9 +99,12 @@ script. It is implemented as `script -qec "pi -p '@<prompt file>'"
 one, and it takes the prompt as an `@path` argument (both measured on this
 VM, not documented `pi` behavior). A prompt file path containing a single
 quote is refused before any call, since it sits inside that inner shell's
-single quotes — scratch directories never produce one. `pi -p` runs with
-its tools enabled by default, which the synthesis call into a worktree
-needs; this command never passes `--no-tools`.
+single quotes — scratch directories never produce one. The bulk and
+fallback calls run `pi -p --no-tools`, because with tools on, `pi` loads
+this machine's harness instruction file and follows its "read memory at
+session start" step instead of answering the analysis prompt; the
+synthesis call (and its fix call) still runs `pi -p` with tools on, since
+it edits the private worktree.
 
 The run report names the built-in `pi (<defaultProvider>/<defaultModel>)`,
 the two values read from `$HOME/.pi/agent/settings.json` (keys
