@@ -44,12 +44,14 @@ in
 }
 `
 
+// secrets.nix derives declared recipients from the registry; declare never touches it.
 const declareFixtureSecrets = `let
-  hostKey = "ssh-ed25519 AAAAHostKeyFixture host";
-  vmKeys = vm: { dev-a = [ "ssh-ed25519 AAAADevAKeyFixture dev-a" ]; dev-b = [ "ssh-ed25519 AAAADevBKeyFixture dev-b" ]; }.${vm};
-in {
-  "secrets/existing-token.age".publicKeys = [ hostKey ] ++ vmKeys "dev-a";
-}
+  registry = builtins.fromJSON (builtins.readFile ./rotation-registry.json);
+in (import ./lib/registry-recipients.nix {
+  inherit registry;
+  machineHostKeys = builtins.fromJSON (builtins.readFile ./machine-host-keys.json);
+  hypervisorPublicKeys = [ "ssh-ed25519 AAAAHostKeyFixture host" ];
+}).recipients
 `
 
 const declareFixtureRegistry = `{
@@ -352,15 +354,6 @@ in
 }
 `
 
-const declareExpectedSecretsOneMachine = `let
-  hostKey = "ssh-ed25519 AAAAHostKeyFixture host";
-  vmKeys = vm: { dev-a = [ "ssh-ed25519 AAAADevAKeyFixture dev-a" ]; dev-b = [ "ssh-ed25519 AAAADevBKeyFixture dev-b" ]; }.${vm};
-in {
-  "secrets/existing-token.age".publicKeys = [ hostKey ] ++ vmKeys "dev-a";
-  "secrets/new-token.age".publicKeys = [ hostKey ] ++ vmKeys "dev-a";
-}
-`
-
 const declareExpectedRegistryOneMachine = `{
   "existing-token": {
     "service": "none",
@@ -428,7 +421,7 @@ func TestSecretDeclareOneMachineServiceNone(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d, stderr: %s", code, errText)
 	}
-	if want := "credentials.nix\nsecrets.nix\nrotation-registry.json\n"; out != want {
+	if want := "credentials.nix\nrotation-registry.json\n"; out != want {
 		t.Errorf("stdout = %q, want %q", out, want)
 	}
 	if errText != "" {
@@ -437,8 +430,8 @@ func TestSecretDeclareOneMachineServiceNone(t *testing.T) {
 	if got := fx.file(t, "credentials.nix"); got != declareExpectedCredentialsOneMachine {
 		t.Errorf("credentials.nix =\n%s\nwant\n%s", got, declareExpectedCredentialsOneMachine)
 	}
-	if got := fx.file(t, "secrets.nix"); got != declareExpectedSecretsOneMachine {
-		t.Errorf("secrets.nix =\n%s\nwant\n%s", got, declareExpectedSecretsOneMachine)
+	if got := fx.file(t, "secrets.nix"); got != declareFixtureSecrets {
+		t.Errorf("secrets.nix changed; its recipients are derived from the registry:\n%s", got)
 	}
 	if got := fx.file(t, "rotation-registry.json"); got != declareExpectedRegistryOneMachine {
 		t.Errorf("rotation-registry.json =\n%s\nwant\n%s", got, declareExpectedRegistryOneMachine)
@@ -476,15 +469,6 @@ in
     ];
     rotation_state = "pending";
   };
-}
-`
-
-const declareExpectedSecretsMultiMachine = `let
-  hostKey = "ssh-ed25519 AAAAHostKeyFixture host";
-  vmKeys = vm: { dev-a = [ "ssh-ed25519 AAAADevAKeyFixture dev-a" ]; dev-b = [ "ssh-ed25519 AAAADevBKeyFixture dev-b" ]; }.${vm};
-in {
-  "secrets/existing-token.age".publicKeys = [ hostKey ] ++ vmKeys "dev-a";
-  "secrets/multi-token.age".publicKeys = [ hostKey ] ++ vmKeys "dev-a" ++ vmKeys "dev-b";
 }
 `
 
@@ -546,8 +530,8 @@ func TestSecretDeclareTwoMachinesServiceForgejo(t *testing.T) {
 	if got := fx.file(t, "credentials.nix"); got != declareExpectedCredentialsMultiMachine {
 		t.Errorf("credentials.nix =\n%s\nwant\n%s", got, declareExpectedCredentialsMultiMachine)
 	}
-	if got := fx.file(t, "secrets.nix"); got != declareExpectedSecretsMultiMachine {
-		t.Errorf("secrets.nix =\n%s\nwant\n%s", got, declareExpectedSecretsMultiMachine)
+	if got := fx.file(t, "secrets.nix"); got != declareFixtureSecrets {
+		t.Errorf("secrets.nix changed; its recipients are derived from the registry:\n%s", got)
 	}
 	registry := fx.file(t, "rotation-registry.json")
 	if !strings.HasSuffix(registry, declareExpectedGroupMultiMachine) {
@@ -576,12 +560,11 @@ func TestSecretDeclareTargetingNexusReadsHypervisorType(t *testing.T) {
 	if errText != "" {
 		t.Errorf("stderr = %q, want empty", errText)
 	}
-	if want := "credentials.nix\nsecrets.nix\nrotation-registry.json\n"; out != want {
+	if want := "credentials.nix\nrotation-registry.json\n"; out != want {
 		t.Errorf("stdout = %q, want %q", out, want)
 	}
-	secrets := fx.file(t, "secrets.nix")
-	if !strings.Contains(secrets, `"secrets/host-token.age".publicKeys = [ hostKey ];`) {
-		t.Errorf("secrets.nix missing the host-only recipient line:\n%s", secrets)
+	if got := fx.file(t, "secrets.nix"); got != declareFixtureSecrets {
+		t.Errorf("secrets.nix changed; its recipients are derived from the registry:\n%s", got)
 	}
 	registry := fx.file(t, "rotation-registry.json")
 	if !strings.Contains(registry, `"kind": "nixos-host"`) {
@@ -657,27 +640,6 @@ func TestSecretDeclareCollisions(t *testing.T) {
 	}
 }
 
-// TestSecretDeclareSecretsLineCollisionAlone exercises the secrets.nix-only
-// branch: a publicKeys line already exists for the path a new name would
-// use, with no matching credentials.nix entry or registry group — a state
-// that should not occur from declare's own writes, but the check must catch
-// it regardless of how it arose.
-func TestSecretDeclareSecretsLineCollisionAlone(t *testing.T) {
-	secrets := declareFixtureSecrets[:len(declareFixtureSecrets)-len("}\n")] +
-		`  "secrets/orphan.age".publicKeys = [ hostKey ];` + "\n}\n"
-	fx := newDeclareFixtureFiles(t, declareFixtureCredentials, secrets, declareFixtureRegistry)
-	_, errText, code := fx.run(t, "orphan",
-		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
-		"--deployed-path", "/root/.token", "--verify", declareFixtureVerifyCommand)
-	if code == 0 {
-		t.Fatal("exit 0, want a refusal")
-	}
-	if want := "secrets.nix: a publicKeys line for 'secrets/orphan.age' already exists"; !strings.Contains(errText, want) {
-		t.Errorf("stderr lacks %q\ngot: %q", want, errText)
-	}
-	fx.assertUntouched(t, declareFixtureCredentials, secrets, declareFixtureRegistry)
-}
-
 // TestSecretDeclareCredentialsCollisionAcrossLines covers allod/tools#196
 // review finding 3: the collision regex must match across whitespace
 // including newlines, not just spaces and tabs on one line, or an existing
@@ -699,27 +661,6 @@ func TestSecretDeclareCredentialsCollisionAcrossLines(t *testing.T) {
 	fx.assertUntouched(t, credentials, declareFixtureSecrets, declareFixtureRegistry)
 }
 
-// TestSecretDeclareSecretsLineCollisionAcrossLines is the secrets.nix half
-// of the same finding: '.publicKeys' and '=' split across lines must still
-// be found. It uses an orphan line (no matching credentials.nix entry or
-// registry group, as TestSecretDeclareSecretsLineCollisionAlone does) so
-// the refusal it pins can only come from the secrets.nix check.
-func TestSecretDeclareSecretsLineCollisionAcrossLines(t *testing.T) {
-	secrets := declareFixtureSecrets[:len(declareFixtureSecrets)-len("}\n")] +
-		"  \"secrets/orphan.age\"\n    .publicKeys\n    = [ hostKey ];\n}\n"
-	fx := newDeclareFixtureFiles(t, declareFixtureCredentials, secrets, declareFixtureRegistry)
-	_, errText, code := fx.run(t, "orphan",
-		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
-		"--deployed-path", "/root/.token", "--verify", declareFixtureVerifyCommand)
-	if code == 0 {
-		t.Fatal("exit 0, want a refusal")
-	}
-	if want := "secrets.nix: a publicKeys line for 'secrets/orphan.age' already exists"; !strings.Contains(errText, want) {
-		t.Errorf("stderr lacks %q\ngot: %q", want, errText)
-	}
-	fx.assertUntouched(t, declareFixtureCredentials, secrets, declareFixtureRegistry)
-}
-
 // TestSecretDeclareCredentialsCollisionAcrossAComment covers allod/tools#196
 // review finding 5: the collision regexes span newlines but must also span
 // a nix line comment sitting between the name and '=' — a comment hides
@@ -739,24 +680,6 @@ func TestSecretDeclareCredentialsCollisionAcrossAComment(t *testing.T) {
 		t.Errorf("stderr lacks %q\ngot: %q", want, errText)
 	}
 	fx.assertUntouched(t, credentials, declareFixtureSecrets, declareFixtureRegistry)
-}
-
-// TestSecretDeclareSecretsLineCollisionAcrossAComment is the secrets.nix
-// half of the same finding.
-func TestSecretDeclareSecretsLineCollisionAcrossAComment(t *testing.T) {
-	secrets := declareFixtureSecrets[:len(declareFixtureSecrets)-len("}\n")] +
-		"  \"secrets/orphan.age\" # already declared\n    .publicKeys = [ hostKey ];\n}\n"
-	fx := newDeclareFixtureFiles(t, declareFixtureCredentials, secrets, declareFixtureRegistry)
-	_, errText, code := fx.run(t, "orphan",
-		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
-		"--deployed-path", "/root/.token", "--verify", declareFixtureVerifyCommand)
-	if code == 0 {
-		t.Fatal("exit 0, want a refusal")
-	}
-	if want := "secrets.nix: a publicKeys line for 'secrets/orphan.age' already exists"; !strings.Contains(errText, want) {
-		t.Errorf("stderr lacks %q\ngot: %q", want, errText)
-	}
-	fx.assertUntouched(t, declareFixtureCredentials, secrets, declareFixtureRegistry)
 }
 
 // TestSecretDeclareRefusesWhenOnlyTheEvaluatedInventoryKnowsTheName covers
@@ -890,8 +813,8 @@ func TestSecretDeclareRequiresAName(t *testing.T) {
 // than landing as attacker-controlled nix or JSON. --owner is the sharpest
 // case (interpolated raw into a double-quoted nix string in
 // credentials.nix); --to is the other one that reaches nix text (the
-// 'machines.<name>.type' attribute path the inventory is evaluated at, and
-// the secrets.nix recipient line); --kind, --account, and --ui-token-name
+// 'machines.<name>.type' attribute path the inventory is evaluated at);
+// --kind, --account, and --ui-token-name
 // are held to the same identifier pattern, and --deployed-path to its own
 // absolute-path shape, for the same reason even though they reach only
 // JSON today. --verify is not held to a shape beyond being one non-empty
@@ -1049,7 +972,7 @@ func TestSecretDeclareWritesTheValueTemplateShape(t *testing.T) {
 			if code != 0 {
 				t.Fatalf("exit %d, stderr: %s", code, errText)
 			}
-			if want := "credentials.nix\nsecrets.nix\nrotation-registry.json\n"; out != want {
+			if want := "credentials.nix\nrotation-registry.json\n"; out != want {
 				t.Errorf("stdout = %q, want %q", out, want)
 			}
 			registry := fx.file(t, "rotation-registry.json")
@@ -1326,23 +1249,13 @@ func TestDeclareUnchangedSinceDetectsAConcurrentEdit(t *testing.T) {
 	}
 }
 
-// TestSecretDeclareRefusesAndRestoresWhenAFileChangesUnderneath drives the
-// whole command end-to-end for review findings 4 and 5: it uses
-// declareFakeNixWithSideEffect so the fake 'nix' invocation that derives
-// dev-a's target kind — the one real gap between declare reading every
-// file and declare writing any of them — also appends to secrets.nix,
-// simulating another process editing the checkout in that window.
-// credentials.nix, written first, is replaced successfully (declare cannot
-// know at that point that secrets.nix has changed); secrets.nix's own
-// re-read-before-replace catches the edit and refuses, and that refusal
-// must restore credentials.nix to its original bytes — proving both the
-// concurrent-edit guard and the restore-already-replaced-files path in one
-// real run, not through a Go-level seam.
+// The fake 'nix' edits rotation-registry.json between declare's read and its
+// write, so the refusal must restore credentials.nix, already replaced by then.
 func TestSecretDeclareRefusesAndRestoresWhenAFileChangesUnderneath(t *testing.T) {
 	fx := newDeclareFixtureFiles(t, declareFixtureCredentials, declareFixtureSecrets, declareFixtureRegistry)
 	t.Setenv("INVENTORY", t.TempDir())
-	secretsPath := filepath.Join(fx.checkout, "secrets.nix")
-	declareFakeNixWithSideEffect(t, map[string]string{"dev-a": "dev"}, declareFixtureEvaluatedCredentialNames, secretsPath, "\n# edited concurrently\n")
+	registryPath := filepath.Join(fx.checkout, "rotation-registry.json")
+	declareFakeNixWithSideEffect(t, map[string]string{"dev-a": "dev"}, declareFixtureEvaluatedCredentialNames, registryPath, "\n")
 
 	_, errText, code := fx.run(t, "new-token",
 		"--kind", "agent", "--owner", "allod-agent", "--to", "dev-a",
@@ -1350,7 +1263,7 @@ func TestSecretDeclareRefusesAndRestoresWhenAFileChangesUnderneath(t *testing.T)
 	if code == 0 {
 		t.Fatal("exit 0, want a refusal")
 	}
-	for _, want := range []string{"secrets.nix changed since declare read it", "restored"} {
+	for _, want := range []string{"rotation-registry.json changed since declare read it", "restored"} {
 		if !strings.Contains(errText, want) {
 			t.Errorf("stderr lacks %q\ngot: %q", want, errText)
 		}
@@ -1358,8 +1271,11 @@ func TestSecretDeclareRefusesAndRestoresWhenAFileChangesUnderneath(t *testing.T)
 	if got, err := os.ReadFile(filepath.Join(fx.checkout, "credentials.nix")); err != nil || string(got) != declareFixtureCredentials {
 		t.Errorf("credentials.nix was not restored to its original bytes: err=%v got=%q", err, got)
 	}
-	if got, err := os.ReadFile(filepath.Join(fx.checkout, "rotation-registry.json")); err != nil || string(got) != declareFixtureRegistry {
-		t.Errorf("rotation-registry.json changed: err=%v got=%q", err, got)
+	if got, err := os.ReadFile(registryPath); err != nil || !strings.HasPrefix(string(got), declareFixtureRegistry) || strings.Contains(string(got), "new-token") {
+		t.Errorf("rotation-registry.json is not the concurrent edit left as found: err=%v got=%q", err, got)
+	}
+	if got := fx.file(t, "secrets.nix"); got != declareFixtureSecrets {
+		t.Errorf("secrets.nix changed:\n%s", got)
 	}
 }
 

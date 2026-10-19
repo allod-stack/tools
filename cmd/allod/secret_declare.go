@@ -1,8 +1,8 @@
 package main
 
-// 'allod secret declare' writes a credential's non-secret half — the three
-// entries an agent currently has to hand-edit across credentials.nix,
-// secrets.nix, and rotation-registry.json — so the PR that declares a new
+// 'allod secret declare' writes a credential's non-secret half — the
+// credentials.nix entry and the rotation-registry.json group; secrets.nix
+// derives the recipients from that group — so the PR that declares a new
 // credential is generated rather than transcribed from the secrets
 // template's README by hand. It writes no ciphertext, reads no identity,
 // and never commits: the diff it leaves is reviewed like any other, and the
@@ -73,18 +73,18 @@ var declareValidKinds = []string{"user", "agent", "service"}
 var declareValidStrategies = []string{"overlap", "in-place"}
 var declareValidServices = []string{"none", "forgejo"}
 
-const secretDeclareDetail = `'declare' writes three insertions against the secrets checkout: the
+const secretDeclareDetail = `'declare' writes two insertions against the secrets checkout: the
 credentials.nix entry in rotation_state "pending" (the agent-pr-token
-layout), the secrets.nix recipient line ('[ hostKey ] ++ vmKeys "<vm>"' per
-target machine), and a rotation-registry.json rotation registry group
-whose 'service' is "none" or "forgejo". Every insertion is one contiguous
-block; nothing else in any file changes.
+layout) and a rotation-registry.json rotation registry group whose
+'service' is "none" or "forgejo". secrets.nix derives the credential's
+recipients from that group's targets, so no line is written there. Every
+insertion is one contiguous block; nothing else in any file changes.
 
-All three files are read once at the start. Every edit is built and
-validated in memory before anything is written: a name collision in any of
-the three files refuses before any of them is touched, and the built text
-for credentials.nix and secrets.nix must still have balanced nix braces and
-for rotation-registry.json must still be valid JSON. Only then does
+Both files are read once at the start. Every edit is built and validated
+in memory before anything is written: a name collision in either file
+refuses before any of them is touched, and the built text for
+credentials.nix must still have balanced nix braces and for
+rotation-registry.json must still be valid JSON. Only then does
 declare replace the files, one at a time: immediately before each one, it
 re-reads that file and refuses — restoring every file already replaced,
 and saying so — if the bytes on disk no longer match what was read at the
@@ -139,8 +139,8 @@ to build from a probe type, now written out once here.
 
 declare refuses a name already declared anywhere: a credentials.nix entry
 (matched even split across lines or separated by a nix comment from its
-'= {'), a secrets.nix line for secrets/<name>.age (matched the same way),
-a registry group keyed <name> or naming <name> among its credentials, or
+'= {'), a registry group keyed <name>, naming <name> among its credentials
+or using secrets/<name>.age as a secret path, or
 an entry the secrets checkout's own evaluated credential inventory
 (<checkout>#lib.credentials) already carries — credentials.nix is
 'hostEntries // activeEntries // stagedEntries // forgeGitEntries // {
@@ -156,7 +156,7 @@ secret half.
 It resolves the secrets checkout the way 'create' does: the repository
 registry's checkout under ~/work, or an explicit <checkout> path. It
 resolves the inventory checkout the same way (or $INVENTORY, which always
-wins) to read machine types. On success it prints the three paths it
+wins) to read machine types. On success it prints the two paths it
 changed, one per line, and nothing else.
 `
 
@@ -534,27 +534,16 @@ func declareCredentialsHasEntry(text, name string) bool {
 	return pattern.MatchString(text)
 }
 
-// declareSecretsHasLine reports whether secrets.nix already declares a
-// publicKeys line for the given repository-relative path, for the same
-// reason and against the same gap declareCredentialsHasEntry allows.
-func declareSecretsHasLine(text, path string) bool {
-	pattern := regexp.MustCompile(`(?m)^[ \t]*"` + regexp.QuoteMeta(path) + `"` + declareNixGap + `\.publicKeys` + declareNixGap + `=`)
-	return pattern.MatchString(text)
-}
-
-// declareCollisions checks all three files for the name before anything is
+// declareCollisions checks both files for the name before anything is
 // written, and returns every match found, file and finding together, so a
 // refusal names all of them at once rather than the first one hit.
-func declareCollisions(credentialsText, secretsText string, registry map[string]declareRegistryGroup, evaluatedCredentials map[string]struct{}, name, secretPath string) []string {
+func declareCollisions(credentialsText string, registry map[string]declareRegistryGroup, evaluatedCredentials map[string]struct{}, name, secretPath string) []string {
 	var findings []string
 	if declareCredentialsHasEntry(credentialsText, name) {
 		findings = append(findings, fmt.Sprintf("credentials.nix: an entry named '%s' already exists", name))
 	}
 	if _, exists := evaluatedCredentials[name]; exists {
 		findings = append(findings, fmt.Sprintf("lib.credentials (evaluated): an entry named '%s' already exists", name))
-	}
-	if declareSecretsHasLine(secretsText, secretPath) {
-		findings = append(findings, fmt.Sprintf("secrets.nix: a publicKeys line for '%s' already exists", secretPath))
 	}
 	var aliases []string
 	for alias := range registry {
@@ -607,43 +596,6 @@ func declareInsertCredentialsEntry(text string, parsed declareArgs) (string, err
 	body := trimmed[:len(trimmed)-1]
 	entry := fmt.Sprintf(declareCredentialsTemplate, parsed.name, parsed.kind, parsed.owner)
 	return body + "\n" + entry + "}\n", nil
-}
-
-// declareSecretsRecipients renders the '[ hostKey ] ++ vmKeys "<vm>" ...'
-// expression for one or more targets, in --to order. A target whose derived
-// kind is "nixos-host" is the host itself: hostKey already covers it, so it
-// contributes no vmKeys call — the same shape the template's host-only
-// lines use ('"secrets/vm-host-keys/nexus-ssh.age".publicKeys = [ hostKey
-// ];'). This reads each target's already-derived kind rather than
-// special-casing a machine name, so it needs no literal 'nexus' of its own.
-func declareSecretsRecipients(targets []declareTarget) string {
-	var b strings.Builder
-	b.WriteString("[ hostKey ]")
-	for _, target := range targets {
-		if target.Kind == "nixos-host" {
-			continue
-		}
-		fmt.Fprintf(&b, " ++ vmKeys %q", target.System)
-	}
-	return b.String()
-}
-
-// declareSecretsLinePattern matches one top-level 'secrets/<path>.age'
-// publicKeys line, the shape every existing entry in the template uses.
-var declareSecretsLinePattern = regexp.MustCompile(`(?m)^  "secrets/[A-Za-z0-9._/-]+\.age"\.publicKeys[ \t]*=.*;[ \t]*$`)
-
-// declareInsertSecretsLine inserts the new recipient line immediately after
-// the last existing line of the same shape, touching nothing else. Unlike
-// credentials.nix entries, secrets.nix lines are not blank-line separated in
-// the template, so none is added here.
-func declareInsertSecretsLine(text string, name string, targets []declareTarget) (string, error) {
-	matches := declareSecretsLinePattern.FindAllStringIndex(text, -1)
-	if len(matches) == 0 {
-		return "", fmt.Errorf("no existing publicKeys line to insert after")
-	}
-	last := matches[len(matches)-1]
-	line := fmt.Sprintf(`  "secrets/%s.age".publicKeys = %s;`, name, declareSecretsRecipients(targets))
-	return text[:last[1]] + "\n" + line + text[last[1]:], nil
 }
 
 // declareInsertRegistryGroup inserts the new group as a new top-level key,
@@ -853,11 +805,9 @@ func secretDeclare(args []string) {
 	checkout := resolveSecretsCheckout(parsed.checkout)
 
 	credentialsPath := filepath.Join(checkout, "credentials.nix")
-	secretsPath := filepath.Join(checkout, "secrets.nix")
 	registryPath := filepath.Join(checkout, "rotation-registry.json")
 
 	credentialsText := readDeclareFile(credentialsPath)
-	secretsText := readDeclareFile(secretsPath)
 	registryText := readDeclareFile(registryPath)
 	// The template is stored exactly as read: no trim, no newline added or
 	// removed, because whether it ends in one is part of the credential's
@@ -918,7 +868,7 @@ func secretDeclare(args []string) {
 	}
 
 	secretPath := "secrets/" + parsed.name + ".age"
-	if findings := declareCollisions(credentialsText, secretsText, registry, evaluatedCredentials, parsed.name, secretPath); len(findings) > 0 {
+	if findings := declareCollisions(credentialsText, registry, evaluatedCredentials, parsed.name, secretPath); len(findings) > 0 {
 		for _, finding := range findings {
 			fmt.Fprintf(stderr, "allod: %s\n", finding)
 		}
@@ -947,14 +897,6 @@ func secretDeclare(args []string) {
 		die(1, "credentials.nix: the edit would leave unbalanced braces; refusing to write")
 	}
 
-	newSecretsText, err := declareInsertSecretsLine(secretsText, parsed.name, targets)
-	if err != nil {
-		die(1, "secrets.nix: %s", err)
-	}
-	if !declareNixBalanced(newSecretsText) {
-		die(1, "secrets.nix: the edit would leave unbalanced braces; refusing to write")
-	}
-
 	group := buildDeclareGroup(parsed, targets, value)
 	newRegistryText, err := declareInsertRegistryGroup(registryText, parsed.name, group)
 	if err != nil {
@@ -971,11 +913,10 @@ func secretDeclare(args []string) {
 	// a failed write can never leave a file partially written either.
 	declareWriteAll([]declareWrite{
 		{credentialsPath, []byte(credentialsText), []byte(newCredentialsText)},
-		{secretsPath, []byte(secretsText), []byte(newSecretsText)},
 		{registryPath, []byte(registryText), []byte(newRegistryText)},
 	})
 
-	for _, path := range []string{credentialsPath, secretsPath, registryPath} {
+	for _, path := range []string{credentialsPath, registryPath} {
 		rel, err := filepath.Rel(checkout, path)
 		if err != nil {
 			rel = path
