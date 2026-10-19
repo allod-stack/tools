@@ -1,8 +1,6 @@
 package main
 
-// Steps 2 and 3 of skills/memory-backpass/SKILL.md: find pending traces,
-// analyze each with the bulk seat (one retry, then the fallback seat), and
-// whitespace-fold every returned quote against the trace before trusting it.
+// Steps 2 and 3 of skills/memory-backpass/SKILL.md.
 
 import (
 	"crypto/sha256"
@@ -17,7 +15,6 @@ import (
 	"unicode"
 )
 
-// pendingTrace is one candidate session file under a --traces checkout.
 type pendingTrace struct {
 	checkoutDir   string
 	checkoutBase  string
@@ -30,12 +27,9 @@ type pendingTrace struct {
 	hash          string // sha256 hex of the current file content
 }
 
-// tracePath is the TRACE_PATH value: the checkout's basename joined with
-// the trace's path inside it, e.g. "traces-allod-dev/pi/2026-10-13-x.md".
+// TRACE_PATH: the checkout basename joined with the path inside it.
 func (t pendingTrace) tracePath() string { return t.checkoutBase + "/" + t.relPath }
 
-// discoverTraces walks checkoutDir for "*/*/*.md", skipping dot-directories
-// and any file whose name does not parse as "YYYY-MM-DD-<session-id>.md".
 func discoverTraces(checkoutDir string) ([]pendingTrace, error) {
 	var all []pendingTrace
 	base := filepath.Base(checkoutDir)
@@ -88,8 +82,7 @@ func sha256File(path string) (string, error) {
 	return fmt.Sprintf("%x", sum), nil
 }
 
-// readAnalyzedState reads <checkout>/.memory-backpass/analyzed.txt, in
-// sha256sum format: "<hex>  <relative path>", two spaces.
+// sha256sum format, two spaces, so sha256sum -c works in the checkout.
 func readAnalyzedState(checkoutDir string) map[string]string {
 	state := map[string]string{}
 	data, err := os.ReadFile(filepath.Join(checkoutDir, ".memory-backpass", "analyzed.txt"))
@@ -109,12 +102,7 @@ func readAnalyzedState(checkoutDir string) map[string]string {
 	return state
 }
 
-// pendingTracesIn returns checkout's candidate traces (all), the ones
-// pending among them (no analyzed.txt line, or a hash that no longer
-// matches — the file grew or changed since it was last read), and a failed
-// outcome for any trace whose hash could not even be computed, so a
-// permissions error or a vanished file shows up in the funnel and the exit
-// status instead of being silently dropped from the run.
+// A trace whose hash cannot be read is a failed outcome, never a silent skip.
 func pendingTracesIn(checkoutDir string) (all, pending []pendingTrace, unreadable []traceOutcome, err error) {
 	all, err = discoverTraces(checkoutDir)
 	if err != nil {
@@ -137,8 +125,6 @@ func pendingTracesIn(checkoutDir string) (all, pending []pendingTrace, unreadabl
 	return all, pending, unreadable, nil
 }
 
-// evidenceItem is one surviving positive, negative, or gap item, with the
-// session it came from attached for the ledger and fold steps.
 type evidenceItem struct {
 	kind                string // "positive", "negative", "gap"
 	id                  string // PUB-/PRV- id: positive and negative only
@@ -168,8 +154,6 @@ type analysisAnswer struct {
 	Gaps     []analysisItem `json:"gaps"`
 }
 
-// stripFence removes one surrounding Markdown fence: a first line of
-// "```" or "```json" and a last line of "```".
 func stripFence(text string) string {
 	lines := strings.Split(text, "\n")
 	if len(lines) < 2 {
@@ -183,9 +167,7 @@ func stripFence(text string) string {
 	return text
 }
 
-// parseAnalysisAnswer gates the raw answer on content, never on the seat's
-// exit status: it must parse as a JSON object whose positive, negative, and
-// gaps members are all present arrays.
+// The gate is the parsed content, never the seat's exit status.
 func parseAnalysisAnswer(raw string) (analysisAnswer, error) {
 	text := stripFence(strings.TrimSpace(raw))
 	var generic map[string]json.RawMessage
@@ -210,9 +192,6 @@ func parseAnalysisAnswer(raw string) (analysisAnswer, error) {
 
 var validNegativeClass = map[string]bool{"harm": true, "non-compliance": true, "irrelevant": true}
 
-// gateItems drops a malformed item without failing the call: one missing a
-// quote, a negative item with a class outside the three known ones, or a
-// positive/negative item whose id is not in this run's instruction index.
 func gateItems(answer analysisAnswer, validIDs map[string]bool) (items []evidenceItem, malformed int) {
 	add := func(kind string, raw []analysisItem, requireID bool) {
 		for _, it := range raw {
@@ -241,9 +220,7 @@ func gateItems(answer analysisAnswer, validIDs map[string]bool) (items []evidenc
 	return items, malformed
 }
 
-// foldWhitespace collapses every run of Unicode whitespace to one space and
-// trims the ends: the mandatory quote check (step 3) runs on this, never on
-// raw text, and a model's confidence never substitutes for it.
+// Step 3's mandatory check runs on this fold; a model's stated confidence never substitutes for it.
 func foldWhitespace(s string) string {
 	var b strings.Builder
 	inSpace := false
@@ -266,8 +243,6 @@ func quoteSurvives(quote, traceText string) bool {
 	return folded != "" && strings.Contains(foldWhitespace(traceText), folded)
 }
 
-// traceOutcome is one trace's full result: the gated, quote-checked
-// evidence it contributed, or why it failed.
 type traceOutcome struct {
 	trace      pendingTrace
 	analyzed   bool
@@ -279,8 +254,6 @@ type traceOutcome struct {
 	quoteDrops int
 }
 
-// analyzeOneTrace runs step 2 (fill, call, gate, retry, fallback) then step
-// 3 (quote check) for one pending trace.
 func analyzeOneTrace(cfg backpassConfig, pt pendingTrace, analysisTemplate, indexText, ledgerText string, validIDs map[string]bool, scratchDir string) traceOutcome {
 	traceBytes, err := os.ReadFile(pt.absPath)
 	if err != nil {
@@ -296,8 +269,7 @@ func analyzeOneTrace(cfg backpassConfig, pt pendingTrace, analysisTemplate, inde
 	if err != nil {
 		return traceOutcome{trace: pt, failReason: fmt.Sprintf("template fill: %v", err)}
 	}
-	// The checkout index, not just its basename, disambiguates the prompt
-	// file name: two --traces checkouts can share a basename.
+	// The checkout index keeps two --traces checkouts with one basename apart.
 	promptPath := filepath.Join(scratchDir, fmt.Sprintf("t%d_%s.prompt.md", pt.checkoutIndex, strings.ReplaceAll(pt.tracePath(), "/", "_")))
 	if err := os.WriteFile(promptPath, []byte(filled), 0600); err != nil {
 		return traceOutcome{trace: pt, failReason: fmt.Sprintf("could not write prompt file: %v", err)}
@@ -356,8 +328,7 @@ func analyzeOneTrace(cfg backpassConfig, pt pendingTrace, analysisTemplate, inde
 	}
 }
 
-// analyzeAllTraces runs cfg.jobs analyses at once; traces must already be
-// sorted by tracePath so results, indexed the same way, need no re-sort.
+// Contract: traces are already sorted by tracePath; results share its index.
 func analyzeAllTraces(cfg backpassConfig, traces []pendingTrace, analysisTemplate, indexText, ledgerText string, validIDs map[string]bool, scratchDir string) []traceOutcome {
 	results := make([]traceOutcome, len(traces))
 	sem := make(chan struct{}, cfg.jobs)
@@ -375,14 +346,10 @@ func analyzeAllTraces(cfg backpassConfig, traces []pendingTrace, analysisTemplat
 	return results
 }
 
-// sortTracesByPath orders traces by TRACE_PATH so the report's ordering
-// never depends on completion order or --traces argument order.
 func sortTracesByPath(traces []pendingTrace) {
 	sort.Slice(traces, func(i, j int) bool { return traces[i].tracePath() < traces[j].tracePath() })
 }
 
-// traceDatesByCite indexes every discovered trace (pending or not) by
-// "<harness> <session id>" to its filename date, for step 6's age prune.
 func traceDatesByCite(all []pendingTrace) map[string]string {
 	dates := map[string]string{}
 	for _, t := range all {

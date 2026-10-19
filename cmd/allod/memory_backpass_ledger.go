@@ -1,8 +1,6 @@
 package main
 
-// Steps 4 to 6 of skills/memory-backpass/SKILL.md: one private ledger line
-// per surviving rule and session, the evidence fold for synthesis, and the
-// two prune rules over pre-run private and public lines.
+// Steps 4 to 6 of skills/memory-backpass/SKILL.md.
 
 import (
 	"fmt"
@@ -13,9 +11,7 @@ import (
 	"time"
 )
 
-// ledgerEntry is one private ledger.md line under construction: either an
-// existing line (lineIndex >= 0, into fileLines) or one created this run
-// (lineIndex == -1, appended at the end of the file).
+// lineIndex -1 is a line created this run, appended at the end of the file.
 type ledgerEntry struct {
 	lineIndex      int
 	raw            string // current text, "- ..." form
@@ -25,9 +21,7 @@ type ledgerEntry struct {
 	prunedThisRun  bool
 }
 
-// ledgerBuilder applies step 4's ledger lines and step 6's prunes to a
-// private ledger.md, read once at construction and rendered once at the end
-// so every other line in the file (header, comments) survives untouched.
+// Read once, rendered once: every line this run does not touch survives as is.
 type ledgerBuilder struct {
 	fileLines                   []string
 	entries                     []*ledgerEntry
@@ -62,10 +56,8 @@ func newLedgerBuilder(dir string, publicLedger, privateLedger []ledgerLine) *led
 
 var ignoredPhraseRe = regexp.MustCompile(`^(?:ignored|harm):\s*"([^"]*)"`)
 
-// ruleKeyOf is the dedup/corroboration identity of a ledger line: the
-// folded proposed-instruction text for a gap, or the folded quoted phrase
-// for an ignored/harm line (that phrase is sourced from the instruction's
-// own text, so it is stable across sessions and across runs).
+// The dedup and corroboration key: the folded proposed instruction for a
+// gap, the folded quoted phrase for an ignored or harm line.
 func ruleKeyOf(kind, body string) string {
 	switch kind {
 	case "gap":
@@ -96,8 +88,6 @@ func (b *ledgerBuilder) add(key, body string) *ledgerEntry {
 	return e
 }
 
-// corroborate appends a session's evidence to an existing line, unless that
-// line already cites the same session.
 func (b *ledgerBuilder) corroborate(e *ledgerEntry, sessionTag, suffix string, corroborations *int) {
 	if strings.Contains(e.raw, sessionTag) {
 		return
@@ -109,10 +99,6 @@ func (b *ledgerBuilder) corroborate(e *ledgerEntry, sessionTag, suffix string, c
 
 func quoteWrap(s string) string { return "\"" + s + "\"" }
 
-// addGap applies step 4's gap rule: matchesLedger to a private line
-// corroborates it; to a public line creates a new private line naming it;
-// an unknown id is treated as absent; otherwise the gap's own folded
-// instruction text is the dedup/corroboration key.
 func (b *ledgerBuilder) addGap(item evidenceItem, corroborations *int) {
 	sessionTag := item.harness + " " + item.sessionID
 	suffix := fmt.Sprintf(" | %s | %s", sessionTag, quoteWrap(item.quote))
@@ -124,9 +110,7 @@ func (b *ledgerBuilder) addGap(item evidenceItem, corroborations *int) {
 					b.corroborate(e, sessionTag, suffix, corroborations)
 					return
 				}
-				// The matched private line predates this run and carries no
-				// recoverable rule key (unusual format); fall through to the
-				// ordinary gap key rather than silently dropping the item.
+				// A pre-run line with no recoverable key falls through to the gap key.
 			} else {
 				ruleText := ledgerRuleText(match.text)
 				key := "gap:" + foldWhitespace(ruleText)
@@ -150,10 +134,6 @@ func (b *ledgerBuilder) addGap(item evidenceItem, corroborations *int) {
 	b.add(key, body)
 }
 
-// addNegative applies step 4's non-compliance/harm rule: non-compliance
-// becomes "ignored:", harm becomes "harm:", both keyed by the folded first
-// eight words of the cited instruction's text; a PUB- id's line ends with
-// " Public memory.md candidate".
 func (b *ledgerBuilder) addNegative(item evidenceItem, instructionText string, corroborations *int) {
 	sessionTag := item.harness + " " + item.sessionID
 	words := strings.Fields(instructionText)
@@ -178,9 +158,6 @@ func (b *ledgerBuilder) addNegative(item evidenceItem, instructionText string, c
 	b.add(key, body)
 }
 
-// buildLedger applies step 4 to every analyzed trace's surviving evidence,
-// in order, deduping within a session: gaps by folded proposed instruction,
-// negatives by (id, class).
 func buildLedger(b *ledgerBuilder, outcomes []traceOutcome, bullets map[string]string) (corroborations int) {
 	for _, oc := range outcomes {
 		if !oc.analyzed {
@@ -233,9 +210,6 @@ func (b *ledgerBuilder) corroboratedLines() []string {
 	return out
 }
 
-// renderFile produces the full, updated ledger.md: unmentioned lines pass
-// through unchanged, touched lines carry their corroboration, pruned lines
-// are dropped, and new lines are appended at the end.
 func (b *ledgerBuilder) renderFile() string {
 	prunedIdx := map[int]bool{}
 	replaceIdx := map[int]string{}
@@ -285,9 +259,7 @@ func sessionCitations(line string) [][2]string {
 	return out
 }
 
-// pruneByAge is step 6(a): every session a line cites must have a trace
-// file on disk, dated more than 90 days before today; a cited session with
-// no trace found never prunes it.
+// A cited session with no trace found never prunes a line.
 func pruneByAge(line string, traceDates map[string]string, today time.Time) bool {
 	cites := sessionCitations(line)
 	if len(cites) == 0 {
@@ -309,17 +281,11 @@ func pruneByAge(line string, traceDates map[string]string, today time.Time) bool
 	return true
 }
 
-// pruneByCoverage is step 6(b), restricted to gap lines: a negative line's
-// rule text is always the cited instruction's own current wording, so
-// checking it against the index would prune every such line on sight. Only
-// a gap's proposed instruction is a genuinely new rule that coverage can
-// retire.
-// pruneCoverageExempt is .hooks/memory-budget's own exempt list: none of
-// these is an index or a topic file, and ledger.md trivially "contains" any
-// rule text pulled from one of its own lines, which pruned every untouched
-// line on sight before this exemption existed.
+// The hook's own exempt list: ledger.md trivially contains its own lines.
 var pruneCoverageExempt = map[string]bool{"README.md": true, "LICENSE": true, "ledger.md": true, "retired.md": true}
 
+// Gap lines only: an ignored or harm line quotes an instruction that is in
+// the index by construction, so coverage would prune every one on sight.
 func pruneByCoverage(ruleText, checkoutDir string) bool {
 	folded := foldWhitespace(ruleText)
 	if folded == "" {
@@ -342,9 +308,7 @@ func pruneByCoverage(ruleText, checkoutDir string) bool {
 
 var publicCandidateSuffixRe = regexp.MustCompile(`Public \S+\.md candidate$`)
 
-// applyPrunes is step 6: only pre-run lines this run has not touched are
-// eligible, and a public-candidate line's coverage check reads the public
-// checkout's topic files, since that is the rule it actually proposes.
+// Only pre-run lines this run has not touched are eligible for a prune.
 func (b *ledgerBuilder) applyPrunes(traceDates map[string]string, today time.Time, privateDir, publicDir string) (pruned int) {
 	for _, e := range b.entries {
 		if !e.preRun || e.touchedThisRun {
@@ -366,9 +330,7 @@ func (b *ledgerBuilder) applyPrunes(traceDates map[string]string, today time.Tim
 	return pruned
 }
 
-// publicPrunes evaluates the same two rules against the read-only public
-// ledger: a public line is never edited, only listed under "To relay" as a
-// prune proposal for a human to apply.
+// A public line is never edited; a prune is listed under To relay for a human.
 func publicPrunes(publicLedger []ledgerLine, traceDates map[string]string, today time.Time, publicDir string) []string {
 	var out []string
 	for _, l := range publicLedger {
@@ -381,14 +343,11 @@ func publicPrunes(publicLedger []ledgerLine, traceDates map[string]string, today
 	return out
 }
 
-// idStats is one instruction's step-5 fold: how many sightings of each
-// shape, and the distinct sessions behind them (for relevance).
 type idStats struct {
 	positive, nonCompliance, harm int
 	sessions                      map[string]bool
 }
 
-// buildFoldTable renders step 5's per-instruction table, sorted by id.
 func buildFoldTable(outcomes []traceOutcome, analyzedSessions int) string {
 	stats := map[string]*idStats{}
 	for _, oc := range outcomes {
@@ -433,8 +392,6 @@ func buildFoldTable(outcomes []traceOutcome, analyzedSessions int) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// buildFoldLedgerSection renders step 5's per-rule section: every line
-// touched this run, with the count of distinct sessions behind it.
 func buildFoldLedgerSection(b *ledgerBuilder) string {
 	var out strings.Builder
 	for _, e := range b.entries {
@@ -450,9 +407,7 @@ func buildFoldLedgerSection(b *ledgerBuilder) string {
 	return strings.TrimRight(out.String(), "\n")
 }
 
-// buildFoldQuotes renders step 5's quote section, grouped by rule, so the
-// synthesis prompt's "use only quotes supplied in the fold" rule can be
-// honored: every surviving quote from every analyzed trace is here.
+// Every surviving quote must be here: the synthesis prompt allows only fold quotes.
 func buildFoldQuotes(outcomes []traceOutcome, bullets map[string]string) string {
 	groups := map[string][]evidenceItem{}
 	var order []string

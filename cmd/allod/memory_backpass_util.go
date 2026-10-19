@@ -2,9 +2,6 @@ package main
 
 import "os"
 
-// readFileOrEmpty reads path, returning "" and the error for a missing or
-// unreadable file rather than panicking: several step-6 coverage checks
-// probe files that may legitimately not exist.
 func readFileOrEmpty(path string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

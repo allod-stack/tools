@@ -1,11 +1,7 @@
 package main
 
-// The 'memory' namespace drives the memory-backpass skill
-// (skills/memory-backpass/SKILL.md in allod/memory) as code: a nightly timer
-// runs this command and spends a model only on the skill's two prompts
-// (bulk analysis, synthesis) instead of asking a headless session to follow
-// the skill's ten steps by hand. The skill text stays the spec; this file
-// and memory_backpass_*.go cite its step numbers in names and comments.
+// The spec is skills/memory-backpass/SKILL.md in allod/memory; the step
+// numbers in names and comments here are its.
 
 import (
 	"fmt"
@@ -68,10 +64,8 @@ func memoryMain(args []string) {
 
 const memoryBackpassUsageText = memoryUsageText
 
-// backpassConfig is the fully resolved, validated configuration for one run:
-// every directory is an existing git repository and every seat required for
-// the chosen mode is non-empty by the time memoryBackpass hands this to
-// runBackpass.
+// Contract: every directory is an existing git repository and every seat the
+// chosen mode needs is non-empty before runBackpass sees this.
 type backpassConfig struct {
 	tracesDirs    []string
 	publicDir     string
@@ -202,9 +196,6 @@ func memoryBackpass(args []string) {
 	})
 }
 
-// defaultPublicMemoryDir is <workDir>/<registry checkout of allod/memory>,
-// falling back to the literal checkout name when the registry has no entry
-// for it (a standalone build with no inventory).
 func defaultPublicMemoryDir() string {
 	checkout, ok := registryCheckout("allod/memory")
 	if !ok {
@@ -213,10 +204,6 @@ func defaultPublicMemoryDir() string {
 	return filepath.Join(workDir(), checkout)
 }
 
-// defaultPrivateMemoryDir resolves to the one registry entry marked
-// "memory": true other than allod/memory; zero or more than one is a
-// refusal naming what was found, since the command cannot guess which one
-// an operator meant.
 func defaultPrivateMemoryDir() (string, error) {
 	var ids []string
 	for _, id := range memoryRegistryIds() {

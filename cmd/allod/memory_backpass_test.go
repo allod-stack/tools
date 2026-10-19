@@ -1,10 +1,5 @@
 package main
 
-// End-to-end coverage for 'allod memory backpass', against the fixtures in
-// testdata/backpass and memory_backpass_fixture_test.go's helpers. Assertions
-// are on observable effects — stdout sections, git state, the forge stub's
-// log — never on package internals, which the unit tests already pin.
-
 import (
 	"os"
 	"path/filepath"
@@ -100,9 +95,6 @@ func TestMemoryBackpassForgeMissingRefusesInWriteMode(t *testing.T) {
 	}
 }
 
-// backpassRunReportOnly runs the fixture set in report-only mode with the
-// fake bulk seat answering from testdata/backpass/responses, and returns
-// stdout, stderr, and the exit code.
 func backpassRunReportOnly(t *testing.T, fx backpassFixtures, seat string) (string, string, int) {
 	t.Helper()
 	return runAllod(t, "memory", "backpass", "--traces", fx.traces,
@@ -273,9 +265,7 @@ func TestMemoryBackpassTimeout(t *testing.T) {
 	}
 }
 
-// TestMemoryBackpassPartialFailure garbles every attempt against one trace
-// only (bulk, bulk, fallback), leaving the other two traces to analyze
-// normally: the funnel and the state file must tell the two apart.
+// One trace fails every attempt while the other two analyze; the funnel and state file must tell them apart.
 func TestMemoryBackpassPartialFailure(t *testing.T) {
 	fx := backpassSetup(t)
 	backpassSetupForge(t)
@@ -387,9 +377,7 @@ EOF
 		t.Errorf("forge log missing 'issue edit ... --add-label relay'\n%s", log)
 	}
 
-	// 'change submit' pushes the private agent branch itself (how else would
-	// the PR exist to review) — only a push to a default branch is forbidden,
-	// and only the public relay worktree's branch must stay unpushed.
+	// Only a push to a default branch is forbidden; submit pushes the agent branch.
 	privateOriginAfter, _ := gitOutput(fx.private, "ls-remote", "--heads", "origin", branch)
 	if privateOriginAfter == "" {
 		t.Error("the private agent branch should have been pushed by 'change submit'")

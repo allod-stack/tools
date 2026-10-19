@@ -202,9 +202,7 @@ func TestPruneByCoverageIgnoresLedgerAndExemptFiles(t *testing.T) {
 	}
 }
 
-// TestApplyPrunesKeepsUncoveredDropsCovered is the regression test for the
-// ledger.md self-match: an untouched pre-run gap with no real coverage
-// survives, and one a topic file actually covers is pruned.
+// Regression for the ledger.md self-match.
 func TestApplyPrunesKeepsUncoveredDropsCovered(t *testing.T) {
 	privateDir, publicDir := t.TempDir(), t.TempDir()
 	backpassWriteFile(t, privateDir+"/memory.md", "# Memory\n")

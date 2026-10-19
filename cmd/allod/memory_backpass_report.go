@@ -1,8 +1,6 @@
 package main
 
-// The run report (all modes) and step 10 (report-only), plus the state-file
-// commit every mode performs at the end. runBackpass is the whole driver:
-// it ties steps 1 through 10 together in order.
+// The run report, step 10, the state-file commit, and runBackpass, the driver.
 
 import (
 	"fmt"
@@ -29,9 +27,6 @@ type failureRecord struct {
 	attempts     []string
 }
 
-// reportData is what step 7 to 9's PR body needs that was already computed
-// before the private worktree existed: the funnel, the failures, and the
-// unrelayed-public-edits list from step 1's relay check.
 type reportData struct {
 	unrelayed    []string
 	funnel       funnelStats
@@ -40,9 +35,7 @@ type reportData struct {
 	foldQuotes   map[string]bool
 }
 
-// foldedQuoteSet is the set of folded quotes this run actually supplied to
-// the synthesis prompt's FOLD section, so an edit's claimed evidence can be
-// checked against what was really offered rather than trusted blind.
+// Only a quote the fold actually offered counts as an edit's evidence.
 func foldedQuoteSet(outcomes []traceOutcome) map[string]bool {
 	set := map[string]bool{}
 	for _, oc := range outcomes {
@@ -88,9 +81,6 @@ func seatDescription(seat string) string {
 	return seat
 }
 
-// perTraceSeats renders, sorted by trace path, which seat analyzed each
-// trace — part of the brief's "the report names ... which seat analyzed
-// each trace".
 func perTraceSeats(outcomes []traceOutcome) string {
 	var lines []string
 	for _, oc := range outcomes {
@@ -127,8 +117,6 @@ func renderFailures(failures []failureRecord) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// renderReport is the run report printed to stdout in every mode: unrelayed
-// public edits, seats, funnel, failures, then the mode-specific sections.
 func renderReport(cfg backpassConfig, rep reportData, outcomes []traceOutcome, ledger *ledgerBuilder, result writeResult, scratchKept, fold string) string {
 	var b strings.Builder
 	b.WriteString("## Unrelayed public edits\n\n")
@@ -244,12 +232,8 @@ func renderReport(cfg backpassConfig, rep reportData, outcomes []traceOutcome, l
 	return b.String()
 }
 
-// editEvidenceStats counts, for one kept edit, the distinct
-// "<harness> <session id>" sources and the total quotes among its claimed
-// evidence whose folded quote actually appears in this run's fold — the
-// skill's synthesis gates enforced as a reviewer-facing count rather than
-// by reverting a hunk the model may have had good (if unverifiable) reason
-// for: the human reading the PR is the actual gate.
+// The synthesis gates as a reviewer-facing count: the human reading the PR
+// is the gate, so nothing here reverts a hunk.
 func editEvidenceStats(e editProposal, foldQuotes map[string]bool) (sessions, quotes int) {
 	sources := map[string]bool{}
 	for _, ev := range e.Evidence {
@@ -261,7 +245,6 @@ func editEvidenceStats(e editProposal, foldQuotes map[string]bool) (sessions, qu
 	return len(sources), quotes
 }
 
-// renderPRBody is step 9's PR body, built before 'change submit' runs.
 func renderPRBody(date string, cfg backpassConfig, rep reportData, result writeResult, fold string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Sessions read: %d. Findings kept: %d, dropped for a missing quote: %d. Edits proposed: %d.",
@@ -319,9 +302,7 @@ func renderPRBody(date string, cfg backpassConfig, rep reportData, result writeR
 	return b.String()
 }
 
-// receiveCommandLine never names a private detail beyond the worktree path
-// the operator already has: 'hostname' is the agent's own, as git-workflow.md
-// requires for a patch-receive source.
+// The hostname is the agent's own, as git-workflow.md requires of a receive source.
 func receiveCommandLine(cfg backpassConfig, publicWorktree string) string {
 	host, err := os.Hostname()
 	if err != nil {
@@ -330,9 +311,6 @@ func receiveCommandLine(cfg backpassConfig, publicWorktree string) string {
 	return fmt.Sprintf("allod patch receive %s:%s allod/memory", host, publicWorktree)
 }
 
-// computeAnalyzedState merges this run's results into a traces checkout's
-// state file: a path still on disk keeps its line (updated if analyzed this
-// run), a path no longer on disk is dropped.
 func computeAnalyzedState(checkoutDir string, all []pendingTrace, outcomesByRel map[string]traceOutcome) (changed bool, newState map[string]string) {
 	old := readAnalyzedState(checkoutDir)
 	existing := map[string]bool{}
@@ -374,8 +352,7 @@ func renderAnalyzedState(state map[string]string) string {
 	return b.String()
 }
 
-// writeAnalyzedState writes the merged state file, reporting whether its
-// content actually changed: an unchanged file is not committed.
+// Reports whether the content changed: an unchanged file is not committed.
 func writeAnalyzedState(checkoutDir string, newState map[string]string) bool {
 	content := renderAnalyzedState(newState)
 	stateDir := checkoutDir + "/.memory-backpass"
@@ -411,8 +388,6 @@ var synthesisKnownPlaceholders = map[string]bool{
 	"TOPIC_FILE_INDEX": true, "FOLD": true, "REJECTED_EDIT_TITLES": true,
 }
 
-// runBackpass is the whole driver: steps 1 through 10 of
-// skills/memory-backpass/SKILL.md, in order, over an already-validated cfg.
 func runBackpass(cfg backpassConfig) {
 	forgeAvailable := forgeOnPath()
 	if !forgeAvailable && !cfg.reportOnly {
@@ -468,10 +443,7 @@ func runBackpass(cfg backpassConfig) {
 	indexText := renderIndex(publicBullets) + "\n\n" + renderIndex(privateBullets)
 	ledgerText := renderLedgerEntries(publicLedgerLines, privateLedgerLines)
 
-	// Step 2: discover every pending trace across every --traces checkout.
-	// The checkout's index (not just its basename, which two checkouts can
-	// share) is stamped onto every trace here, once, for the prompt-file
-	// naming under --jobs.
+	// Step 2: every pending trace across every --traces checkout.
 	var allTraces, pending []pendingTrace
 	var unreadableOutcomes []traceOutcome
 	tracesByCheckout := map[string][]pendingTrace{}
@@ -553,8 +525,7 @@ func runBackpass(cfg backpassConfig) {
 		}
 	}
 
-	// The scratch dir also held step 7/8's synthesis prompt files, so
-	// cleanup waits until writeBackpass is done with it.
+	// The scratch dir also holds the synthesis prompts, so cleanup waits.
 	scratchKept := ""
 	if anyFailed {
 		scratchKept = scratchDir
@@ -564,9 +535,8 @@ func runBackpass(cfg backpassConfig) {
 
 	fmt.Fprint(stdout, renderReport(cfg, rep, outcomes, builder, result, scratchKept, fold))
 
-	// Step 10 (both modes): commit the state-file update per traces checkout.
-	// Skipped entirely when record/submit failed: the next run's fresh
-	// worktree gets the same ledger lines, so the traces must stay pending.
+	// Step 10, both modes. Skipped when record or submit failed: the traces
+	// must stay pending for the next run.
 	if !result.submitFailed {
 		for _, dir := range cfg.tracesDirs {
 			outcomesByRel := map[string]traceOutcome{}

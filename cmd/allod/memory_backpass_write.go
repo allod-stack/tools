@@ -1,8 +1,6 @@
 package main
 
-// Steps 7 to 9 of skills/memory-backpass/SKILL.md: the private worktree and
-// its synthesis call, the budget gate, the public relay worktree, and the
-// pull request itself.
+// Steps 7 to 9 of skills/memory-backpass/SKILL.md.
 
 import (
 	"bytes"
@@ -62,8 +60,6 @@ func parseSynthesisAnswer(raw string) (synthesisAnswer, error) {
 	return answer, nil
 }
 
-// callChangeBegin runs 'allod change begin -d <desc> <repoDir>' in process,
-// swapping stdout for a buffer to capture the printed worktree path.
 func callChangeBegin(desc, repoDir string) (path string, code int) {
 	var buf bytes.Buffer
 	prevOut := stdout
@@ -73,8 +69,7 @@ func callChangeBegin(desc, repoDir string) (path string, code int) {
 	return strings.TrimSpace(buf.String()), code
 }
 
-// beginChangeWorktree is step 7's worktree creation: a branch-exists
-// refusal (exit 5) is retried once with the time of day appended.
+// A branch-exists refusal (exit 5) is retried once with the time of day appended.
 func beginChangeWorktree(desc, repoDir string) (path string, ok bool) {
 	path, code := callChangeBegin(desc, repoDir)
 	if code == 5 {
@@ -85,8 +80,6 @@ func beginChangeWorktree(desc, repoDir string) (path string, ok bool) {
 
 var budgetAssignRe = regexp.MustCompile(`(INDEX_MAX_BYTES|TOPIC_MAX_BYTES)=(\d+)`)
 
-// readMemoryBudgetCaps reads .hooks/memory-budget's two constants; ok is
-// false when either is missing, which the caller turns into a refusal.
 func readMemoryBudgetCaps(dir string) (indexMax, topicMax int, ok bool) {
 	text, err := readFileOrEmpty(dir + "/.hooks/memory-budget")
 	if err != nil {
@@ -102,11 +95,8 @@ func readMemoryBudgetCaps(dir string) (indexMax, topicMax int, ok bool) {
 	return indexMax, topicMax, hasIndex && hasTopic
 }
 
-// runMemoryBudgetWorktree runs the hook from mainCheckout, never the
-// worktree's own copy (which the synthesis seat can rewrite), with cwd set
-// to worktree so the hook's own `git rev-parse --show-toplevel` finds it.
-// Invoked through `bash` explicitly: the hook's "#!/usr/bin/env bash"
-// shebang has no `env` to resolve in the nix sandbox.
+// The hook runs from mainCheckout, never the worktree copy the seat can
+// rewrite, through bash because its shebang has no env in the nix sandbox.
 func runMemoryBudgetWorktree(mainCheckout, worktree string) (ok bool, output string) {
 	out, status := captureCommand(worktree, nil, true, "bash", mainCheckout+"/.hooks/memory-budget", "--worktree")
 	return status == 0, out
@@ -136,8 +126,6 @@ func renderRejectedTitles(prs []backpassPR) string {
 	return strings.Join(titles, "\n")
 }
 
-// changedPaths reads 'git status --porcelain' into the set of paths with
-// any change, following a rename to its destination path.
 func changedPaths(dir string) map[string]bool {
 	out, _ := gitOutput(dir, "status", "--porcelain")
 	changed := map[string]bool{}
@@ -183,10 +171,6 @@ func evidenceLines(evidence []evidenceRef) string {
 	return strings.Join(lines, "\n")
 }
 
-// runChangeInWorktree runs one 'allod change' subcommand in process with
-// cwd set to worktree, stdout captured, both restored afterward: the one
-// seam 'change record', 'change submit', and the ledger pre-commit below
-// all go through, so none of them duplicates the chdir/stdout-swap dance.
 func runChangeInWorktree(worktree string, args []string) (output string, code int) {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -204,25 +188,16 @@ func runChangeInWorktree(worktree string, args []string) (output string, code in
 	return buf.String(), code
 }
 
-// commitLedgerChanges is step 7's ledger pre-commit, made before the
-// synthesis seat ever runs: a later budget-failure drop can then revert
-// everything the seat did with 'git checkout -- .' and 'git clean -fd'
-// without touching the ledger lines this run already decided on. A no-op
-// run (no ledger change at all) fails harmlessly here; record's own
-// "nothing to commit" refusal is not escalated.
+// Committed before the synthesis seat runs, so a budget-failure drop can
+// revert everything the seat did without touching the ledger lines.
 func commitLedgerChanges(worktree string) {
 	runChangeInWorktree(worktree, []string{"record", "-m", "memory-backpass: ledger"})
 }
 
-// changeRecordNothingToCommit is change.go's exit code for "nothing staged
-// and no unpushed commits": when every edit this run proposed was dropped,
-// the ledger pre-commit already carries (and already pushed) the only
-// content there is, so this specific refusal from the final record call is
-// not a failure — submit still has a real branch to open a PR from.
+// When every edit was dropped the ledger pre-commit is the whole branch, so
+// record's nothing-to-commit refusal is not a failure.
 const changeRecordNothingToCommit = 4
 
-// inProcessRecordAndSubmit is step 9: 'change record' then 'change submit'.
-// failedStep names whichever one failed, for the Failures section.
 func inProcessRecordAndSubmit(worktreePath, title, bodyFile string) (submitOut, failedStep string, ok bool) {
 	if _, code := runChangeInWorktree(worktreePath, []string{"record", "-m", title}); code != 0 && code != changeRecordNothingToCommit {
 		return "", "change record", false
@@ -253,9 +228,6 @@ func addRelayLabel(worktreePath, prURL string) (ok bool, output string) {
 	return status == 0, out
 }
 
-// writeResult carries every observation step 7 to 9 makes, for the run
-// report: the brief requires these to be reported even when they are not
-// fatal (a claimed-absent path, an unreported edit, a dropped edit).
 type writeResult struct {
 	privateWorktree, publicWorktree string
 	keptEdits                       []editProposal
@@ -272,9 +244,6 @@ type writeResult struct {
 	labelOutput                     string
 }
 
-// composeFixPrompt is the step-8 fix call: a short self-contained
-// instruction plus the hook's own stderr, so the synthesis seat can see
-// exactly what it must correct.
 func composeFixPrompt(hookOutput string) string {
 	return backpassSelfMarker +
 		"\nThe .hooks/memory-budget check failed in this worktree (your current " +
@@ -283,10 +252,6 @@ func composeFixPrompt(hookOutput string) string {
 		hookOutput
 }
 
-// writeBackpass runs steps 7 to 9 against an already-built private ledger
-// (ledger.renderFile() is the new ledger.md). date is "YYYY-MM-DD". rep
-// carries the funnel, failures, and unrelayed-edits data the PR body quotes
-// alongside what this step itself observes.
 func writeBackpass(cfg backpassConfig, date string, ledger *ledgerBuilder, publicBullets, privateBullets []memBullet, prs []backpassPR, fold string, scratchDir string, rep reportData) writeResult {
 	var result writeResult
 	desc := "memory-backpass-" + date
@@ -340,9 +305,8 @@ func writeBackpass(cfg backpassConfig, date string, ledger *ledgerBuilder, publi
 		answer = synthesisAnswer{}
 	}
 
-	// A path is marked claimed only once its whole edit is kept: an edit with
-	// one changed and one absent path must not hide the changed path from
-	// the "edited, unreported" sweep below by half-claiming it first.
+	// Claimed only once the whole edit is kept, so a half-valid edit cannot
+	// hide a changed path from the unreported sweep.
 	changed := changedPaths(privatePath)
 	claimed := map[string]bool{}
 	for _, e := range answer.Edits {
@@ -377,9 +341,7 @@ func writeBackpass(cfg backpassConfig, date string, ledger *ledgerBuilder, publi
 		}
 		budgetOK, _ = runMemoryBudgetWorktree(cfg.privateDir, privatePath)
 		if !budgetOK {
-			// The ledger commit above is already safe in HEAD; reverting
-			// every uncommitted change and untracked file removes exactly
-			// what the seat did and nothing this run decided on its own.
+			// The ledger commit is in HEAD; this reverts exactly what the seat did.
 			result.budgetFailed = true
 			result.allEditsDropped = true
 			runCommand(privatePath, nil, io.Discard, io.Discard, "git", "checkout", "--", ".")

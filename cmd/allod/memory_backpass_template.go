@@ -1,19 +1,15 @@
 package main
 
-// Prompt templates come from the public checkout's skill directory at run
-// time, not embedded, so the skill stays the spec (allod/tools#276). These
-// two functions are the whole of the filler: a single left-to-right pass
-// that never re-scans an emitted value, so a trace containing the text
-// "{{TRACE}}" or "&" reaches the model byte for byte.
+// Templates are read from the public checkout at run time, so the skill
+// stays the spec.
 
 import (
 	"fmt"
 	"strings"
 )
 
-// backpassSelfMarker is the first line every prompt this command sends must
-// carry: allod trace distill drops a session whose first user message
-// starts with it, so this command's own model calls are never re-analyzed.
+// Every prompt this command sends opens with this line: allod trace distill
+// drops a session whose first user message starts with it.
 const backpassSelfMarker = "<!-- memory-backpass:self -->"
 
 func checkTemplateHeader(name, template string) error {
@@ -27,8 +23,6 @@ func checkTemplateHeader(name, template string) error {
 	return nil
 }
 
-// templatePlaceholders returns every {{NAME}} in template, in order of
-// appearance, duplicates included.
 func templatePlaceholders(template string) ([]string, error) {
 	var names []string
 	i := 0
@@ -48,8 +42,6 @@ func templatePlaceholders(template string) ([]string, error) {
 	}
 }
 
-// checkTemplatePlaceholders refuses before any model call if template names
-// a placeholder fillTemplate does not know how to fill.
 func checkTemplatePlaceholders(name, template string, known map[string]bool) error {
 	names, err := templatePlaceholders(template)
 	if err != nil {
@@ -63,9 +55,8 @@ func checkTemplatePlaceholders(name, template string, known map[string]bool) err
 	return nil
 }
 
-// fillTemplate copies template text and, at each placeholder, emits the
-// matching value verbatim without rescanning it: i always jumps past the
-// inserted value, never back into it.
+// A single left-to-right pass that never rescans an emitted value: a trace
+// containing the text {{TRACE}} or & must reach the model byte for byte.
 func fillTemplate(template string, values map[string]string) (string, error) {
 	var b strings.Builder
 	i := 0

@@ -1,10 +1,7 @@
 package main
 
-// A seat is "<argv...> <prompt-file>", no shell: the deployment's own
-// wrapper script handles anything fancier. The seat's exit status is never
-// the gate (delegate-impl, "gated on its content, never on its exit
-// status") — only runSeat's timedOut flag can turn a call into a failure
-// before the content is even looked at.
+// A seat is <argv...> <prompt-file>, no shell; the deployment wraps anything
+// fancier. Its exit status is never the gate, only the parsed content is.
 
 import (
 	"bufio"
@@ -24,13 +21,8 @@ type seatOutcome struct {
 	err      error // the process could not even be started
 }
 
-// runSeat runs seat in dir (the empty string means the caller's own cwd)
-// against promptFile, stdin /dev/null, stdout captured as the answer, and
-// stderr forwarded line by line to our stderr prefixed "seat <seat>: ".
-//
-// The call runs in its own process group (Setpgid) so a timeout can kill
-// every descendant with syscall.Kill(-pgid, SIGKILL); shell.md's "pkill -f
-// matches the shell that runs it" is why this never shells out to pkill.
+// The call runs in its own process group so a timeout kills every
+// descendant by group id; shell.md records why pkill -f is never used here.
 func runSeat(seat, promptFile, dir string, timeout time.Duration) seatOutcome {
 	argv := strings.Fields(seat)
 	if len(argv) == 0 {

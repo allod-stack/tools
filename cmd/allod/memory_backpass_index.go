@@ -1,8 +1,6 @@
 package main
 
-// Step 1 of skills/memory-backpass/SKILL.md: number memory.md's bullets,
-// id every open ledger line, and list merged memory-backpass PRs whose
-// "To relay" checklist is still unchecked.
+// Step 1 of skills/memory-backpass/SKILL.md.
 
 import (
 	"crypto/sha256"
@@ -21,9 +19,7 @@ type memBullet struct {
 	text string
 }
 
-// indexBullets numbers every memory.md bullet in dir by current position:
-// PUB-001.. for prefix "PUB", PRV-001.. for "PRV". Ids are run-local and are
-// never written back to a memory file.
+// Ids are run-local references and are never written back to a memory file.
 func indexBullets(dir, prefix string) []memBullet {
 	data, err := os.ReadFile(filepath.Join(dir, "memory.md"))
 	if err != nil {
@@ -62,8 +58,6 @@ func bulletText(bullets []memBullet, id string) string {
 	return ""
 }
 
-// topicFileIndex reads memory.md's "Topic Files" section and renders its
-// bullets prefixed "public:"/"private:" for the synthesis prompt.
 func topicFileIndex(dir, prefix string) []string {
 	data, err := os.ReadFile(filepath.Join(dir, "memory.md"))
 	if err != nil {
@@ -92,9 +86,7 @@ type ledgerLine struct {
 
 var ledgerKindWord = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*$`)
 
-// ledgerRuleKind reports whether a ledger.md line is a real entry (its kind
-// token is a plain word, not the header template's literal "<kind>") and,
-// if so, that kind.
+// The header's format line starts with the literal <kind>, which is not an entry.
 func ledgerRuleKind(body string) (kind string, ok bool) {
 	colon := strings.IndexByte(body, ':')
 	if colon < 0 {
@@ -104,10 +96,8 @@ func ledgerRuleKind(body string) (kind string, ok bool) {
 	return kind, ledgerKindWord.MatchString(kind)
 }
 
-// parseLedgerLines reads ledger.md in dir and ids every open entry: a line
-// starting "- " with at least two " | " separators and a plain-word kind.
-// The id is "L-" plus the first 8 lowercase hex characters of the SHA-256
-// of the line exactly as it appears in the file, no trailing newline.
+// The id hashes the line exactly as it appears in the file, without the
+// newline, so a hand-run sha256sum reproduces it.
 func parseLedgerLines(dir string) []ledgerLine {
 	data, err := os.ReadFile(filepath.Join(dir, "ledger.md"))
 	if err != nil {
@@ -136,8 +126,6 @@ func parseLedgerLines(dir string) []ledgerLine {
 	return lines
 }
 
-// renderLedgerEntries renders OPEN_LEDGER_ENTRIES: public lines first, then
-// private, each "[L-xxxxxxxx] <line without the leading \"- \">".
 func renderLedgerEntries(public, private []ledgerLine) string {
 	var b strings.Builder
 	for _, l := range public {
@@ -149,9 +137,6 @@ func renderLedgerEntries(public, private []ledgerLine) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// resolveLedgerMatch finds the ledger line a matchesLedger id names, in
-// either ledger, so a gap item's match can be told apart as private (direct
-// corroboration) or public (a new private line names it instead).
 func resolveLedgerMatch(id string, publicLedger, privateLedger []ledgerLine) (line ledgerLine, isPrivate, found bool) {
 	for _, l := range privateLedger {
 		if l.id == id {
@@ -166,8 +151,6 @@ func resolveLedgerMatch(id string, publicLedger, privateLedger []ledgerLine) (li
 	return ledgerLine{}, false, false
 }
 
-// ledgerRuleText extracts a ledger line's rule text: everything between its
-// "<kind>: " prefix and the first " | " separator.
 func ledgerRuleText(body string) string {
 	rest := body
 	if colon := strings.IndexByte(body, ':'); colon >= 0 {
@@ -184,9 +167,6 @@ func forgeOnPath() bool {
 	return err == nil
 }
 
-// backpassPR is one closed memory-backpass PR, with its title and body read
-// back by 'forge pr view' so the relay check and REJECTED_EDIT_TITLES can
-// read its "To relay" section and whether it landed.
 type backpassPR struct {
 	number int
 	title  string
@@ -197,8 +177,8 @@ type backpassPR struct {
 var prListNumberRe = regexp.MustCompile(`^\s*(\d+)`)
 var prListStatusRe = regexp.MustCompile(`\b(open|closed|merged\s+\d{4}-\d{2}-\d{2})\s*$`)
 
-// parsePRListRow parses one 'forge pr list' row defensively: the number is
-// its leading digits, the status its trailing open|closed|merged date token.
+// Defensive on purpose: a title may hold digits and spaces, so only the
+// leading number and the trailing status token are trusted.
 func parsePRListRow(line string) (number int, merged bool, ok bool) {
 	numMatch := prListNumberRe.FindStringSubmatch(line)
 	if numMatch == nil {
@@ -215,8 +195,6 @@ func parsePRListRow(line string) (number int, merged bool, ok bool) {
 	return n, strings.HasPrefix(statusMatch[1], "merged"), true
 }
 
-// closedBackpassPRs runs 'forge pr list -s closed' with dir as the working
-// directory and reads title/body for every row naming a memory-backpass PR.
 func closedBackpassPRs(dir string) ([]backpassPR, error) {
 	output, status := captureCommand(dir, nil, true, "forge", "pr", "list", "-s", "closed")
 	if status != 0 {
@@ -250,8 +228,6 @@ func closedBackpassPRs(dir string) ([]backpassPR, error) {
 var toRelayHeadingRe = regexp.MustCompile(`(?m)^#+.*$`)
 var uncheckedRelayRe = regexp.MustCompile(`(?m)^\s*-\s\[\s\]`)
 
-// toRelaySection returns a PR body's "To relay" section: from the heading
-// line containing "To relay" to the next heading or the end of the body.
 func toRelaySection(body string) string {
 	lines := strings.Split(body, "\n")
 	start := -1
@@ -274,8 +250,6 @@ func toRelaySection(body string) string {
 	return strings.Join(lines[start:end], "\n")
 }
 
-// unrelayedPublicEdits lists merged memory-backpass PRs whose "To relay"
-// checklist still has an unchecked line: the public half has not landed.
 func unrelayedPublicEdits(prs []backpassPR) []string {
 	var out []string
 	for _, pr := range prs {
@@ -286,9 +260,6 @@ func unrelayedPublicEdits(prs []backpassPR) []string {
 	return out
 }
 
-// rejectedEditTitles lists titles of closed, unmerged memory-backpass PRs,
-// for REJECTED_EDIT_TITLES: the synthesis model should not repeat one
-// without materially new evidence.
 func rejectedEditTitles(prs []backpassPR) []string {
 	var out []string
 	for _, pr := range prs {

@@ -1,10 +1,5 @@
 package main
 
-// Fixture plumbing shared by the memory backpass integration tests: turning
-// testdata/backpass's public/private/traces trees into isolated git repos
-// with local bare origins, and generating the fake seats and stub forge the
-// brief calls for instead of a real model or a real forge server.
-
 import (
 	"os"
 	"path/filepath"
@@ -12,16 +7,12 @@ import (
 	"testing"
 )
 
-// backpassWorkDir is traceTestWorkDir's symlink-resolution precaution,
-// reused here because the fixture git repos' paths are compared literally
-// in several assertions.
+// Symlink-resolved like traceTestWorkDir: fixture paths are compared literally.
 func backpassWorkDir(t *testing.T) string {
 	t.Helper()
 	return traceTestWorkDir(t)
 }
 
-// backpassCopyTree copies every regular file under src into dst, preserving
-// each file's mode so the .hooks/memory-budget fixture keeps its +x bit.
 func backpassCopyTree(t *testing.T, src, dst string) {
 	t.Helper()
 	entries, err := os.ReadDir(src)
@@ -52,10 +43,6 @@ func backpassCopyTree(t *testing.T, src, dst string) {
 	}
 }
 
-// backpassGitRepo turns dir into a git repository with a local bare origin,
-// origin/HEAD set to "main", and user.name/user.email set locally so a
-// commit made later by the command under test (not by this helper) still
-// succeeds without relying on GIT_AUTHOR_* environment variables.
 func backpassGitRepo(t *testing.T, root, name, dir string) {
 	t.Helper()
 	origin := filepath.Join(root, name+"-origin.git")
@@ -70,17 +57,13 @@ func backpassGitRepo(t *testing.T, root, name, dir string) {
 	workspaceTestGit(t, dir, "remote", "set-head", "origin", "main")
 }
 
-// backpassFixtures is one full set of isolated repos for a backpass run.
 type backpassFixtures struct {
 	root                    string
 	public, private, traces string
 }
 
-// backpassSetup builds the three fixture repos from testdata/backpass and
-// isolates the test from the real environment exactly as the brief
-// describes: a temp HOME, GIT_CONFIG_GLOBAL/SYSTEM pointed at /dev/null (the
-// dev VM's global hooks refuse pushes to a path), and an empty WORK_DIR with
-// no INVENTORY, so --public/--private must be passed explicitly.
+// Isolates the run: temp HOME, global and system git config at /dev/null (the
+// dev VM's global hooks refuse pushes to a path), WORK_DIR empty, no INVENTORY.
 func backpassSetup(t *testing.T) backpassFixtures {
 	t.Helper()
 	root := backpassWorkDir(t)
@@ -107,12 +90,9 @@ func backpassSetup(t *testing.T) backpassFixtures {
 	return fx
 }
 
-// backpassFakeSeatScript is the fake seat shared by every seat test: it
-// reads the "Path: " line from the prompt file, optionally sleeps
-// (FAKE_SEAT_SLEEP) or answers garbage for its first FAKE_SEAT_GARBAGE_N
-// calls (tracked per trace in FAKE_SEAT_COUNTER_DIR), scoped to one trace's
-// basename when FAKE_SEAT_GARBAGE_BASENAME is set, and otherwise prints
-// <responses-dir>/<trace-basename>.json.
+// Reads the Path: line of the prompt and prints <responses-dir>/<trace basename>.json.
+// FAKE_SEAT_SLEEP delays; FAKE_SEAT_GARBAGE_N answers garbage for the first N calls
+// per trace (FAKE_SEAT_COUNTER_DIR), scoped by FAKE_SEAT_GARBAGE_BASENAME when set.
 const backpassFakeSeatScript = `#!/bin/sh
 responses="$1"
 prompt="$2"
@@ -142,8 +122,6 @@ fi
 cat "$responses/$base.json"
 `
 
-// backpassWriteFile writes content to path, creating parent directories as
-// needed: a small shared helper for unit tests that build a tiny file tree.
 func backpassWriteFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -154,7 +132,6 @@ func backpassWriteFile(t *testing.T, path, content string) {
 	}
 }
 
-// backpassWriteScript writes an executable script and returns its path.
 func backpassWriteScript(t *testing.T, dir, name, content string) string {
 	t.Helper()
 	path := filepath.Join(dir, name)
@@ -164,17 +141,12 @@ func backpassWriteScript(t *testing.T, dir, name, content string) string {
 	return path
 }
 
-// backpassSeat returns a --bulk-seat/--fallback-seat value that runs the
-// fake seat script against responsesDir: "<script> <responsesDir>", split
-// on whitespace the same way the command itself splits a seat value.
 func backpassSeat(t *testing.T, binDir, responsesDir string) string {
 	t.Helper()
 	script := backpassWriteScript(t, binDir, "fake-seat.sh", backpassFakeSeatScript)
 	return script + " " + responsesDir
 }
 
-// backpassResponsesDir is testdata/backpass/responses's absolute path, read
-// directly: the fake seat only reads from it, so fixtures need no copy.
 func backpassResponsesDir(t *testing.T) string {
 	t.Helper()
 	abs, err := filepath.Abs("testdata/backpass/responses")
@@ -184,11 +156,8 @@ func backpassResponsesDir(t *testing.T) string {
 	return abs
 }
 
-// backpassStubForgeScript is a minimal 'forge' stand-in: it logs every
-// invocation to FORGE_STUB_LOG and answers just enough of 'pr list', 'pr
-// view', 'pr find-by-head', 'pr create', and 'issue edit' for the write-mode
-// and relay-check tests. One merged memory-backpass PR (#101, an unchecked
-// "To relay" line) and one closed, unmerged one (#102) are always listed.
+// Logs every invocation to FORGE_STUB_LOG; always lists #101 (merged, unchecked
+// To relay line) and #102 (closed, unmerged).
 const backpassStubForgeScript = `#!/bin/sh
 if [ -n "$FORGE_STUB_LOG" ]; then
   echo "$*" >> "$FORGE_STUB_LOG"
