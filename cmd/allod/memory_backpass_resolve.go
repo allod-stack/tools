@@ -1,10 +1,6 @@
 package main
 
-// Resolution order for the three inputs a bare 'allod memory backpass'
-// must still find on a machine that follows the registry convention:
-// option, then environment variable, then registry marker or the existing
-// single-private-entry rule, then a fixed-name convention path. One
-// resolver (resolveFirst) and one step shape serve all three.
+// A bare run resolves each input by option, env, registry, then convention.
 
 import (
 	"fmt"
@@ -13,16 +9,12 @@ import (
 	"strings"
 )
 
-// resolvedInput is one resolved directory and how it was found, named in
-// the run report's "## Inputs" section.
 type resolvedInput struct {
 	path, source string
 }
 
-// resolveStep tries one candidate: a non-nil fatal refuses immediately (an
-// ambiguous registry match), a non-empty result wins, and anything else
-// falls through to the next step. tried is always returned, so an eventual
-// refusal can list every path and marker actually checked.
+// A fatal refuses at once; a non-empty result wins; tried is returned either
+// way so a refusal can list every place checked.
 type resolveStep func() (results []resolvedInput, tried string, fatal error)
 
 func resolveFirst(steps ...resolveStep) (results []resolvedInput, tried []string, err error) {
@@ -156,9 +148,7 @@ func privateResolveSteps(flagDir string, flagSet bool) []resolveStep {
 	}
 }
 
-// publicResolveSteps never falls through to the end: the registry-default
-// step always returns a path, exactly as defaultPublicMemoryDir did before
-// this resolver existed.
+// The registry-default step always returns a path, so this never falls through.
 func publicResolveSteps(flagDir string, flagSet bool) []resolveStep {
 	return []resolveStep{
 		func() ([]resolvedInput, string, error) {

@@ -23,9 +23,7 @@ type seatOutcome struct {
 	err      error // the process could not even be started
 }
 
-// backpassBuiltinSeat is the seat value that selects the built-in: the
-// default for bulk and synthesis when neither flag nor env names a seat,
-// and usable as an explicit value for any seat role, including fallback.
+// The seat value that selects the built-in; the default for bulk and synthesis.
 const backpassBuiltinSeat = "pi"
 
 func runSeat(seat, promptFile, dir string, timeout time.Duration) seatOutcome {
@@ -39,12 +37,8 @@ func runSeat(seat, promptFile, dir string, timeout time.Duration) seatOutcome {
 	return runSeatArgv(seat, append(argv, promptFile), dir, timeout)
 }
 
-// runBuiltinPiSeat is the "pi" built-in: pi prints nothing without a
-// terminal, so script -qec gives it one, and it takes the prompt as an
-// @path argument (both measured on this VM, not documented behavior).
-// The prompt path sits inside the inner shell's single quotes, so one in
-// the path would break the quoting; scratch dirs never contain one, but
-// this refuses rather than silently mis-invoking pi.
+// pi prints nothing without a terminal and takes the prompt as @path, both
+// measured here. The path sits in the inner shell's single quotes.
 func runBuiltinPiSeat(promptFile, dir string, timeout time.Duration) seatOutcome {
 	if strings.Contains(promptFile, "'") {
 		return seatOutcome{err: fmt.Errorf("prompt file path contains a single quote: %s", promptFile)}
@@ -53,8 +47,6 @@ func runBuiltinPiSeat(promptFile, dir string, timeout time.Duration) seatOutcome
 	return runSeatArgv(backpassBuiltinSeat, []string{"script", "-qec", inner, "/dev/null"}, dir, timeout)
 }
 
-// checkBuiltinSeatPath is the up-front refusal for the built-in: called once
-// a resolved seat value turns out to need it.
 func checkBuiltinSeatPath() {
 	var missing []string
 	for _, name := range []string{"pi", "script"} {
@@ -67,9 +59,7 @@ func checkBuiltinSeatPath() {
 	}
 }
 
-// backpassSeatName is how a seat is named in the run report: the built-in
-// names the provider and model it actually defaults to, read from pi's own
-// settings so the report never has to guess or go stale against it.
+// The built-in is named by the provider and model pi's own settings select.
 func backpassSeatName(seat string) string {
 	if seat != backpassBuiltinSeat {
 		return seat
@@ -96,10 +86,8 @@ func readPiDefaultSettings() (provider, model string, ok bool) {
 	return settings.DefaultProvider, settings.DefaultModel, true
 }
 
-// runSeatArgv is every seat's shared machinery: its own process group so a
-// timeout kills every descendant by group id (shell.md records why pkill -f
-// is never used here), stdin /dev/null, stdout captured, stderr forwarded
-// per line prefixed with the seat's label.
+// Every seat's shared machinery: its own process group, killed by group id
+// on timeout; shell.md records why pkill -f is never used here.
 func runSeatArgv(label string, argv []string, dir string, timeout time.Duration) seatOutcome {
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = dir
