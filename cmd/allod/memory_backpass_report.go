@@ -119,7 +119,12 @@ func renderFailures(failures []failureRecord) string {
 
 func renderReport(cfg backpassConfig, rep reportData, outcomes []traceOutcome, ledger *ledgerBuilder, result writeResult, scratchKept, fold string) string {
 	var b strings.Builder
-	b.WriteString("## Unrelayed public edits\n\n")
+	b.WriteString("## Inputs\n\n")
+	for _, in := range cfg.inputs {
+		fmt.Fprintf(&b, "%s: %s\n", in.path, in.source)
+	}
+
+	b.WriteString("\n## Unrelayed public edits\n\n")
 	if len(rep.unrelayed) == 0 {
 		b.WriteString("none\n")
 	} else {

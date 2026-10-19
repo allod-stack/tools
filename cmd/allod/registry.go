@@ -14,6 +14,7 @@ import (
 type registryEntry struct {
 	Checkout    string          `json:"checkout"`
 	Memory      bool            `json:"memory"`
+	Traces      bool            `json:"traces"`
 	PreviewPort json.RawMessage `json:"preview_port"`
 }
 
@@ -92,6 +93,21 @@ func memoryRegistryIds() []string {
 	ids := make([]string, 0, len(entries))
 	for id, entry := range entries {
 		if entry.Memory {
+			ids = append(ids, id)
+		}
+	}
+	slices.Sort(ids)
+	return ids
+}
+
+// tracesRegistryIds returns the registry ids whose entry carries
+// "traces": true, sorted: an inventory's way of declaring a distilled-
+// traces checkout for 'allod memory backpass' to find without a flag.
+func tracesRegistryIds() []string {
+	entries := registryEntries()
+	ids := make([]string, 0, len(entries))
+	for id, entry := range entries {
+		if entry.Traces {
 			ids = append(ids, id)
 		}
 	}

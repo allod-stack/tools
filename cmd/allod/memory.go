@@ -6,7 +6,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -21,16 +20,32 @@ func init() {
 }
 
 const memoryUsageText = `Usage:
-  allod memory backpass --traces <dir>... [--public <dir>] [--private <dir>]
+  allod memory backpass [--traces <dir>...] [--public <dir>] [--private <dir>]
       [--bulk-seat <cmd>] [--fallback-seat <cmd>] [--synthesis-seat <cmd>]
       [--timeout <seconds>] [--jobs <n>] [--report-only]
 
-'--traces <dir>' is required, space-separated and repeatable: each is a git
-checkout of distilled traces laid out <machine>/<harness>/<date>-<id>.md.
+All three directories resolve in the same order: the option, then an
+ALLOD_BACKPASS_* environment variable, then a registry marker or
+convention path, so a bare invocation works on any machine whose checkouts
+follow the registry convention. The run report's "Inputs" section names
+what each one resolved to and which of those four found it.
 
-'--public <dir>' default: <workDir>/<registry checkout of allod/memory>.
-'--private <dir>' default: the one registry entry marked "memory": true
-other than allod/memory; zero or more than one is a refusal.
+'--traces <dir>' is space-separated and repeatable. Order: --traces; else
+ALLOD_BACKPASS_TRACES, a colon-separated path list; else every registry
+entry marked "traces": true whose checkout exists, in sorted id order;
+else <workDir>/traces-<hostname> if it exists; else <workDir>/traces if it
+exists. Each is a git checkout of distilled traces laid out
+<machine>/<harness>/<date>-<id>.md. Nothing found is a refusal listing
+every path and marker tried.
+
+'--public <dir>'. Order: --public; else ALLOD_BACKPASS_PUBLIC; else
+<workDir>/<registry checkout of allod/memory> (falling back to the literal
+checkout name).
+
+'--private <dir>'. Order: --private; else ALLOD_BACKPASS_PRIVATE; else the
+one registry entry marked "memory": true other than allod/memory (zero or
+more than one is a refusal naming what was found); else <workDir>/agent-
+memory if it exists. Nothing found is a refusal listing what was tried.
 
 '--bulk-seat <cmd>' (env ALLOD_BACKPASS_BULK_SEAT) and '--synthesis-seat
 <cmd>' (env ALLOD_BACKPASS_SYNTHESIS_SEAT) default, when neither is given,
@@ -78,6 +93,7 @@ type backpassConfig struct {
 	timeout       time.Duration
 	jobs          int
 	reportOnly    bool
+	inputs        []resolvedInput // for the report's "## Inputs" section
 }
 
 func memoryBackpass(args []string) {
@@ -148,26 +164,38 @@ func memoryBackpass(args []string) {
 		}
 	}
 
-	if len(tracesDirs) == 0 {
-		die(1, "memory backpass requires --traces <dir>...")
+	tracesResults, tracesTried, err := resolveFirst(tracesResolveSteps(tracesDirs)...)
+	if err != nil {
+		die(1, "%v", err)
 	}
-	for i, dir := range tracesDirs {
-		tracesDirs[i] = resolveGitRepo(dir)
+	if len(tracesResults) == 0 {
+		die(1, "could not resolve --traces; tried: %s", strings.Join(tracesTried, "; "))
 	}
 
-	if !publicSet {
-		publicDir = defaultPublicMemoryDir()
-	}
-	publicDir = resolveGitRepo(publicDir)
+	publicResults, _, _ := resolveFirst(publicResolveSteps(publicDir, publicSet)...)
 
-	if !privateSet {
-		resolved, err := defaultPrivateMemoryDir()
-		if err != nil {
-			die(1, "%v", err)
-		}
-		privateDir = resolved
+	privateResults, privateTried, err := resolveFirst(privateResolveSteps(privateDir, privateSet)...)
+	if err != nil {
+		die(1, "%v", err)
 	}
-	privateDir = resolveGitRepo(privateDir)
+	if len(privateResults) == 0 {
+		die(1, "could not resolve --private; tried: %s", strings.Join(privateTried, "; "))
+	}
+
+	for i := range tracesResults {
+		tracesResults[i].path = resolveGitRepo(tracesResults[i].path)
+	}
+	publicResults[0].path = resolveGitRepo(publicResults[0].path)
+	privateResults[0].path = resolveGitRepo(privateResults[0].path)
+
+	tracesDirs = make([]string, len(tracesResults))
+	for i, r := range tracesResults {
+		tracesDirs[i] = r.path
+	}
+	publicDir = publicResults[0].path
+	privateDir = privateResults[0].path
+
+	inputs := append(append([]resolvedInput{}, tracesResults...), publicResults[0], privateResults[0])
 
 	if !bulkSet {
 		bulkSeat = os.Getenv("ALLOD_BACKPASS_BULK_SEAT")
@@ -198,34 +226,6 @@ func memoryBackpass(args []string) {
 		timeout:       time.Duration(timeoutSeconds) * time.Second,
 		jobs:          jobs,
 		reportOnly:    reportOnly,
+		inputs:        inputs,
 	})
-}
-
-func defaultPublicMemoryDir() string {
-	checkout, ok := registryCheckout("allod/memory")
-	if !ok {
-		checkout = "allod/memory"
-	}
-	return filepath.Join(workDir(), checkout)
-}
-
-func defaultPrivateMemoryDir() (string, error) {
-	var ids []string
-	for _, id := range memoryRegistryIds() {
-		if id != "allod/memory" {
-			ids = append(ids, id)
-		}
-	}
-	switch len(ids) {
-	case 1:
-		checkout, ok := registryCheckout(ids[0])
-		if !ok {
-			return "", fmt.Errorf("registry entry %s has no checkout path", ids[0])
-		}
-		return filepath.Join(workDir(), checkout), nil
-	case 0:
-		return "", fmt.Errorf(`no private memory registry entry found ("memory": true, other than allod/memory); pass --private`)
-	default:
-		return "", fmt.Errorf(`multiple private memory registry entries found (%s); pass --private`, strings.Join(ids, ", "))
-	}
 }
