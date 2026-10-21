@@ -34,6 +34,8 @@ PR commands:
       Create a pull request
   forge pr close {<number> | <url> | <branch>} [-c <text>] [-d]
       Close a pull request; -d deletes the remote head branch
+  forge pr merge {<number> | <url> | <branch>} (-m | -r | -s) [-d] [--match-head-commit <sha>] [-t <text>] [-b <text> | -F <file>]
+      Merge a pull request; not implemented: --auto, --admin, --author-email, fast-forward-only, manually-merged
   forge pr find-by-head <branch>
       Print PR number if an open PR exists for that head branch (empty if none)
 
@@ -211,6 +213,23 @@ Flags:
   -c, --comment <text>      Leave a closing comment
   -d, --delete-branch       Delete the remote head branch after closing
   -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
+`,
+	"pr merge": `Usage: forge pr merge {<number> | <url> | <branch>} (-m|--merge | -r|--rebase | -s|--squash) [-d|--delete-branch] [--match-head-commit <sha>] [-t|--subject <text>] [-b <text> | -F <file>] [-R <owner/repo>]
+
+Merge a pull request. Exactly one of -m/-r/-s is required. Not implemented:
+--auto, --admin, --author-email, and the forge's fast-forward-only and
+manually-merged methods.
+
+Flags:
+  -m, --merge                  Merge with a merge commit
+  -r, --rebase                 Rebase and merge
+  -s, --squash                 Squash and merge
+  -d, --delete-branch          Delete the remote head branch after merging
+  --match-head-commit <sha>    Refuse to merge unless the PR's head is still this commit
+  -t, --subject <text>         Merge commit title
+  -b, --body <text>            Merge commit message
+  -F, --body-file <file>       Read the merge commit message from file (use "-" for stdin)
+  -R, --repo <owner/repo>      Target repository (default: inferred from git remote)
 `,
 	"issue list": `Usage: forge issue list [-s open|closed|all] [-l <label>] [-m <milestone>] [-L <limit>] [-S <query>] [-R <owner/repo>]
 

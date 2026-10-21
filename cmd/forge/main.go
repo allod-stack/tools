@@ -194,6 +194,8 @@ func dispatch(resource, command string, args []string) {
 			prFindByHead(args)
 		case "close":
 			prClose(args)
+		case "merge":
+			prMerge(args)
 		case "-h", "--help":
 			usage()
 		default:

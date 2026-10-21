@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 
 	"forge.anarch.diy/allod/tools/internal/gitremote"
@@ -582,6 +583,163 @@ func prClose(args []string) {
 		return
 	}
 	fmt.Fprintf(stdout, "PR closed: %s\n", url)
+}
+
+func prMerge(args []string) {
+	if containsHelpFlag(args) {
+		commandUsage("pr merge")
+		return
+	}
+
+	target, targetSet := "", false
+	method, methodSet, methodSource := "", false, ""
+	deleteBranch := false
+	matchHeadCommit, matchHeadCommitSet := "", false
+	title, titleSet := "", false
+	resetBodyOption()
+
+	setMethod := func(flag, value string) {
+		if methodSet {
+			die("%s cannot be combined with %s", flag, methodSource)
+		}
+		method, methodSet, methodSource = value, true, flag
+	}
+
+	for len(args) > 0 {
+		switch {
+		case args[0] == "-R" || args[0] == "--repo":
+			setRepoOption(args)
+			args = args[2:]
+		case args[0] == "-m" || args[0] == "--merge":
+			setMethod(args[0], "merge")
+			args = args[1:]
+		case args[0] == "-r" || args[0] == "--rebase":
+			setMethod(args[0], "rebase")
+			args = args[1:]
+		case args[0] == "-s" || args[0] == "--squash":
+			setMethod(args[0], "squash")
+			args = args[1:]
+		case args[0] == "-d" || args[0] == "--delete-branch":
+			deleteBranch = true
+			args = args[1:]
+		case args[0] == "--match-head-commit":
+			requireOptionValue(args[0], len(args))
+			if matchHeadCommitSet {
+				die("%s specified more than once", args[0])
+			}
+			matchHeadCommit, matchHeadCommitSet = args[1], true
+			args = args[2:]
+		case args[0] == "-t" || args[0] == "--subject":
+			requireOptionValue(args[0], len(args))
+			if titleSet {
+				die("%s specified more than once", args[0])
+			}
+			title, titleSet = args[1], true
+			args = args[2:]
+		case args[0] == "-b" || args[0] == "--body" || args[0] == "-F" || args[0] == "--body-file":
+			requireOptionValue(args[0], len(args))
+			setBodyOption(args[0], args[1])
+			args = args[2:]
+		case strings.HasPrefix(args[0], "-"):
+			die("unknown option for pr merge: %s", args[0])
+		default:
+			if targetSet {
+				die("unexpected argument for pr merge: %s", args[0])
+			}
+			target, targetSet = args[0], true
+			args = args[1:]
+		}
+	}
+
+	if !targetSet || target == "" {
+		die("usage: forge pr merge {<number> | <url> | <branch>} (-m|--merge | -r|--rebase | -s|--squash) [-d] [--match-head-commit <sha>] [-t <text>] [-b <text> | -F <file>] [-R <owner/repo>]")
+	}
+	if !methodSet {
+		die("one of -m/--merge, -r/--rebase, -s/--squash is required")
+	}
+
+	number := resolvePRTarget(target)
+
+	pr := api("GET", "/repos/"+repoOpt+"/pulls/"+number, nil)
+	if state := jqBodyString(pr, "state"); state != "open" {
+		die("PR #%s is not open (state: %s)", number, state)
+	}
+	if jqBodyString(pr, "merged") == "true" {
+		die("PR #%s is already merged", number)
+	}
+	if mergeable := jqBodyString(pr, "mergeable"); mergeable != "true" {
+		die("PR #%s is not mergeable (mergeable: %s)", number, mergeable)
+	}
+
+	headSHA := jqBodyString(pr, "head", "sha")
+	headRef := jqBodyString(pr, "head", "ref")
+	baseRef := jqBodyString(pr, "base", "ref")
+	htmlURL := jqBodyString(pr, "html_url")
+
+	if matchHeadCommitSet && headSHA != matchHeadCommit {
+		die("PR #%s head commit is %s, not %s", number, headSHA, matchHeadCommit)
+	}
+
+	// head_commit_id is always sent, so a push between the read above and this
+	// POST is refused by the forge rather than silently merging a later commit.
+	fields := []string{
+		`"Do":` + jsonString(method),
+		`"head_commit_id":` + jsonString(headSHA),
+		`"delete_branch_after_merge":` + strconv.FormatBool(deleteBranch),
+	}
+	if titleSet {
+		fields = append(fields, `"MergeTitleField":`+jsonString(title))
+	}
+	if bodySet {
+		fields = append(fields, `"MergeMessageField":`+jsonString(bodyOpt))
+	}
+	payload := "{" + strings.Join(fields, ",") + "}"
+
+	api("POST", "/repos/"+repoOpt+"/pulls/"+number+"/merge", []byte(payload))
+
+	mergeCommitSHA := prConfirmMerge(number, baseRef)
+
+	if !deleteBranch {
+		fmt.Fprintf(stdout, "PR merged: %s (%s at %s)\n", htmlURL, baseRef, mergeCommitSHA)
+		return
+	}
+	switch status := apiStatus("GET", "/repos/"+repoOpt+"/branches/"+jqURI(headRef)); status {
+	case 404:
+		fmt.Fprintf(stdout, "PR merged: %s (%s at %s) (branch %s deleted)\n", htmlURL, baseRef, mergeCommitSHA, headRef)
+	case 200:
+		fmt.Fprintf(stdout, "PR merged: %s (%s at %s)\n", htmlURL, baseRef, mergeCommitSHA)
+		fmt.Fprintf(stderr, "forge: warning: branch %s not deleted\n", headRef)
+	default:
+		fmt.Fprintf(stdout, "PR merged: %s (%s at %s)\n", htmlURL, baseRef, mergeCommitSHA)
+		fmt.Fprintf(stderr, "forge: warning: could not confirm branch %s deleted (HTTP %d)\n", headRef, status)
+	}
+}
+
+// Read-back: the merged flag alone has lied once (allod/tools#246).
+func prConfirmMerge(number, baseRef string) string {
+	pr := api("GET", "/repos/"+repoOpt+"/pulls/"+number, nil)
+	if jqBodyString(pr, "merged") != "true" {
+		fmt.Fprintf(stderr, "forge: PR #%s merge not confirmed: merged flag is false after a 200\n", number)
+		exit(1)
+	}
+	mergeSHA := jqBodyString(pr, "merge_commit_sha")
+
+	branch := api("GET", "/repos/"+repoOpt+"/branches/"+jqURI(baseRef), nil)
+	baseTip := jqBodyString(branch, "commit", "id")
+	if baseTip == "" || baseTip == "null" {
+		fmt.Fprintf(stderr, "forge: merge not confirmed: no commit id in the %s branch response\n", baseRef)
+		exit(1)
+	}
+	if baseTip != mergeSHA {
+		compare := api("GET", "/repos/"+repoOpt+"/compare/"+jqURI(baseRef)+"..."+jqURI(mergeSHA), nil)
+		total, ok := jsonField(mustJSON(compare), "total_commits").(json.Number)
+		aheadCount, err := total.Int64()
+		if !ok || err != nil || aheadCount != 0 {
+			fmt.Fprintf(stderr, "forge: merged flag set but %s does not contain %s (base tip %s)\n", baseRef, mergeSHA, baseTip)
+			exit(1)
+		}
+	}
+	return mergeSHA
 }
 
 // --- PR rendering helpers ---

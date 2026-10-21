@@ -59,6 +59,9 @@ forge pr create --title <title> [--head <branch>] [--base <branch>] \
 forge pr comment <number> [--body <text> | --body-file <file>]
 forge pr edit <number> [--title <title>] [--body <text> | --body-file <file>]
 forge pr close {<number> | <url> | <branch>} [--comment <text>] [--delete-branch]
+forge pr merge {<number> | <url> | <branch>} (--merge | --rebase | --squash) \
+  [--delete-branch] [--match-head-commit <sha>] [--subject <text>] \
+  [--body <text> | --body-file <file>]
 forge pr review-comments <number>          # list inline comments with IDs
 forge pr reply <number> <comment-id> [--body <text> | --body-file <file>]
 forge pr find-by-head <branch>             # print PR number if open PR exists for branch
@@ -71,6 +74,18 @@ repository's default branch. The `gh` short aliases are also supported:
 `pr close` accepts a PR number, full URL, or head branch name as its target.
 Use `-c`/`--comment` to leave a closing comment and `-d`/`--delete-branch` to
 delete the remote head branch after closing.
+
+`pr merge` copies `gh pr merge`'s shape: the same target forms as `pr close`,
+and exactly one of `-m`/`--merge`, `-r`/`--rebase`, or `-s`/`--squash` is
+required. It is a thin wrapper over the merge endpoint; whether an agent
+should call it at all is the calling skill's decision, not this command's.
+Not implemented: `--auto`, `--admin`, `--author-email`, and the forge's own
+`fast-forward-only` and `manually-merged` methods. `--match-head-commit <sha>`
+refuses to merge unless the PR's head is still that commit, and the request
+always carries the head commit it just read, so a push landing in between is
+refused by the forge rather than silently merged. Before reporting success it
+reads the pull request and the base branch back, because the forge once
+reported a merge done while the base branch had not moved (allod/tools#246).
 
 `pr list` defaults to open pull requests, the same as before. `-s`/`--state`
 also takes `closed` or `all`, and with either of those a status column is

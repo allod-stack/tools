@@ -36,29 +36,8 @@ func api(method, path string, body []byte) []byte {
 // call with `if` (forge line 855, deleting a branch after closing a PR). The
 // failure line is still printed; only the exit is the caller's decision.
 func apiTry(method, path string, body []byte) ([]byte, int) {
-	loadToken()
-
-	// curl parses the URL before it opens anything, so a URL it refuses costs
-	// no request at all. bash reports that through the same line every other
-	// transport failure uses. This has to happen here, not in the client: Go
-	// would percent-encode the offending byte and send the request.
-	if curlRejectsURL(forgeURL + "/api/v1" + path) {
-		fmt.Fprintf(stderr, "forge: %s %s failed: curl exit 3\n", method, path)
-		return nil, 3
-	}
-
-	client := &forgeapi.Client{BaseURL: forgeURL, Token: token}
-	resp, err := client.Do(forgeapi.Request{
-		Method: method,
-		Path:   "/api/v1" + path,
-		// bash passes -H "Content-Type: application/json" on every api()
-		// call, including GETs that send no body.
-		ContentType: "application/json",
-		Body:        body,
-	})
-	if err != nil {
-		rc := curlExitCode(err)
-		fmt.Fprintf(stderr, "forge: %s %s failed: curl exit %d\n", method, path, rc)
+	resp, rc := doRequest(method, path, body)
+	if rc != 0 {
 		return nil, rc
 	}
 
@@ -79,6 +58,49 @@ func apiTry(method, path string, body []byte) ([]byte, int) {
 		return nil, 22
 	}
 	return out, 0
+}
+
+// doRequest is the transport step apiTry and apiStatus share: load the token,
+// refuse a URL curl would have refused, and send the request. A non-nil
+// forgeapi.Response with rc 0 means the request reached the forge and got an
+// answer, whatever its HTTP status; only a transport failure sets rc.
+func doRequest(method, path string, body []byte) (forgeapi.Response, int) {
+	loadToken()
+
+	// curl parses the URL before it opens anything, so a URL it refuses costs
+	// no request at all. bash reports that through the same line every other
+	// transport failure uses. This has to happen here, not in the client: Go
+	// would percent-encode the offending byte and send the request.
+	if curlRejectsURL(forgeURL + "/api/v1" + path) {
+		fmt.Fprintf(stderr, "forge: %s %s failed: curl exit 3\n", method, path)
+		return forgeapi.Response{}, 3
+	}
+
+	client := &forgeapi.Client{BaseURL: forgeURL, Token: token}
+	resp, err := client.Do(forgeapi.Request{
+		Method: method,
+		Path:   "/api/v1" + path,
+		// bash passes -H "Content-Type: application/json" on every api()
+		// call, including GETs that send no body.
+		ContentType: "application/json",
+		Body:        body,
+	})
+	if err != nil {
+		rc := curlExitCode(err)
+		fmt.Fprintf(stderr, "forge: %s %s failed: curl exit %d\n", method, path, rc)
+		return forgeapi.Response{}, rc
+	}
+	return resp, 0
+}
+
+// apiStatus is for the caller that reads a 404 as an answer, not a failure;
+// a transport failure still ends the run as api() does.
+func apiStatus(method, path string) int {
+	resp, rc := doRequest(method, path, nil)
+	if rc != 0 {
+		exit(rc)
+	}
+	return resp.Status
 }
 
 // trimTrailingNewlines reproduces what bash command substitution does to every
