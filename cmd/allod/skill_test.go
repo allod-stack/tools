@@ -416,17 +416,22 @@ func TestSkillNameOverLimitRefuses(t *testing.T) {
 	}
 }
 
-func TestSkillSummaryOverLimitRefuses(t *testing.T) {
-	long := strings.Repeat("word ", 15)
+func TestSkillSummaryOverLimitListsCutAndWarns(t *testing.T) {
+	long := strings.TrimSpace(strings.Repeat("word ", 15))
 	dir := writeSkill(t, t.TempDir(), "fine", "name: fine\nsummary: "+long+"\n")
+	writeSkill(t, dir, "other", "name: other\nsummary: Short.\n")
 
-	_, errText, code := runAllod(t, "skill", "--from", dir)
+	out, errText, code := runAllod(t, "skill", "--from", dir)
 
-	if code != 1 {
-		t.Errorf("exit code %d, want 1", code)
+	if code != 0 {
+		t.Errorf("exit code %d, want 0", code)
 	}
-	if !strings.Contains(errText, "summary exceeds 70") {
-		t.Errorf("stderr %q, want the summary limit named", errText)
+	if !strings.Contains(errText, "summary exceeds 70") || !strings.Contains(errText, "fine/SKILL.md") {
+		t.Errorf("stderr %q, want the file and the summary limit named", errText)
+	}
+	cut := strings.TrimSpace(strings.Repeat("word ", 14)) + "..."
+	if out != "fine   "+cut+"\nother  Short.\n" {
+		t.Errorf("stdout %q, want both skills listed with the long summary cut", out)
 	}
 }
 

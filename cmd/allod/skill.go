@@ -187,8 +187,10 @@ type skillEntry struct {
 	dirName     string
 }
 
-// Limits the owner set so one long field cannot dominate the list column:
-// a frontmatter field past its limit refuses the listing, naming the file.
+// Limits the owner set so one long field cannot dominate the list column.
+// A name past its limit refuses the listing, naming the file; a summary past
+// its limit lists cut to the limit with a stderr note, so one over-long
+// summary cannot blank the whole index at session start.
 const (
 	nameLimit    = 16
 	summaryLimit = 70
@@ -216,7 +218,8 @@ func readSkills(dir string) []skillEntry {
 			die(1, "%s: skill name %q exceeds %d characters; rename the skill", path, skill.name, nameLimit)
 		}
 		if len(skill.summary) > summaryLimit {
-			die(1, "%s: summary exceeds %d characters; shorten it", path, summaryLimit)
+			fmt.Fprintf(stderr, "allod: %s: summary exceeds %d characters; shorten it (listed cut)\n", path, summaryLimit)
+			skill.summary = briefDescription(skill.summary)
 		}
 		skills = append(skills, skill)
 	}
