@@ -13,12 +13,15 @@ import (
 	"forge.anarch.diy/allod/tools/internal/protection"
 )
 
+// git always reports an already-resolved path, so a dir built by walking from
+// a symlinked root (collectRepos, with $HOME behind a symlink) must be
+// resolved too before the comparison, or that walk finds no repos at all.
 func isRepoRoot(dir string) bool {
 	if _, err := os.Lstat(filepath.Join(dir, ".git")); err != nil {
 		return false
 	}
 	top, ok := gitOutput(dir, "rev-parse", "--show-toplevel")
-	return ok && top == dir
+	return ok && physicalPath(top) == physicalPath(dir)
 }
 
 func resolveGitRepo(input string) string {

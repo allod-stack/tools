@@ -43,6 +43,19 @@ func backpassCopyTree(t *testing.T, src, dst string) {
 	}
 }
 
+// backpassFixtureGitConfig writes a global git config carrying a fixture
+// identity, so a clone 'change begin' makes (its own .git, with none of its
+// own) can still commit, same as a real worker's relies on $HOME/.gitconfig.
+func backpassFixtureGitConfig(t *testing.T, root string) string {
+	t.Helper()
+	path := filepath.Join(root, "gitconfig-global")
+	content := "[user]\n\tname = fixture\n\temail = fixture@example.com\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("write fixture global gitconfig: %v", err)
+	}
+	return path
+}
+
 func backpassGitRepo(t *testing.T, root, name, dir string) {
 	t.Helper()
 	origin := filepath.Join(root, name+"-origin.git")
@@ -62,13 +75,13 @@ type backpassFixtures struct {
 	public, private, traces string
 }
 
-// Isolates the run: temp HOME, global and system git config at /dev/null (the
-// dev VM's global hooks refuse pushes to a path), WORK_DIR empty, no INVENTORY.
+// Isolates the run: temp HOME, system git config at /dev/null (the dev VM's
+// global hooks refuse pushes to a path), WORK_DIR empty, no INVENTORY.
 func backpassSetup(t *testing.T) backpassFixtures {
 	t.Helper()
 	root := backpassWorkDir(t)
 	t.Setenv("HOME", filepath.Join(root, "home"))
-	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_GLOBAL", backpassFixtureGitConfig(t, root))
 	t.Setenv("GIT_CONFIG_SYSTEM", "/dev/null")
 	t.Setenv("WORK_DIR", filepath.Join(root, "work"))
 	t.Setenv("INVENTORY", "")
@@ -76,10 +89,13 @@ func backpassSetup(t *testing.T) backpassFixtures {
 		t.Fatalf("mkdir home: %v", err)
 	}
 
+	// public and private live under WORK_DIR, as a real deployment's checkouts
+	// do (vm-provisioning.md): 'change record' resolves a clone's parent by
+	// scanning repos there, so a fixture repo outside it is unresolvable.
 	var fx backpassFixtures
 	fx.root = root
-	fx.public = filepath.Join(root, "public")
-	fx.private = filepath.Join(root, "private")
+	fx.public = filepath.Join(root, "work", "public")
+	fx.private = filepath.Join(root, "work", "private")
 	fx.traces = filepath.Join(root, "traces")
 	backpassCopyTree(t, "testdata/backpass/public", fx.public)
 	backpassCopyTree(t, "testdata/backpass/private", fx.private)
@@ -228,37 +244,32 @@ func backpassGitWithoutForge(t *testing.T) {
 	t.Setenv("PATH", dir)
 }
 
-// backpassFindAgentBranch finds the one agent/memory-backpass-* branch a
-// write-mode run created, without recomputing "today" at assertion time —
-// which can straddle midnight relative to when the command actually ran.
+// Finds the ledgered agent/memory-backpass-* clone without recomputing "today",
+// which can straddle midnight relative to when the command ran.
 func backpassFindAgentBranch(t *testing.T, repo string) string {
 	t.Helper()
-	out, ok := gitOutput(repo, "for-each-ref", "--format=%(refname:short)", "refs/heads/agent/memory-backpass-*")
-	if !ok {
-		t.Fatalf("git for-each-ref failed in %s", repo)
-	}
-	lines := strings.Split(strings.TrimSpace(out), "\n")
-	if len(lines) != 1 || lines[0] == "" {
-		t.Fatalf("expected exactly one agent/memory-backpass-* branch in %s, got: %q", repo, out)
-	}
-	return lines[0]
-}
-
-// backpassWorktreePathForBranch locates the linked worktree a branch is
-// checked out in, via the same 'git worktree list --porcelain' parser
-// change.go's own 'change list' uses.
-func backpassWorktreePathForBranch(t *testing.T, repo, branch string) string {
-	t.Helper()
-	listing, ok := gitOutput(repo, "worktree", "list", "--porcelain")
-	if !ok {
-		t.Fatalf("git worktree list failed in %s", repo)
-	}
-	for _, rec := range parseWorktrees(listing) {
-		if rec.branch == branch {
-			return rec.path
+	var matches []string
+	for _, entry := range changeLedgerEntries(repo) {
+		if strings.HasPrefix(entry.branch, "agent/memory-backpass-") {
+			matches = append(matches, entry.branch)
 		}
 	}
-	t.Fatalf("no worktree found for branch %s in %s", branch, repo)
+	if len(matches) != 1 {
+		t.Fatalf("expected exactly one agent/memory-backpass-* branch ledgered in %s, got: %q", repo, matches)
+	}
+	return matches[0]
+}
+
+// backpassWorktreePathForBranch locates the clone a branch was ledgered
+// under, through repo's own ledger — never the clone's own config.
+func backpassWorktreePathForBranch(t *testing.T, repo, branch string) string {
+	t.Helper()
+	for _, entry := range changeLedgerEntries(repo) {
+		if entry.branch == branch {
+			return entry.path
+		}
+	}
+	t.Fatalf("no ledgered clone found for branch %s in %s", branch, repo)
 	return ""
 }
 

@@ -446,22 +446,27 @@ EOF
 	}
 
 	branch := backpassFindAgentBranch(t, fx.private)
-	diff, _ := gitOutput(fx.private, "diff", "main", branch, "--", "ledger.md")
+	privateClone := backpassWorktreePathForBranch(t, fx.private, branch)
+	diff, _ := gitOutput(privateClone, "diff", "main", branch, "--", "ledger.md")
 	if diff == "" {
 		t.Error("the private branch should carry a ledger.md change")
 	}
-	// Proves the budget hook actually ran against this worktree (in the
+	// Proves the budget hook actually ran against this clone (in the
 	// sandbox, with the old #!/usr/bin/env bash shebang, it silently did
 	// not): the kept edit only lands on the branch once the hook passes it.
-	memoryDiff, _ := gitOutput(fx.private, "diff", "main", branch, "--", "memory.md")
+	memoryDiff, _ := gitOutput(privateClone, "diff", "main", branch, "--", "memory.md")
 	if !strings.Contains(memoryDiff, "Fixture synthesis edit") {
 		t.Errorf("the kept edit should be on the branch's memory.md, diff = %q", memoryDiff)
 	}
 
-	if !localRefExists(fx.public, branch) {
-		t.Errorf("branch %s should exist in the public fixture repo (the relay worktree)", branch)
+	publicBranch := backpassFindAgentBranch(t, fx.public)
+	publicClone := backpassWorktreePathForBranch(t, fx.public, publicBranch)
+	// The relay commit is deliberately left local for 'allod patch receive', so the
+	// bare origin is not where to look; the check is that it landed on the clone's own branch.
+	if branch, _ := gitOutput(publicClone, "branch", "--show-current"); branch != publicBranch {
+		t.Errorf("the public relay clone should be checked out on %s, is on %q", publicBranch, branch)
 	}
-	publicCommits, _ := gitOutput(fx.public, "log", "--oneline", "main.."+branch)
+	publicCommits, _ := gitOutput(publicClone, "log", "--oneline", "main.."+publicBranch)
 	publicCommitLines := strings.Split(strings.TrimSpace(publicCommits), "\n")
 	if len(publicCommitLines) != 1 || publicCommitLines[0] == "" {
 		t.Errorf("public relay branch should carry exactly one commit, got: %q", publicCommits)
