@@ -2,7 +2,7 @@
 # pull-all - pull every repo under ~/work/
 #
 # For each repo:
-#   - Skips if working tree is dirty
+#   - Skips if the working tree is dirty or the branch is ahead of its upstream
 #   - Pulls the current branch and reports what happened
 #   - With --switch, checks out the default branch first (if safe)
 #
@@ -66,6 +66,21 @@ process_repo() {
     return
   fi
 
+  # An ahead-of-upstream branch would pull as a no-op and read "up to
+  # date"; report the unpushed state and skip, whichever branch it is on.
+  if git -C "$dir" rev-parse --abbrev-ref "@{u}" >/dev/null 2>&1; then
+    local unpushed
+    unpushed=$(git -C "$dir" rev-list "HEAD...@{u}" --count 2>/dev/null || echo 0)
+    if [[ "$unpushed" -gt 0 ]]; then
+      if [[ "$unpushed" -eq 1 ]]; then
+        printf '  %-24s  unpushed   [on %s — 1 unpushed commit]\n' "$repo" "$current_branch" > "$outfile"
+      else
+        printf '  %-24s  unpushed   [on %s — %d unpushed commits]\n' "$repo" "$current_branch" "$unpushed" > "$outfile"
+      fi
+      return
+    fi
+  fi
+
   # With --switch, try to check out the default branch first
   if [[ "$SWITCH_DEFAULT" == true ]]; then
     local default_branch
@@ -75,18 +90,10 @@ process_repo() {
       return
     fi
     if [[ "$current_branch" != "$default_branch" ]]; then
+      # Unpushed side branches returned above; here the branch is either
+      # without an upstream or clean against it.
       if ! git -C "$dir" rev-parse --abbrev-ref "@{u}" >/dev/null 2>&1; then
         printf '  %-24s  skipped    [on %s — no remote tracking branch]\n' "$repo" "$current_branch" > "$outfile"
-        return
-      fi
-      local unpushed
-      unpushed=$(git -C "$dir" rev-list "HEAD...@{u}" --count 2>/dev/null || echo 0)
-      if [[ "$unpushed" -gt 0 ]]; then
-        if [[ "$unpushed" -eq 1 ]]; then
-          printf '  %-24s  skipped    [on %s — 1 unpushed commit]\n' "$repo" "$current_branch" > "$outfile"
-        else
-          printf '  %-24s  skipped    [on %s — %d unpushed commits]\n' "$repo" "$current_branch" "$unpushed" > "$outfile"
-        fi
         return
       fi
       if ! git -C "$dir" checkout "$default_branch" > /dev/null 2>&1; then

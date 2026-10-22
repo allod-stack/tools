@@ -9,7 +9,7 @@ export HOME="$TMP/home"
 export MOCK_LOG="$TMP/git.log"
 mkdir -p "$HOME/work/.git" "$HOME/work/group/nested" "$TMP/bin"
 
-for repo in clean dirty local unpushed switched pull-fail nohead group/nested/repo .profile .cache/ignored no-origin notrepo; do
+for repo in clean dirty local unpushed ahead switched pull-fail nohead group/nested/repo .profile .cache/ignored no-origin notrepo; do
   mkdir -p "$HOME/work/$repo/.git"
   : > "$HOME/work/$repo/.git/HEAD"
 done
@@ -101,6 +101,8 @@ case "$command" in
   "rev-list HEAD...@{u} --count")
     if [[ "$repo" == unpushed ]]; then
       printf '2\n'
+    elif [[ "$repo" == ahead ]]; then
+      printf '3\n'
     else
       printf '0\n'
     fi
@@ -192,8 +194,10 @@ assert_output_contains "dirty                     skipped    [dirty working tree
   "default: skips a dirty working tree"
 assert_output_contains "local                     error      [pull failed: There is no tracking information" \
   "default: reports pull error for branch without tracking"
-assert_output_contains "unpushed                  up to date [feature]" \
-  "default: pulls non-default branch in place"
+assert_output_contains "unpushed                  unpushed   [on feature — 2 unpushed commits]" \
+  "default: reports a side branch ahead of its upstream"
+assert_output_contains "ahead                     unpushed   [on master — 3 unpushed commits]" \
+  "default: reports an ahead default branch instead of up to date"
 assert_output_contains "switched                  pulled     [feature]" \
   "default: pulls non-default branch without switching"
 assert_output_contains "pull-fail                 error      [pull failed: network unavailable]" \
@@ -213,6 +217,8 @@ assert_log_not_contains $'^ignored\t' \
 
 assert_log_not_contains $'^(local|unpushed|switched)\tcheckout' \
   "default: never checks out non-default branches"
+assert_log_not_contains $'^(unpushed|ahead)\tpull$' \
+  "default: never pulls branches with unpushed commits"
 assert_log_not_contains $'^dirty\tpull$' \
   "default: never pulls dirty repos"
 assert_log_not_contains $'^no-origin\tpull$' \
@@ -233,8 +239,10 @@ assert_output_contains "dirty                     skipped    [dirty working tree
   "--switch: skips a dirty working tree"
 assert_output_contains "local                     skipped    [on feature — no remote tracking branch]" \
   "--switch: skips a branch without remote tracking"
-assert_output_contains "unpushed                  skipped    [on feature — 2 unpushed commits]" \
-  "--switch: skips a branch with unpushed commits"
+assert_output_contains "unpushed                  unpushed   [on feature — 2 unpushed commits]" \
+  "--switch: reports a side branch with unpushed commits"
+assert_output_contains "ahead                     unpushed   [on master — 3 unpushed commits]" \
+  "--switch: reports an ahead default branch instead of up to date"
 assert_output_contains "nohead                    skipped    [default branch unresolved — run: git -C $HOME/work/nohead remote set-head origin -a]" \
   "--switch: skips a repo whose default branch cannot be resolved, naming the repair"
 assert_output_contains "switched                  pulled     [master]" \
@@ -257,9 +265,9 @@ assert_log_contains $'repo\tpull' \
 assert_log_contains $'.profile\tpull' \
   "--switch: pulls a dot-named repository"
 
-assert_log_not_contains $'^(dirty|local|unpushed|nohead)\tpull$' \
+assert_log_not_contains $'^(dirty|local|unpushed|ahead|nohead)\tpull$' \
   "--switch: never pulls repositories that were skipped"
-assert_log_not_contains $'^nohead\tcheckout' \
+assert_log_not_contains $'^(nohead|ahead)\tcheckout' \
   "--switch: never checks out a repo whose default branch cannot be resolved"
 
 # --- --help ---
