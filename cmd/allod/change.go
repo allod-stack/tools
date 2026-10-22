@@ -71,7 +71,9 @@ func validDescription(description string) bool {
 		}
 		return false
 	}
-	return gitQuiet("", "check-ref-format", "--branch", "agent/"+description)
+	// check-ref-format needs no repository, and the caller's cwd may be a
+	// copied tree whose .git is a dangling worktree pointer; pin the cwd outside it.
+	return gitQuiet(os.TempDir(), "check-ref-format", "--branch", "agent/"+description)
 }
 
 func localRefExists(repo, branch string) bool {
