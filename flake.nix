@@ -43,6 +43,48 @@
         };
       };
 
+      wakeAgent = pkgs.buildGoModule {
+        pname = "wake-agent";
+        version = "0.1.0";
+        src = ./.;
+        vendorHash = null;
+        subPackages = [ "cmd/wake-agent" ];
+        nativeBuildInputs = [ pkgs.makeWrapper pkgs.util-linux ];
+        postInstall = ''
+          install -Dm444 extensions/wake-agent.ts \
+            "$out/share/wake-agent/wake-agent.ts"
+        '';
+        postFixup = ''
+          wrapProgram "$out/bin/wake-agent" \
+            --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.util-linux ]}
+        '';
+
+        meta = {
+          description = "Resume one headless Pi agent after an external event";
+          mainProgram = "wake-agent";
+          platforms = pkgs.lib.platforms.linux;
+        };
+      };
+
+      wakeAgentExtensionCheck = pkgs.runCommand "wake-agent-extension-check"
+        {
+          nativeBuildInputs = [ pkgs.nodejs ];
+          src = ./.;
+        } ''
+        cp -r "$src" source
+        chmod -R u+w source
+        cd source
+        mkdir mock-bin
+        cat > mock-bin/systemctl <<'EOF'
+        #!${pkgs.runtimeShell}
+        test "''${UNIT_ACTIVE:-}" = 1
+        EOF
+        chmod +x mock-bin/systemctl
+        export PATH="$PWD/mock-bin:$PATH"
+        node --experimental-strip-types extensions/wake-agent.test.mjs
+        touch "$out"
+      '';
+
       flakeUpdateCascade = pkgs.buildGoModule {
         pname = "flake-update-cascade";
         version = "0.1.0";
@@ -64,7 +106,7 @@
       goChecks = pkgs.runCommand "allod-tools-go-checks"
         {
           # git is a test dependency: internal/gitremote drives the real thing.
-          nativeBuildInputs = [ pkgs.go pkgs.git ];
+          nativeBuildInputs = [ pkgs.go pkgs.git pkgs.util-linux ];
           src = ./.;
         } ''
         export HOME="$TMPDIR"
@@ -252,12 +294,15 @@
     {
       packages.${system} = {
         inherit allod forge;
+        wake-agent = wakeAgent;
         flake-update-cascade = flakeUpdateCascade;
         default = forge;
       };
 
       checks.${system} = {
         inherit allod forge;
+        wake-agent = wakeAgent;
+        wake-agent-extension = wakeAgentExtensionCheck;
         flake-update-cascade = flakeUpdateCascade;
         allod-parity = allodParity;
         cascade-suites = cascadeSuites;

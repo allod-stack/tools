@@ -13,6 +13,7 @@ host install them through their Nix composition, with no manual installation aft
 cmd/allod/                Go main CLI (change, check, memory backpass, patch, pr, skills, trace, site serve and view; deploy/check/config and secret opt-in)
 cmd/flake-update-cascade/ flake input update cascade Go command
 cmd/forge/                Forgejo CLI Go command
+cmd/wake-agent/           detached event watcher and headless Pi continuation
 internal/flakelock/       flake.lock graph walking for the cascade
 internal/forgeapi/        in-process Forgejo API client
 internal/gitremote/       Git remote parsing shared by Go commands
@@ -122,6 +123,7 @@ namespace" failure.
 - [allod check](docs/allod-check.md) — run a repository's machines and checks, one `nix` process at a time, in place of `nix flake check`
 - [allod trace](docs/allod-trace.md) — distill local Claude, Codex, and Pi session logs into redacted markdown traces
 - [allod memory](docs/allod-memory.md) — run the memory backward pass over session traces (backpass) as code, spending a model only on its two prompts
+- [wake-agent](docs/wake-agent.md) — resume one bounded headless Pi session after an external event
 - `allod skill` — list the agent skills a skills directory exposes: one aligned line each, the name and its `summary:` (a skill without a summary lists its `description` truncated; a name over 16 characters or a summary over 70 refuses). `allod skill <name>` prints one in full. Without `--from`, sources are every registry entry marked `"memory": true`, in sorted registry-id order, falling back to `allod/memory` when the registry marks none.
 
 ## Shared Library
