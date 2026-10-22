@@ -39,6 +39,7 @@ git-hooks/                git hook policy and setup
   setup-tracked-hooks     hookspath setup from repository registry
 lib/                      shared shell libraries
   workspace.sh            repo, worktree, and default-branch helpers
+verification/             behavior-level feature map (features/) and recorded sweeps (sweeps/)
 ```
 
 ### Optional namespaces
@@ -313,3 +314,11 @@ never comments, commits, pushes, or edits the PR. See
 dry runs, safe replacement, and the report-review loop. Tools that need the
 underlying commit metadata can use the stable, machine-readable
 [`forge pr snapshot`](docs/forge.md#pr-commands) interface.
+
+### Verifying a PR before it merges
+
+The behavior-level feature map in [verification/features/](verification/features/README.md)
+names, per area, what exists, how to reach it, how to drive it and what usually lies.
+The `verify-merge` skill in allod/memory drives it; a change to a behavior fixes
+the map in the same PR, and a PR that removes or narrows a map entry or a check
+is never merged below R2. Recorded sweeps live under `verification/sweeps/`.
