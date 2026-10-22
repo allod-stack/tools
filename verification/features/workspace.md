@@ -15,15 +15,19 @@ what is uncommitted across them. Both are bash in `workspace/`, sharing
   - `skipped    [host-provided: no origin]` for a checkout with no `origin`;
   - `skipped    [dirty working tree]` when `git diff` or `--cached` is
     non-empty; untracked files do not count;
+  - `unpushed   [on <branch> — N unpushed commit(s)]` when the branch has
+    an upstream and `git rev-list HEAD...@{u} --count` is non-zero; the
+    pull is skipped. This applies to every branch, master included, in
+    default mode and `--switch` mode alike, and is judged before any
+    `--switch` handling;
   - `up to date [<branch>]` when `git pull` printed `Already up to date`,
     `pulled     [<branch>]` otherwise;
   - `error      [pull failed: <first line of git's output>]`.
   - With `--switch`, before pulling a repository not on its default branch:
     `skipped [default branch unresolved — run: git -C <dir> remote set-head
     origin -a]`, `skipped [on <branch> — no remote tracking branch]`,
-    `skipped [on <branch> — N unpushed commit(s)]`, `error [checkout
-    <default> failed]`, otherwise the default branch is checked out and
-    pulled.
+    `error [checkout <default> failed]`, otherwise the default branch is
+    checked out and pulled.
   - `--help` prints the header comment even with an invalid
     `PULL_ALL_JOBS`; an invalid `PULL_ALL_JOBS` otherwise exits 1 naming it;
     an unknown option exits 1.
@@ -70,8 +74,9 @@ its closing `✅ All N ... tests passed.` line. The expected line per path:
 | `pull-all` host-provided (no origin) | `default: skips a host-provided checkout with no origin`; `default: never pulls a host-provided checkout`; `default: a failing git remote is not treated as host-provided` |
 | `pull-all` no upstream | `default: reports pull error for branch without tracking`; `--switch: skips a branch without remote tracking` |
 | `pull-all` pull failure | `default: reports the first line of a pull failure` |
-| `pull-all` non-default branch, no switch | `default: pulls non-default branch in place`; `default: never checks out non-default branches` |
-| `pull-all --switch` unpushed | `--switch: skips a branch with unpushed commits`; `--switch: never pulls repositories that were skipped` |
+| `pull-all` non-default branch, no switch | `default: pulls non-default branch without switching`; `default: never checks out non-default branches` |
+| `pull-all` unpushed, side branch and default branch | `default: reports a side branch ahead of its upstream`; `default: reports an ahead default branch instead of up to date`; `default: never pulls branches with unpushed commits` |
+| `pull-all --switch` unpushed, side branch and default branch | `--switch: reports a side branch with unpushed commits`; `--switch: reports an ahead default branch instead of up to date`; `--switch: never pulls repositories that were skipped` |
 | `pull-all --switch` default unresolved | `--switch: skips a repo whose default branch cannot be resolved, naming the repair`; `--switch: never checks out a repo whose default branch cannot be resolved` |
 | `pull-all --switch` success | `--switch: checks out the default branch before pulling`; `--switch: pulls after switching branches` |
 | `pull-all` discovery | `default: discovers and pulls a nested repository`; `default: discovers and pulls a dot-named repository`; `default: does not recurse through a dot-named non-repo directory`; `default: never enumerates worktrees` |
@@ -101,31 +106,30 @@ git -C $HOME/work/ahead status -sb; git -C $HOME/work/diverged status -sb
 rm -rf "$T"
 ```
 
-Expected today, both observed at the first sweep:
+Expected today, observed against the tree's `workspace/pull-all`:
 
 | Fixture | `pull-all` | `pull-all --switch` |
 | --- | --- | --- |
-| `ahead` (master, one unpushed commit) | `up to date [master]` and the commit still unpushed: `## master...origin/master [ahead 1]` | the same |
-| `diverged` (master, one local and one remote commit) | `error [pull failed: <first line>]`, nothing merged: `[ahead 1, behind 1]` | the same |
+| `ahead` (master, one unpushed commit) | `unpushed [on master — 1 unpushed commit]` and the commit still unpushed: `## master...origin/master [ahead 1]` | the same |
+| `diverged` (master, one local and one remote commit) | `unpushed [on master — 1 unpushed commit]`, nothing merged, and the remote commit is not fetched: `## master...origin/master [ahead 1]`, not `[ahead 1, behind 1]` | the same |
 | `noup` (branch with no upstream) | `error [pull failed: There is no tracking information for the current branch.]` | `skipped [on feature — no remote tracking branch]` |
-
-The `ahead` row is the behavior allod/tools#287 changes; when it lands, the
-expected row becomes `skipped [on master — 1 unpushed commit]` in both
-columns and this table is updated in the same PR.
 
 ## What usually lies
 
-- **An ahead default branch reads `up to date`.** `pull-all` judges only
-  what `git pull` printed, so a checkout carrying commits its origin never
-  received is reported healthy, and the next patch relay into it conflicts
-  (allod/tools#287). Until that lands, the proof of a synced workspace is
-  `git status -sb` in each checkout, or `git rev-list --count @{u}..HEAD`,
-  not the `up to date` row.
-- **The error row's reason is git's first line, which may be the fetch
-  banner.** On a diverged branch the first line was `From
-  /tmp/.../remotes/diverged` on one run and `hint: You have divergent
-  branches ...` on the next; the row says a pull failed and not reliably
-  why. Read the repository.
+- **The `unpushed` count is against the tracking ref as last fetched.**
+  `pull-all` does not fetch before counting; the number is `git rev-list
+  HEAD...@{u} --count` against whatever the last fetch left in
+  `origin/<branch>`. A diverged branch whose remote moved since then reads
+  as plainly ahead (the `diverged` fixture above prints `1 unpushed
+  commit`), and the old `error` row that revealed the divergence is gone.
+  With a fresh tracking ref the count is the symmetric difference, so a
+  branch 2 ahead and 3 behind prints `5 unpushed commits`. The proof of
+  divergence is `git fetch` then `git status -sb` in the checkout, not the
+  row.
+- **The error row's reason is git's first line, which may be a banner.**
+  Only the paths that still reach `git pull` produce it — no upstream, a
+  network failure — and the row carries whatever git printed first, which
+  need not be the cause. Read the repository.
 - **Exit 0 always.** `pull-all` exits 0 with every row an error; a script
   that gates on its status gates on nothing. The rows are the only signal.
 - **`pulled` versus `up to date` is a grep for `Already up to date`.** A
