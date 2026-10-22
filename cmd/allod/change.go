@@ -30,6 +30,8 @@ func changeMain(args []string) {
 		changeSubmit(args)
 	case "cleanup":
 		changeCleanup(args)
+	case "run":
+		changeRun(args)
 	case "-h", "--help":
 		fmt.Fprint(stdout, changeUsageText)
 	default:

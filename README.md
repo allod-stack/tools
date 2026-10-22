@@ -107,6 +107,8 @@ namespace" failure.
 
 ## Documentation
 
+- [allod change](docs/allod-change.md) — clone-per-change, the parent's ledger, and `begin`/`list`/`record`/`submit`/`cleanup`
+- [allod change run](docs/allod-change-run.md) — run a command inside a bubblewrap sandbox that can reach nothing but the named clones
 - [Workspace tools](workspace/README.md) — `pull-all`, `work-diff`
 - [Flake tools](flake/README.md) — `flake-status`, `flake-update-cascade`, `fleet-diff`
 - [forge](docs/forge.md) — Forgejo CLI
@@ -144,9 +146,16 @@ flake-status      # spot pin drift across repos
 
 ### Making a change
 
-`-d` is the isolation switch. With it, `begin` creates a worktree and an
-`agent/<description>` branch for every repo, protected or not, so two agents
-changing the same repo never move each other's HEAD:
+`-d` is the isolation switch. With it, `begin` makes a self-contained clone
+under `~/changes` — objects copied from the repo, never hardlinked (a
+hardlink shares the parent's own inode, and the clone's owner could `chmod`
+or overwrite through it), origin set to the repo's own origin — on a new
+`agent/<description>` branch, for every repo whether
+protected or not, so two agents changing the same repo never move each
+other's HEAD. The repo records the clone in its own ledger
+(`.git/allod-changes`); see [allod change](docs/allod-change.md) for the
+ledger format and why a sandboxed worker can be handed nothing but the clone
+directory and still commit safely.
 
 ```bash
 path=$(allod change begin -d fix-thing ~/work/allod/tools)
@@ -156,15 +165,18 @@ allod change record -m "fix the thing"
 allod change submit -t "Fix the thing" -F body.md
 ```
 
-Worktrees land under `~/changes/<slug>-<description>-XXXXXX`, outside `~/work`
-so the workspace stays exactly the checkouts the registry declares. Nothing may
-depend on that path — enumerate with `git worktree list` or `allod change list`.
+Clones land under `~/changes/<slug>-<description>-XXXXXX`, outside `~/work`
+so the workspace stays exactly the checkouts the registry declares. Nothing
+may depend on that path — enumerate with `allod change list`. A worktree
+`begin -d` made before this change keeps working in `list`, `record`, and
+`cleanup` until it drains; `begin` makes no new ones.
 
-`--resume` picks up a branch another session already pushed. It creates the
-same worktree, on a local `agent/<description>` that tracks the one on origin,
+`--resume` picks up a branch another session already pushed. It makes the
+same clone, on a local `agent/<description>` that tracks the one on origin,
 so `record` and `submit` continue the branch instead of starting a new one. It
-refuses when the branch is missing on origin, when a local branch of that name
-already exists (another worktree may hold it), or when `-d` is also given:
+refuses when the branch is missing on origin, when a description already
+claimed by an open clone or legacy worktree names the same branch, or when
+`-d` is also given:
 
 ```bash
 path=$(allod change begin --resume fix-thing ~/work/allod/tools)
@@ -184,44 +196,62 @@ where it happens to sit: `begin` and `record` refuse outright, with exit code 8,
 when `origin` names a repo `~/.config/git/protected-branches` lists and the
 checkout is not at that entry's path. The message names the expected and the
 actual path; move the checkout there. A repo whose `origin` matches no entry is
-unprotected as before. The `protected-refs-policy` git hook applies the same
-rule — see [git-hooks/README.md](git-hooks/README.md).
+unprotected as before. `record` and `submit` resolve a clone to the repo whose
+ledger lists it and apply that repo's protection, so a clone is judged by its
+parent and never flagged as a misplaced checkout of itself. The
+`protected-refs-policy` git hook applies the same rule to the parent — see
+[git-hooks/README.md](git-hooks/README.md).
 
-`record` refuses two situations rather than committing something wrong. If
-the checkout was switched to a different branch after `begin` set it up —
-another agent's `git switch`, say — `record` names the branch it expected and
-the branch that is actually checked out, and refuses. And with no `--files`
-named, `record` normally stages every tracked change; that is safe in a
-`begin -d` worktree, which belongs to one agent alone, but in a shared
-checkout it could sweep in another agent's edit, so there `record` lists the
-unnamed changed paths and refuses — pass `--files` to say what to commit.
+`record` refuses three situations rather than committing or pushing something
+wrong. If the checkout was switched to a different branch after `begin` set
+it up — another agent's `git switch`, say — `record` names the branch it
+expected and the branch that is actually checked out, and refuses. With no
+`--files` named, `record` normally stages every tracked change; that is safe
+in a clone or worktree from `begin -d`, which belongs to one agent alone, but
+in a shared checkout it could sweep in another agent's edit, so there
+`record` lists the unnamed changed paths and refuses — pass `--files` to say
+what to commit. And before pushing, `record` refuses, with exit code 9, a
+clone whose `origin` no longer matches the repo that issued it: a worker can
+edit its own clone's `.git/config`, and an overseer's push must not follow it
+anywhere else.
 
-### Reclaiming worktrees
+### Reclaiming clones and worktrees
 
-`allod change list` prints one tab-separated row per linked worktree — repo,
-path, branch, state — for one repo or, with no argument, the whole workspace. It
-only reads: nothing is ever removed implicitly, because no local signal tells a
+`allod change list` prints one tab-separated row per ledgered clone, plus one
+per remaining linked worktree from before this change — repo, path, branch,
+state — for one repo or, with no argument, the whole workspace. It only
+reads: nothing is ever removed implicitly, because no local signal tells a
 dead agent from a working one.
 
 | State | Meaning | Reclaim |
 |---|---|---|
-| `prunable` | git can no longer reach the worktree through its admin entry | `git -C <repo> worktree prune` |
-| `locked` | held by `git worktree lock` | unlock, then reassess |
+| `missing` | a clone's directory is gone | nothing to clean up by hand; the ledger entry just has nothing left to resolve |
+| `prunable` | git can no longer reach a linked worktree through its admin entry | `git -C <repo> worktree prune` |
+| `locked` | a linked worktree held by `git worktree lock` | unlock, then reassess |
 | `detached` | HEAD is detached, so any commits there are unreachable by branch | create a branch at HEAD, then reassess |
-| `submodule` | a populated submodule is present, which `git worktree remove` refuses | deinit the submodules, then reassess |
+| `submodule` | a populated submodule is present, which `git worktree remove` (or `cleanup`, for a clone) refuses | deinit the submodules, then reassess |
 | `dirty` | uncommitted changes | commit or discard them |
 | `unpushed` | commits that exist nowhere else | `allod change record`, or handle them |
 | `unknown` | the tool cannot prove whether the commits exist on a remote | inspect the branch and repair its remote/base before cleanup |
 | `clean` | nothing to lose | `allod change cleanup <path>` |
 
 Exactly one word is reported: the strongest blocker. `clean` is reported if and
-only if `allod change cleanup` on that path would succeed.
+only if `allod change cleanup` on that path would succeed. `missing` and
+`prunable` both mean the directory is gone; they differ in whether anything
+beyond that is left for `cleanup` or a human to resolve, since a clone has no
+`git worktree`-level admin entry the way a linked worktree does.
 
-`prunable` does not mean the directory is gone. It means the link between the
-worktree and the repo is broken — usually because the directory was deleted, but
-also when the directory survives and its `.git` file did not. `git worktree
-prune` clears the admin entry and never deletes a directory, so check what is
-left behind before removing it by hand: it may still hold uncommitted work.
+`prunable` does not mean the directory is gone alone. It means the link between
+the worktree and the repo is broken — usually because the directory was
+deleted, but also when the directory survives and its `.git` file did not.
+`git worktree prune` clears the admin entry and never deletes a directory, so
+check what is left behind before removing it by hand: it may still hold
+uncommitted work.
+
+A clone's own remote-tracking refs are independent of its parent's, unlike a
+linked worktree's shared ref store: `list` and `cleanup` only know about a
+push that landed through another path (the parent, a patch relay) once
+something fetches inside the clone itself.
 
 ### Running a repository's checks
 

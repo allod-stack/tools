@@ -141,6 +141,7 @@ const changeUsageText = `Usage:
   allod change record -M <file|-> [--files <file>...]
   allod change submit -t <title> (-b <body> | -F <file|->) [--base <branch>] [--depends-on <text>] [--dry-run]
   allod change cleanup <path>
+  allod change run [<clone-path>...] [--memory <size>] -- <command...>
 
 '-d' is the isolation switch, for every repo whether protected or not: it
 makes a self-contained clone under ~/changes — objects copied from this
@@ -340,6 +341,157 @@ or it does not, closing the race a systemd-scope query could not — no
 scope name, unit, or session bus to list or parse back apart, and no
 window between asking "is anything running" and finding out for sure.
 
+'run' runs <command> inside a bubblewrap sandbox that can reach nothing but
+the named clones, never falling back to an unsandboxed run: a path that
+matches no ledger entry — including one that is not a repository at all —
+is refused with exit code 10 without any git command running against it;
+unlike 'record', 'submit', and 'cleanup', 'run' never falls back to
+resolving a plain, unledgered repo, since it only ever sandboxes a
+ledgered clone. A checkout not on the 'agent/*' branch its ledger lists is
+refused the same way. A missing 'bwrap' on PATH, or one that fails to
+start, is refused rather than skipped. With no <clone-path>, the clone is
+resolved from the working directory, the way 'record' does. Everything
+after '--' is the command and its own arguments, unexamined; a following
+option still ends the <clone-path> list, and '--' itself is required even
+with one clone.
+
+'run' also refuses, with exit code 12, when the invoking user is one of
+Nix's own trusted-users ('nix config show trusted-users', by name, by
+'@group', or by a bare '*' entry, which trusts every user and so always
+matches), that query run with NIX_CONFIG and NIX_CONF_DIR removed from
+the environment entirely and NIX_USER_CONF_FILES forced to an explicit
+empty value, so the invoking user cannot make it report anything but the
+system-wide nix.conf only root controls — NIX_CONFIG can inline an
+arbitrary override outright, NIX_CONF_DIR can point the system-config
+lookup itself at a directory the invoking user controls, and simply
+leaving NIX_USER_CONF_FILES unset falls back to nix's own default search
+list, which includes the invoking user's own, ordinarily user-writable
+nix.conf: the daemon accepts privileged build options from a trusted uid,
+including post-build-hook, which it runs as root, so binding the daemon
+socket into the sandbox would hand a worker root on the VM. allod/vm#12
+removes the trust fleet-wide; until then, this refuses rather than open
+that path. The query's stdout and stderr are captured separately and only
+stdout is ever parsed as the answer, since nix routinely writes warnings
+to stderr even on a successful exit and merging the two could let a
+stray word in that noise (a username, a group, or '*') get read as part
+of the trusted-users list itself. A 'nix config show trusted-users'
+query that exits non-zero, or prints nothing this parses as a value, is
+itself a refusal (exit 1) naming the error, never read as "no trusted
+users" and let through — the same is true of a failure to resolve the
+invoking user's own account or group membership to compare against that
+list. It refuses with exit code 14,
+rather than follow it, when ~/.claude, ~/.codex, ~/.pi, ~/.claude.json,
+~/.gitconfig, or ~/.config/git is itself a symlink: binding whatever it
+resolves to as if it were the real thing is not this command's call to
+make silently.
+
+'run' also refuses, with exit code 14, when any regular file anywhere
+under a runner's whole base directory (~/.claude, ~/.codex, or ~/.pi) has
+more than one hard link — not only under the writable subdirectory bound
+read-write on top (~/.claude/projects, ~/.codex/sessions, ~/.codex/log,
+~/.pi/agent/sessions). A hard link under the base but outside that
+writable subdirectory (one planted directly under ~/.claude, say) still
+aliases whatever it links to, wherever else that is bound read-only; the
+check covers the whole base, not just where the write risk is obvious.
+The symlink check stays scoped to each writable subdirectory: one
+resolving back inside that runner's own base directory is refused as a
+second line of defense; one resolving entirely outside the base is not
+refused, since a real runner artifact can be exactly that shape (Claude
+Code's own ~/.claude/projects/<project>/memory, a symlink elsewhere in
+$HOME). Walked before anything is bound.
+
+'run' also refuses, with exit code 15, when 'nix config show netrc-file'
+names a file the user can read, or '/etc/nix/netrc' exists and is
+readable: /etc is bound whole (below), so either would be exposed inside
+the sandbox. A nix that names no file does not trigger this; a 'nix
+config show netrc-file' that exits non-zero, or prints something this
+cannot parse as an answer, is instead a refusal in its own right (exit 1)
+naming the error, never read as "names no file" and let through — the
+same NIX_CONFIG/NIX_USER_CONF_FILES/NIX_CONF_DIR scrub and stdout-only
+capture the trusted-users query uses covers this query too. A root-only
+file under /etc (an sshd host key,
+say) is protected by its own mode bits, not by this check or by /etc's
+absence, and this does not refuse on its account.
+
+The command runs inside 'systemd-run --user --scope --quiet -p
+MemoryMax=<size>' (default 2G, set with --memory), named 'allod-run-' plus
+every named clone's own branch (each with '/' replaced by '-'), joined
+with ':' in the order given ('+' is not a legal systemd unit-name
+character), plus a random suffix, so 'systemctl --user
+list-units allod-run-*' lists every run for any clone's swarm regardless
+of how many clones one run spans, and two runs over the same clone set
+never collide — this naming is now purely for an operator to inspect or
+kill a scope by hand; no outside command's own refusal depends on
+querying systemctl any more (see the ledger-lock paragraph above).
+Exceeding the memory cap kills the scope and only the scope; the
+command's own exit status is this process's exit status either way.
+
+Inside the sandbox: every named clone is read-write at its real path;
+~/.gitconfig and every registry repository flagged "memory": true are
+read-only at their real paths, with an empty tmpfs mounted over that
+checkout's own '.git' on top, so no ledger or history of a memory repo
+(including its own '.git/allod-changes') is visible inside; under
+~/.config/git/ only an allowlist is bound read-only, never an exclusion
+list: 'config', the 'hooks' directory (walked recursively),
+'protected-refs-policy', 'protected-branches', 'signing-required-branches',
+'allowed-external-remotes', 'forge-hosts', and 'active-pr-branches' — every
+name git-hooks/protected-refs-policy itself reads — and nothing else under
+~/.config/git is bound, whatever its own name, so a second credential
+deployed there under a name of its own (one 'forge' would honor through
+FORGE_TOKEN_FILE, say) is excluded by never being on the list, not by
+being matched and skipped by name. Within 'hooks/', a hard link or a
+symlink resolving to 'forgejo-token's own content is still excluded the
+same way at every depth. A symlink's own target must itself be
+allowlisted too, not merely somewhere physically under ~/.config/git:
+'hooks/x -> ../some-other-credential' resolves inside the tree, but if
+'some-other-credential' is not itself one of the allowlisted names, it is
+never walked on its own either, so this walk skips any symlink, at any
+depth, whose resolved target is not itself an allowlisted name (or, for
+one inside the Nix store — /nix/store, already read-only and
+world-readable, bound whole at /nix regardless of this walk, and exactly
+where every symlink a home-manager managed ~/.config/git resolves to —
+anywhere under it) — and never follows a symlinked directory into one.
+
+Each runner's state directory (~/.claude, ~/.codex, ~/.pi) is bound
+read-only as a whole, with only its own session and log directories bound
+read-write on top, so a worker can read but never rewrite the overseer's
+own runner configuration (hooks, MCP servers, extensions) for it to run
+unsandboxed later; docs/allod-change-run.md carries the table of which
+directories are which, per runner, and the rule that a new runner needs
+its own row there. ~/.claude.json is handled differently: it is copied to
+a private temporary file at the start of the run, which is bound
+read-write at ~/.claude.json inside the sandbox and discarded when the run
+ends, so a worker's writes to it never reach the real file.
+
+Nothing else of $HOME is visible, and ~/.ssh never is. /nix, /etc,
+/run/current-system, /bin, and /usr are read-only, plus /run/wrappers if
+it exists; /etc is bound whole, so a root-only file under it is protected
+by its own mode bits, not by absence — see the netrc refusal above for the
+one case this command checks for itself rather than leave to mode bits.
+The Nix daemon socket is bound read-write on top of the read-only /nix so
+builds and checks still go through it — required, not skipped if absent,
+since a dev VM always has it and a sandbox that silently cannot reach the
+daemon is the failure this command refuses to hide. The sandboxed command
+starts a new session ('bwrap --new-session'),
+so it has no controlling terminal and cannot inject input into the one
+that launched it (bubblewrap's own README names TIOCSTI as the reason).
+The working directory starts at the first clone; the invoker's own
+stdin/stdout/stderr pass through unchanged, so a redirect the invoker
+chose (stdin from a file, say) is visible inside — that channel, and
+what goes through it, is the invoker's own responsibility, not this
+command's. The sandbox's environment starts cleared ('bwrap
+--clearenv'), not inherited: a dev VM's environment can carry session
+tokens (a messaging token has been seen there), and "inherit everything"
+would hand a worker whatever happens to be in it. Only a fixed allowlist
+passes through, each as the caller's own environment set it: HOME, PATH,
+TERM, LANG, LC_ALL, any LC_* variable, USER, LOGNAME, SHELL, TZ,
+COLORTERM, and NIX_REMOTE if set; TMPDIR is always set to '/tmp', the
+sandbox's own private tmpfs. The allowlist is fixed in code, not a flag: a
+variable that turns out to be needed is a code change with a reason, not a
+bypass on the command line. Git identity inside comes from the bound
+~/.gitconfig, never from a GIT_* environment variable, which the
+allowlist does not carry. See docs/allod-change-run.md for the mount
+table and what the sandbox does not do.
 `
 
 const patchUsageText = `Usage: allod patch <command> [options]

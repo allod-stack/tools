@@ -147,6 +147,15 @@
         touch "$out"
       '';
 
+      # tests/allod-change-run.sh is NOT wired in here, measured rather than
+      # assumed: nested user namespaces open fine inside this build sandbox,
+      # but 'allod change run''s own mount set binds /etc, /run/current-system,
+      # /bin, and /usr from the real system, none of which a Nix build
+      # sandbox exposes (it is hermetic by design, not a NixOS filesystem).
+      # Every probe that needs those binds therefore fails here for a reason
+      # that has nothing to do with the command under test. Run it directly
+      # in a dev VM instead, the same way as tests/site-preview-by-hand.sh.
+
       # The mock-driven cascade suites, run against the packaged program. The
       # nixConfig suite is left out: it drives the real nix under a pty, which
       # the sandbox cannot host; run it by hand.
