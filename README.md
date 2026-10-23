@@ -38,6 +38,8 @@ flake/                    nix flake pin management
 git-hooks/                git hook policy and setup
   protected-refs-policy   branch protection, signing, remote restrictions
   setup-tracked-hooks     hookspath setup from repository registry
+verify-session/           cold verifier seat as one enforced command
+  verify-session          seat checks, scratch clone, brief, headless verifier
 lib/                      shared shell libraries
   workspace.sh            repo, worktree, and default-branch helpers
 verification/             behavior-level feature map (features/) and recorded sweeps (sweeps/)
@@ -120,6 +122,7 @@ namespace" failure.
   authoring contracts
 - [allod site serve and view](docs/allod-site-preview.md) — serve a site in a dev VM from the `preview` app in its own flake, and view it from the hypervisor
 - [Git hooks](git-hooks/README.md) — `protected-refs-policy`, `setup-tracked-hooks`
+- [verify-session](docs/verify-session.md) — run the cold verifier seat as one enforced command
 - [allod check](docs/allod-check.md) — run a repository's machines and checks, one `nix` process at a time, in place of `nix flake check`
 - [allod trace](docs/allod-trace.md) — distill local Claude, Codex, and Pi session logs into redacted markdown traces
 - [allod memory](docs/allod-memory.md) — run the memory backward pass over session traces (backpass) as code, spending a model only on its two prompts

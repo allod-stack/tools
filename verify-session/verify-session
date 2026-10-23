@@ -1,0 +1,212 @@
+#!/usr/bin/env bash
+# verify-session - run the cold verifier seat as one enforced command
+#
+# Runs a headless verifier against a pull request: it checks the seat rules,
+# cuts a scratch clone of the pull request's head, writes the brief, and runs
+# the agent with its output captured.
+#
+# Usage:
+#   verify-session [--token-file <path>] [--timeout <duration>] <owner/repo#number>
+#
+# Arguments:
+#   <owner/repo#number>   pull request to verify, e.g. allod/tools#305
+#
+# Options:
+#   --token-file <path>   verifier credential file; default: $FORGE_TOKEN_FILE
+#   --timeout <duration>  headless run limit, as a timeout(1) duration; default: 30m
+#   -h, --help            show this help
+#
+# Environment:
+#   FORGE_TOKEN_FILE      verifier credential file when --token-file is absent
+#   TMPDIR                parent directory for the scratch tree
+#
+# The script never names a credential path of its own: which file holds the
+# verifier token is the caller's, so one machine's verifier credential stays
+# in that deployment's private memory. Every forge call runs with
+# FORGE_TOKEN_FILE forced to that file, and the headless verifier inherits it.
+set -euo pipefail
+
+PROG=verify-session
+
+die() {
+  printf '%s: %s\n' "$PROG" "$1" >&2
+  exit "${2:-1}"
+}
+
+info() {
+  printf '%s: %s\n' "$PROG" "$1" >&2
+}
+
+usage() {
+  sed -n '2,${/^#/!q; s/^# \{0,1\}//; p;}' "$0"
+}
+
+token_file="${FORGE_TOKEN_FILE:-}"
+timeout_dur="30m"
+positional=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --token-file)
+      [[ $# -ge 2 ]] || die "--token-file requires a value"
+      token_file="$2"
+      shift 2
+      ;;
+    --token-file=*)
+      token_file="${1#*=}"
+      shift
+      ;;
+    --timeout)
+      [[ $# -ge 2 ]] || die "--timeout requires a value"
+      timeout_dur="$2"
+      shift 2
+      ;;
+    --timeout=*)
+      timeout_dur="${1#*=}"
+      shift
+      ;;
+    --)
+      shift
+      positional+=("$@")
+      break
+      ;;
+    -*)
+      usage >&2
+      die "unknown option: $1"
+      ;;
+    *)
+      positional+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if [[ ${#positional[@]} -ne 1 ]]; then
+  usage >&2
+  die "expected one pull request: <owner/repo#number>"
+fi
+target="${positional[0]}"
+
+if [[ ! "$target" =~ ^([^/]+/[^/#]+)#([0-9]+)$ ]]; then
+  die "invalid pull request '$target': expected <owner/repo#number>"
+fi
+repo="${BASH_REMATCH[1]}"
+number="${BASH_REMATCH[2]}"
+
+[[ -n "$token_file" ]] || die "no verifier token: pass --token-file or set FORGE_TOKEN_FILE"
+[[ -f "$token_file" ]] || die "verifier token file not found: $token_file"
+export FORGE_TOKEN_FILE="$token_file"
+
+# Seat check, author. A credential that authenticates as the pull request's
+# author is the author's seat, not the verifier's; a check that cannot run
+# refuses rather than passing.
+auth_out=$(forge auth status) || die "seat check failed: forge auth status exited $?" 3
+account=$(printf '%s\n' "$auth_out" | sed -n 's/^Authenticated as \([^ ]*\).*$/\1/p')
+[[ -n "$account" ]] || die "seat check failed: forge auth status named no account: $auth_out" 3
+
+meta=$(forge pr view "$number" -R "$repo" --json author,headRefName) \
+  || die "cannot read $repo#$number from the forge" 4
+author=$(printf '%s' "$meta" | jq -r '.author.login // empty')
+head_ref=$(printf '%s' "$meta" | jq -r '.headRefName // empty')
+[[ -n "$author" ]] || die "cannot determine the author of $repo#$number" 4
+[[ -n "$head_ref" ]] || die "cannot determine the head branch of $repo#$number" 4
+
+if [[ "$account" == "$author" ]]; then
+  die "seat check: the verifier credential authenticates as the pull request's author ($account); a session that wrote the pull request cannot verify it" 2
+fi
+
+# Seat check, live clone. Any clone this environment already holds on the
+# pull request's branch is a session that could have written it. A list that
+# cannot be read refuses rather than passing.
+list_out=$(allod change list) || die "seat check failed: allod change list exited $?" 3
+if printf '%s\n' "$list_out" | awk -F'\t' -v repo="$repo" -v ref="$head_ref" \
+    'NF >= 3 && $1 == repo && $3 == ref { found = 1 } END { exit !found }'; then
+  die "seat check: this environment holds a clone of $repo on $head_ref; the verifier must be a session with no live clone of the pull request's branch" 2
+fi
+
+# Scratch isolation. The clone is cut fresh, of the forge remote, with the
+# pull request's ref fetched and its head checked out by hash; it is never
+# under the work tree or ~/changes and never the author's clone.
+snapshot=$(forge pr snapshot "$number" -R "$repo") \
+  || die "cannot read the snapshot for $repo#$number" 4
+head_sha=$(printf '%s' "$snapshot" | jq -r '.head.sha // empty')
+clone_url=$(printf '%s' "$snapshot" | jq -r '.base.repository.clone_url // empty')
+[[ -n "$head_sha" ]] || die "snapshot for $repo#$number has no head commit" 4
+[[ -n "$clone_url" ]] || die "snapshot for $repo#$number has no clone URL" 4
+
+scratch=$(mktemp -d)
+clone_dir="$scratch/repo"
+
+git clone --quiet "$clone_url" "$clone_dir" || die "scratch clone failed: $clone_url" 5
+git -C "$clone_dir" fetch --quiet origin "refs/pull/$number/head" \
+  || die "fetch refs/pull/$number/head failed" 5
+git -C "$clone_dir" checkout --quiet --detach "$head_sha" \
+  || die "checkout $head_sha failed" 5
+
+info "scratch clone: $clone_dir at $head_sha"
+
+# The brief is generated, never remembered. It carries the skill, the pull
+# request, the ledger lookup, the no-map fallback, and the score-first rule,
+# and it tells the verifier to stop rather than merge past a stop.
+brief="$scratch/brief.md"
+cat > "$brief" <<BRIEF
+You are the cold verifier seat for $repo#$number. This session did not write
+the pull request.
+
+Read the public memory index and the topic files it names, then run
+\`allod skill verify-merge\` and follow it step by step, stopping where it stops.
+
+Seat: this process was started with the verifier credential and has already
+refused the author's credential and any live clone of the branch. Run
+\`forge auth status\` and confirm the account is not the pull request's author;
+if it is, stop without posting a merge.
+
+Pull request: $repo#$number
+Scratch clone: $clone_dir, at commit $head_sha. Work only here, never in the
+owner's checkout or under ~/changes; make no other clone.
+
+Rung lookup: read the repository's ledger issue and its latest owner comment
+for the risk class. The deployment's private memory names the ledger issue.
+No ledger, or no owner comment for the class, means human gate for it.
+
+Score first: read the diff before the pull request body. Walk risk.md's
+calibration and write down the class with the one fact that decided it, then
+read the body's score; the higher of the two wins. A diff that touches
+verification/features/ or removes a check has an R2 floor.
+
+No feature map: if verification/features/README.md is absent, the proof is
+the repository's checks plus a rerun at this head of every command in the
+pull request body's ## Validation section, captured with its output.
+
+Post the proof comment on the pull request and stop wherever a stop rule
+applies; never merge past a stop. As your last line print
+\`PROOF_COMMENT=<url of the proof comment>\`, or \`PROOF_COMMENT=none\` with
+the reason when you posted none.
+BRIEF
+
+log="$scratch/verifier.log"
+set +e
+timeout "$timeout_dur" pi --no-session -p "$(cat "$brief")" >"$log" 2>&1
+status=$?
+set -e
+
+info "verifier transcript: $log"
+cat "$log"
+
+if [[ $status -eq 124 ]]; then
+  die "verifier timed out after $timeout_dur" 6
+fi
+if [[ $status -ne 0 ]]; then
+  die "verifier exited $status" 6
+fi
+
+proof=$(grep -m1 '^PROOF_COMMENT=' "$log" | cut -d= -f2- || true)
+if [[ -n "$proof" && "$proof" != none ]]; then
+  printf 'proof-comment: %s\n' "$proof"
+else
+  printf 'proof-comment: none reported\n'
+fi

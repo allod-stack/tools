@@ -185,6 +185,7 @@
         bash tests/pr-explain/components.sh
         bash tests/pr-explain/validation.sh
         bash tests/pr-explain/command.sh
+        bash tests/verify-session.sh
 
         touch "$out"
       '';
