@@ -294,9 +294,9 @@ func TestReadPRFindByHeadStateAll(t *testing.T) {
 	})
 }
 
-// TestReadPRFindByHeadStateAllForkedHead covers a forked PR once its branch
-// is deleted: head.label carries "<owner>:<branch>", not the bare branch
-// name head.ref still carried before.
+// TestReadPRFindByHeadStateAllForkedHead: a fork's pull request on the same
+// branch name carries "<owner>:<branch>" in head.label and must never stand
+// in for this repository's own branch.
 func TestReadPRFindByHeadStateAllForkedHead(t *testing.T) {
 	srv := newRecordingServer(t, map[string]cannedResponse{
 		"/api/v1/repos/acme/widget/pulls?state=all&limit=50&page=1": {Body: `[` +
@@ -308,8 +308,8 @@ func TestReadPRFindByHeadStateAllForkedHead(t *testing.T) {
 	useNoInferRepo(t)
 
 	out, _, code := runForge(t, "-R", "acme/widget", "pr", "find-by-head", "-s", "all", "landed")
-	if code != 0 || out != "45\tmerged\n" {
-		t.Errorf("got (%q, %d), want (\"45\\tmerged\\n\", 0)", out, code)
+	if code != 0 || out != "" {
+		t.Errorf("got (%q, %d), want (\"\", 0): a fork's head must not match", out, code)
 	}
 }
 

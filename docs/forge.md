@@ -142,7 +142,8 @@ request matches by `head.ref` when that is still the branch name, or by
 `head.label` when it is not: the forge rewrites `head.ref` to
 `refs/pull/<n>/head` the moment the branch is deleted (`pr merge -d` or `pr
 close -d`), and keeps the branch name only in `head.label` — bare for a
-same-repository pull request, `<owner>:<branch>` for one from a fork. An
+same-repository pull request. A fork's `<owner>:<branch>` never matches: another
+owner's pull request on the same branch name cannot stand in for ours. An
 open match is always preferred over a closed or merged one.
 
 `pr snapshot` is the machine-readable interface for tools that need a pull

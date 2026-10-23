@@ -810,14 +810,14 @@ func prInlineComment(comment any) string {
 // prHeadMatchesBranch is true when a pull request's head is this branch.
 // Forgejo rewrites head.ref to "refs/pull/<n>/head" the moment the branch is
 // deleted (merge or close with -d), so a landed PR is found only through
-// head.label, which still names the branch: bare for a same-repository PR,
-// "<owner>:<branch>" for a fork.
+// head.label, which still names the branch. Only the bare label matches:
+// a fork's "<owner>:<branch>" is another owner's pull request, never ours.
 func prHeadMatchesBranch(pr any, branch string) bool {
 	if ref, ok := jsonPath(pr, "head", "ref").(string); ok && ref == branch {
 		return true
 	}
 	label, ok := jsonPath(pr, "head", "label").(string)
-	return ok && (label == branch || strings.HasSuffix(label, ":"+branch))
+	return ok && label == branch
 }
 
 // prNumberForHead is
