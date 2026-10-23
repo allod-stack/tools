@@ -29,7 +29,7 @@ That resolution is a path match, nothing more: the candidate path (an explicit o
 
 ## Inside and outside the sandbox
 
-Nothing outside `allod change run` ever runs git in a worker's clone. Outside, `record` and `submit` refuse a clone this repo's ledger lists, with exit code 11, before any git command and before any lock: the path match above is the whole check, so a hostile clone never gets the chance to run anything. The refusal names the worker's own command: `allod change run <clone> -- allod change record ...` (or `submit ...`).
+No command outside the sandbox ever runs git in a worker's clone — not even `run`'s own pre-flight, which confirms the clone is on its ledgered `agent/*` branch by reading `.git/HEAD` directly rather than running `git branch --show-current`. Outside, `record` and `submit` refuse a clone this repo's ledger lists, with exit code 11, before any git command and before any lock: the path match above is the whole check, so a hostile clone never gets the chance to run anything. The refusal names the worker's own command: `allod change run <clone> -- allod change record ...` (or `submit ...`).
 
 Inside the sandbox, `run` sets `ALLOD_CHANGE_SANDBOX=1` in the environment it builds (`--setenv`, next to `TMPDIR`); the variable is never on the pass-through allowlist (docs/allod-change-run.md), so only `run` itself ever sets it. With it set, `record` and `submit` resolve the repository with git exactly as they would for any ordinary repository — the parent's own ledger lives under the parent's `.git`, which is not mounted inside the sandbox at all, so it is simply invisible — and treat the clone the way they already treat a legacy linked worktree:
 

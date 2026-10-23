@@ -183,11 +183,16 @@ hand instead to finish the probe.
   lines and no closing `All N ... passed` line failed, and every case after
   the failure is unproved.
 - **`submit` and `cleanup` succeeding in the suite is the mock `forge`
-  answering.** Live, `forge pr create` returns `HTTP 404` when the branch
-  was never pushed, because `submit` pushes nothing; only `record` does.
-  `cleanup` removing a clone in the suite proves it reads `forge pr
-  find-by-head -s all`'s answer correctly, not that a real pull request
-  was ever merged or closed.
+  answering, and the mock answers by branch name alone.** Live, `forge pr
+  create` returns `HTTP 404` when the branch was never pushed, because
+  `submit` pushes nothing; only `record` does. The live forge also rewrites
+  a landed pull request's `head.ref` to `refs/pull/<n>/head` the moment its
+  branch is deleted, keeping the branch name only in `head.label`; the
+  suite's mock never does that rewrite, so `cleanup` removing a clone there
+  proves the mock's answer was read correctly, not that a landed branch is
+  still found once the forge has stopped naming it in `head.ref`. A proof
+  for `cleanup` reads `forge pr find-by-head -s all` against a real landed
+  branch on the live forge.
 - **An exit status read through a pipe is the last command's.** `allod
   change record ... | tee log` reports `tee`'s 0 on a refusal; read `$?`
   directly or `PIPESTATUS[0]` (`shell.md` in allod/memory).

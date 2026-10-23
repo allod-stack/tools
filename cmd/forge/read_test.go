@@ -261,7 +261,7 @@ func TestReadPRFindByHeadStateAll(t *testing.T) {
 			`{"number":10,"title":"Old topic","user":{"login":"alice"},"head":{"label":"acme:topic","ref":"topic"},"base":{"label":"master","ref":"master"},"state":"closed","merged":true,"merged_at":"2025-01-02T00:00:00Z"},` +
 			`{"number":12,"title":"Open one","user":{"login":"alice"},"head":{"label":"acme:topic","ref":"topic"},"base":{"label":"master","ref":"master"},"state":"open"},` +
 			`{"number":31,"title":"Closed, not merged","user":{"login":"alice"},"head":{"label":"acme:dropped","ref":"dropped"},"base":{"label":"master","ref":"master"},"state":"closed","merged":false},` +
-			`{"number":44,"title":"Merged","user":{"login":"alice"},"head":{"label":"acme:landed","ref":"landed"},"base":{"label":"master","ref":"master"},"state":"closed","merged":true,"merged_at":"2026-01-02T00:00:00Z"}` +
+			`{"number":44,"title":"Merged","user":{"login":"alice"},"head":{"ref":"refs/pull/44/head","label":"landed"},"base":{"label":"master","ref":"master"},"state":"closed","merged":true,"merged_at":"2026-01-02T00:00:00Z"}` +
 			`]`},
 	})
 	useServer(t, srv)
@@ -292,6 +292,25 @@ func TestReadPRFindByHeadStateAll(t *testing.T) {
 			t.Errorf("got (%q, %d), want (\"\", 0)", out, code)
 		}
 	})
+}
+
+// TestReadPRFindByHeadStateAllForkedHead covers a forked PR once its branch
+// is deleted: head.label carries "<owner>:<branch>", not the bare branch
+// name head.ref still carried before.
+func TestReadPRFindByHeadStateAllForkedHead(t *testing.T) {
+	srv := newRecordingServer(t, map[string]cannedResponse{
+		"/api/v1/repos/acme/widget/pulls?state=all&limit=50&page=1": {Body: `[` +
+			`{"number":45,"title":"Merged from a fork","user":{"login":"someone"},"head":{"ref":"refs/pull/45/head","label":"someone:landed"},"base":{"label":"master","ref":"master"},"state":"closed","merged":true,"merged_at":"2026-01-03T00:00:00Z"}` +
+			`]`},
+	})
+	useServer(t, srv)
+	useToken(t, fakeToken)
+	useNoInferRepo(t)
+
+	out, _, code := runForge(t, "-R", "acme/widget", "pr", "find-by-head", "-s", "all", "landed")
+	if code != 0 || out != "45\tmerged\n" {
+		t.Errorf("got (%q, %d), want (\"45\\tmerged\\n\", 0)", out, code)
+	}
 }
 
 // --- issue list ---

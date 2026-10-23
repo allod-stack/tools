@@ -30,11 +30,13 @@ git-free way `record` and `submit`'s own outside refusal does
 resolving a plain, unledgered repo through `git rev-parse` — `run` only
 ever sandboxes a ledgered clone, so there is no reason to run git against
 anything else on the way to this refusal. A checkout not on the `agent/*`
-branch its ledger lists is refused the same way, by the one git command
-`run` still runs against the clone before sandboxing it (`git branch
---show-current`), to confirm what it is about to hand a worker its own
-credentials over. `bwrap` missing from PATH, or `bwrap` failing to start,
-is refused (exit 1); `run` never falls back to an unsandboxed command.
+branch its ledger lists is refused the same way, confirmed before
+sandboxing it by reading the clone's own `.git/HEAD` directly rather than
+running git: a line `ref: refs/heads/<branch>` gives the branch, and
+anything else — a detached HEAD, an unreadable file, a `.git` that is a
+file rather than a directory — refuses the same way, naming what was
+read. `bwrap` missing from PATH, or `bwrap` failing to start, is refused
+(exit 1); `run` never falls back to an unsandboxed command.
 
 `run` refuses, with exit code 12, when the invoking user is one of Nix's
 own trusted-users — `nix config show trusted-users`, checked by name, by

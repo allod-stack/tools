@@ -459,22 +459,23 @@ func worktreeState(path string, record worktreeRecord) string {
 	return workingTreeState(path)
 }
 
-// forgePRStateForBranch returns "" for no pull request, a short PR state when
-// one exists, and ok=false when the forge cannot be reached.
-func forgePRStateForBranch(parentRepo, branch string) (state string, ok bool) {
+// forgePRStateForBranch returns "", "" for no pull request, the PR number
+// and a short state when one exists, and ok=false when the forge cannot be
+// reached.
+func forgePRStateForBranch(parentRepo, branch string) (number, state string, ok bool) {
 	output, status := captureCommand(parentRepo, nil, true, "forge", "pr", "find-by-head", "-s", "all", branch)
 	if status != 0 {
-		return "", false
+		return "", "", false
 	}
 	output = strings.TrimSpace(output)
 	if output == "" {
-		return "", true
+		return "", "", true
 	}
-	_, state, found := strings.Cut(output, "\t")
+	number, state, found := strings.Cut(output, "\t")
 	if !found {
-		return "", false
+		return "", "", false
 	}
-	return state, true
+	return number, state, true
 }
 
 // Hold the ledger lock across every clone read. A running worker gets a
@@ -496,7 +497,7 @@ func listRow(main, name string, entry changeLedgerEntry) {
 		fmt.Fprintf(stdout, "%s\t%s\t%s\tmissing\n", name, entry.path, entry.branch)
 		return
 	}
-	state, ok := forgePRStateForBranch(main, entry.branch)
+	_, state, ok := forgePRStateForBranch(main, entry.branch)
 	if !ok {
 		fmt.Fprintf(stdout, "%s\t%s\t%s\tunknown\n", name, entry.path, entry.branch)
 		return
@@ -869,7 +870,7 @@ func cleanupClone(parentRepo string, entry changeLedgerEntry) {
 	case !info.IsDir():
 		die(1, "clone '%s' exists but is not a directory; this refuses rather than treat that as the clone being missing", entry.path)
 	}
-	state, ok := forgePRStateForBranch(parentRepo, entry.branch)
+	number, state, ok := forgePRStateForBranch(parentRepo, entry.branch)
 	if !ok {
 		die(1, "could not ask the forge for the pull request on branch '%s'", entry.branch)
 	}
@@ -889,6 +890,11 @@ func cleanupClone(parentRepo string, entry changeLedgerEntry) {
 		fmt.Fprintf(stderr, "allod: removed clone %s but could not drop its ledger entry: %v\n", entry.path, err)
 		exit(1)
 	}
+	if state == "closed" {
+		fmt.Fprintf(stdout, "removed clone '%s': pull request #%s is closed, not merged; local commits not on the forge were discarded\n", entry.path, number)
+		return
+	}
+	fmt.Fprintf(stdout, "removed clone '%s': pull request #%s is %s\n", entry.path, number, state)
 }
 
 func changeCleanup(args []string) {

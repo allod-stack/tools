@@ -137,7 +137,13 @@ match past the first 50 is still found.
 number it has always printed; `-s all` looks across every pull request
 state instead and prints `<number>\t<state>` (`open`, `closed`, or
 `merged`), for a caller that must tell a landed pull request from one still
-open without first finding it, not merely ruling out an open one.
+open without first finding it, not merely ruling out an open one. A pull
+request matches by `head.ref` when that is still the branch name, or by
+`head.label` when it is not: the forge rewrites `head.ref` to
+`refs/pull/<n>/head` the moment the branch is deleted (`pr merge -d` or `pr
+close -d`), and keeps the branch name only in `head.label` — bare for a
+same-repository pull request, `<owner>:<branch>` for one from a fork. An
+open match is always preferred over a closed or merged one.
 
 `pr snapshot` is the machine-readable interface for tools that need a pull
 request's exact commits. It emits a deliberately small, versioned schema rather

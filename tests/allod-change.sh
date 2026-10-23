@@ -843,6 +843,8 @@ MOCK_FORGE_ALL_NUMBER=9 MOCK_FORGE_ALL_STATE=closed list_with_forge "$repo" "$fo
 assert_contains "$CAPTURE_OUTPUT" $'\tclosed' "list reports closed for a branch with a closed, unmerged pull request"
 MOCK_FORGE_ALL_NUMBER=9 MOCK_FORGE_ALL_STATE=closed cleanup_with_forge "$path" "$forge_bin"
 assert_status 0 "cleanup removes a clone whose pull request is closed without merging"
+assert_contains "$CAPTURE_OUTPUT" "#9" "cleanup names the closed pull request's number"
+assert_contains "$CAPTURE_OUTPUT" "discarded" "cleanup says local commits not on the forge were discarded for a closed pull request"
 [[ ! -d "$path" ]] &&
   pass "cleanup deletes the clone directory once closed" ||
   fail "cleanup deletes the clone directory once closed" "still exists: $path"

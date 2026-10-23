@@ -819,8 +819,22 @@ git_call_against_not_repo=$(grep -F -- "$not_a_repo_path" "$not_repo_log" || tru
   fail "no git command ever runs against a path that matches no ledger entry" "$git_call_against_not_repo"
 
 git -C "$clone" checkout -q -b scratch
+
+# The branch check reads .git/HEAD directly, so this refusal runs no git
+# command against the clone either, same as the non-repository path above.
+wrong_branch_log="$TMP/git-call-log-wrong-branch-${RUN_ID}"
+: > "$wrong_branch_log"
+wrong_branch_logging_git_bin=$(make_logging_git "$wrong_branch_log")
+saved_path_wrong_branch="$PATH"
+export PATH="$wrong_branch_logging_git_bin:$PATH"
 capture "$ALLOD" change run "$clone" -- true
+export PATH="$saved_path_wrong_branch"
 assert_status 10 "run refuses a ledgered clone that is not on its ledgered agent/* branch"
+git_call_against_wrong_branch=$(grep -F -- "$clone" "$wrong_branch_log" || true)
+[[ -z "$git_call_against_wrong_branch" ]] &&
+  pass "no git command runs against the clone to read the branch it is checked out on" ||
+  fail "no git command runs against the clone to read the branch it is checked out on" "$git_call_against_wrong_branch"
+
 git -C "$clone" checkout -q "agent/$desc"
 
 capture "$ALLOD" change run "$clone" true

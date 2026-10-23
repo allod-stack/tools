@@ -207,8 +207,10 @@ directory ($WORK_DIR, default ~/work): 'list', 'record', 'submit', and
 every repository under there, so a clone issued from anywhere else would
 get a ledger entry none of them could ever find again.
 
-Inside and outside the sandbox: nothing outside 'allod change run' ever
-runs git in a worker's clone any more. Outside, 'record' and 'submit'
+Inside and outside the sandbox: no command outside the sandbox ever runs
+git in a worker's clone any more, not even the branch check 'run' itself
+makes before sandboxing, which reads the clone's own .git/HEAD directly
+rather than running git. Outside, 'record' and 'submit'
 refuse a clone this repo's ledger lists, with exit code 11, before any git
 command and before any lock: the worker records and submits its own clone
 from inside its own sandbox, not the overseer from outside — run 'allod
@@ -245,7 +247,8 @@ is refused with exit code 10 without any git command running against it;
 unlike 'record', 'submit', and 'cleanup', 'run' never falls back to
 resolving a plain, unledgered repo, since it only ever sandboxes a
 ledgered clone. A checkout not on the 'agent/*' branch its ledger lists is
-refused the same way. A missing 'bwrap' on PATH, or one that fails to
+refused the same way, the branch read from the clone's own .git/HEAD
+rather than from git. A missing 'bwrap' on PATH, or one that fails to
 start, is refused rather than skipped. With no <clone-path>, the clone is
 resolved from the working directory, the way 'record' does. Everything
 after '--' is the command and its own arguments, unexamined; a following

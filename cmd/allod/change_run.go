@@ -48,6 +48,22 @@ func requireExclusiveLedgerLock(parent string, entry changeLedgerEntry) *changeL
 	return lock
 }
 
+// cloneHeadBranch reads .git/HEAD itself: no git command runs in a worker's
+// clone from outside, this pre-flight included. Anything but a branch ref
+// (detached, unreadable, a gitfile) is an error naming what was found.
+func cloneHeadBranch(repo string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(repo, ".git", "HEAD"))
+	if err != nil {
+		return "", err
+	}
+	line := strings.TrimSpace(string(data))
+	branch, ok := strings.CutPrefix(line, "ref: refs/heads/")
+	if !ok || branch == "" {
+		return "", fmt.Errorf("HEAD is %q, not a 'ref: refs/heads/<branch>' line", line)
+	}
+	return branch, nil
+}
+
 func changeRun(args []string) {
 	memory := "2G"
 	memorySet := false
@@ -118,7 +134,12 @@ func changeRun(args []string) {
 				"clone '%s' is locked by an outside command, or by another 'run' still in its own pre-flight; 'run' refuses to start until it finishes",
 				repo)
 		}
-		branch := currentBranch(repo)
+		branch, err := cloneHeadBranch(repo)
+		if err != nil {
+			die(exitNotSandboxable,
+				"could not read the branch checked out in '%s': %v; 'allod change run' refuses to sandbox anything it cannot name the branch of without running git",
+				repo, err)
+		}
 		if branch != entry.branch || !strings.HasPrefix(branch, "agent/") {
 			die(exitNotSandboxable,
 				"'%s' is checked out on branch '%s', not the 'agent/*' branch its ledger lists ('%s'); 'allod change run' refuses to sandbox anything else",
