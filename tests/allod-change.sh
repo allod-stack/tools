@@ -833,6 +833,40 @@ assert_status 0 \
   pass "cleanup removes the clone once the real remote shows it clean" ||
   fail "cleanup removes the clone once the real remote shows it clean" "still exists: $path"
 
+# A rebase-merged PR whose branch the forge deleted: the merged commit's hash on
+# master differs from the local one and the clone never fetched the rewrite, so
+# ancestry against the default-branch head dies on a missing object unless
+# cleanup fetches first, and patch equivalence, not ancestry, sees the work as
+# merged. allod/tools#297.
+repo="$HOME/work/cleanup-rebase-merge"
+init_repo "$repo" master
+desc="${RUN_ID}-cleanup-rebase-merge"
+path=$(begin_clone "$desc" "$repo")
+printf 'rebase-merged\n' > "$path/tracked.txt"
+git -C "$path" commit -qam "rebase-merged work"
+git -C "$path" push -q origin "HEAD:refs/heads/agent/$desc"
+# The forge side: apply the patch onto master under a new hash, delete the branch.
+git -C "$repo" fetch -q origin "agent/$desc"
+git -C "$repo" checkout -q -B "forge-rebase-${RUN_ID}" master
+git -C "$repo" cherry-pick FETCH_HEAD
+git -C "$repo" commit -q --amend -m 'rebase-merged work (forge)'
+git -C "$repo" push -q origin "HEAD:refs/heads/master"
+git -C "$repo" push -q origin --delete "agent/$desc"
+git -C "$repo" checkout -q master
+git -C "$repo" branch -qD "forge-rebase-${RUN_ID}"
+[[ "$(git -C "$path" rev-parse HEAD)" != "$(git -C "$repo" rev-parse origin/master)" ]] &&
+  pass "the fixture rebase-merge really produced a hash the clone has never seen" ||
+  fail "the fixture rebase-merge really produced a hash the clone has never seen" 'identical hashes: the fixture proves nothing'
+capture "$ALLOD" change list "$repo"
+assert_contains "$CAPTURE_OUTPUT" 'unknown' \
+  'list without a fetch reports the never-fetched rewrite as unknown, not clean'
+capture "$ALLOD" change cleanup "$path"
+assert_status 0 \
+  "cleanup fetches, so a rebase-merged branch deleted on origin cleans up instead of dying on a missing object"
+[[ ! -d "$path" ]] &&
+  pass "cleanup removes the rebase-merged clone" ||
+  fail "cleanup removes the rebase-merged clone" "still exists: $path"
+
 # A forged local remote-tracking ref claiming an unpushed branch already landed must not fool
 # cleanup either: only the real remote is trusted.
 repo="$HOME/work/unpushed-local-ref-lie"
@@ -2210,8 +2244,9 @@ git -C "$path" push -q origin HEAD
 capture "$ALLOD" change cleanup "$path"
 assert_status 0 "cleanup succeeds once '.git/shallow' is gone and the branch is pushed"
 
-# A relayed commit lands on the parent's default branch, not the clone's own branch, so this
-# correctly reads 'unpushed' and cleanup refuses to discard it.
+# A relayed commit lands on the parent's default branch under a new hash with the same patch,
+# so the clone's own branch never pushed reads as landed: patch equivalence, not ancestry.
+# The same judgment that lets cleanup take a rebase-merged, branch-deleted clone (above).
 repo="$HOME/work/cleanup-relayed"
 init_repo "$repo" master
 desc="${RUN_ID}-cleanup-relayed"
@@ -2229,7 +2264,7 @@ git -C "$repo" push -q origin master
 # A clone's refs/remotes/origin/* is its own, unshared with the parent, so it only learns of a
 # relayed push once it fetches for itself.
 git -C "$path" fetch -q origin
-assert_list_matches_cleanup "$repo" "$path" unpushed "a patch-equivalent relayed clone"
+assert_list_matches_cleanup "$repo" "$path" clean "a patch-equivalent relayed clone reads as landed, not unpushed"
 
 repo="$HOME/work/cleanup-regular"
 init_repo "$repo" master

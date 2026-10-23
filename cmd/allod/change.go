@@ -849,15 +849,10 @@ func unpushedCommitsForClone(dir, ledgerBranch string) (unpushedResult, string) 
 		if !ok {
 			return unpushedUnknown, "refs/heads/" + ledgerBranch + " is absent on origin, and origin's default branch head could not be resolved either"
 		}
-		ancestorOutput, ancestorStatus := captureCommand(dir, nil, true, "git", "merge-base", "--is-ancestor", "HEAD", defaultSHA)
-		switch ancestorStatus {
-		case 0:
-			return unpushedNo, ""
-		case 1:
-			return unpushedYes, ""
-		default:
-			return unpushedUnknown, "refs/heads/" + ledgerBranch + " is absent on origin; could not compare HEAD to origin's default branch head '" + defaultSHA + "': " + ancestorOutput
-		}
+		// The forge rebase-merges, so a merged commit's hash on the default
+		// branch differs from the local one and ancestry alone reads merged
+		// work as unpushed; judge by patch equivalence, as unpushedCommits does.
+		return unpushedAgainstBase(dir, defaultSHA)
 	default:
 		return unpushedUnknown, "could not check origin for refs/heads/" + ledgerBranch + ": " + output
 	}
@@ -1340,9 +1335,14 @@ func cleanupClone(parentRepo string, entry changeLedgerEntry) {
 	if dirty != "" {
 		die(1, "clone '%s' is dirty; clean it before cleanup", entry.path)
 	}
-	// unpushedCommitsForClone asks the real remote directly (git ls-remote),
-	// never a local remote-tracking ref, so there is nothing to fetch first
-	// any more: a stale or absent local ref cannot make it answer wrong.
+	// Fetch before judging: the remote's objects must exist locally for the
+	// comparison below, and a rebase-merge plus branch deletion is exactly the
+	// state a clone that never fetched cannot see. A stale local remote-tracking
+	// ref cannot make the answer wrong -- unpushedCommitsForClone asks the real
+	// remote via ls-remote -- but a missing object can.
+	if output, status := captureCommand(entry.path, nil, true, "git", "fetch", "--prune", "origin"); status != 0 {
+		die(1, "could not fetch origin in clone '%s': %s", entry.path, output)
+	}
 	result, detail := unpushedCommitsForClone(entry.path, entry.branch)
 	switch result {
 	case unpushedYes:
