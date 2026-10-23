@@ -27,7 +27,10 @@ says what to drive and what the result must look like.
   `snapshot` (versioned JSON of the immutable commits, fails on
   contradictory data), `review-comments`, `reply`, `edit`, `comment`,
   `create` (head defaults to the current branch, base to the repository
-  default), `close [-c] [-d]` by number, URL or branch, `find-by-head`.
+  default), `close [-c] [-d]` by number, URL or branch, `find-by-head`
+  (`-s open`, default, a bare number; `-s all` prints `<number>\t<state>`,
+  state `open`, `closed`, or `merged`, for a caller that must find a head
+  branch's pull request in any state).
 - `pr merge <target> (-m|-r|-s) [-d] [--match-head-commit <sha>] [-t] [-b|-F]`:
   reads the PR; refuses when it is not open, already merged, not mergeable
   or has no `mergeable` field (exit 1, no POST); refuses when
@@ -99,7 +102,7 @@ duration, not `(cached)`. The path each subtest proves:
 | `pr merge` message fields | `TestPRMerge/-t_sets_MergeTitleField`, `/-b_sets_MergeMessageField`, `/-F_file_sets_MergeMessageField`, `/-F_-_reads_the_message_from_stdin` |
 | `pr create`, `edit`, `comment`, `reply` | `TestMutations/pr_create_infers_default_branch_and_posts_multiline_body`, `/pr_create_with_short_flags_avoids_metadata_lookup`, `/pr_edit_preserves_an_explicitly_empty_body`, `/pr_comment_preserves_multiline_content`, `/pr_reply_looks_up_the_original_inline_comment_first` |
 | `pr close`, `-c`, `-d`, by URL, by branch, no match | `TestPRClose/plain_close_makes_one_API_request`, `/close_with_a_comment_posts_it_before_closing`, `/delete-branch_fetches_PR_details_then_deletes_after_closing`, `/accepts_a_PR_URL_as_the_close_target`, `/branch_target_looks_up_the_PR_first`, `/rejects_a_branch_with_no_matching_PR`, `/skips_branch_deletion_when_head_equals_base` |
-| `pr list`, `view`, `view --json`, merged rendering, `review-comments`, `find-by-head` | `TestReadPRList`, `TestReadPRListState`, `TestReadPRView`, `TestReadPRViewMerged`, `TestReadPRViewTimestamps`, `TestReadPRReviewComments`, `TestReadPRFindByHead` |
+| `pr list`, `view`, `view --json`, merged rendering, `review-comments`, `find-by-head`, `find-by-head -s all` | `TestReadPRList`, `TestReadPRListState`, `TestReadPRView`, `TestReadPRViewMerged`, `TestReadPRViewTimestamps`, `TestReadPRReviewComments`, `TestReadPRFindByHead`, `TestReadPRFindByHeadStateAll` |
 | `issue create`, `edit`, `labels`, `milestone`, `comment` | `TestMutations/issue_*` (sixteen subtests, label and milestone resolution by name first) |
 | `issue close` plain, with comment, duplicate, not planned | `TestIssueClose/*` |
 | `issue list`, `view`, `labels`, `milestone` reads | `TestReadIssueList`, `TestReadIssueView`, `TestReadIssueViewTimestamps`, `TestReadIssueLabels`, `TestReadIssueMilestone` |

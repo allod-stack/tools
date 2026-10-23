@@ -171,6 +171,10 @@ func evidenceLines(evidence []evidenceRef) string {
 	return strings.Join(lines, "\n")
 }
 
+// This call stands in for 'allod change run': the clone is this process's
+// own, made and driven end to end in one place, so it sets the same marker
+// 'run' sets inside its sandbox, or 'record'/'submit' would refuse it as an
+// overseer's ledgered clone to leave alone.
 func runChangeInWorktree(worktree string, args []string) (output string, code int) {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -180,6 +184,15 @@ func runChangeInWorktree(worktree string, args []string) (output string, code in
 	if err := os.Chdir(worktree); err != nil {
 		return "", 1
 	}
+	previousSandboxEnv, hadSandboxEnv := os.LookupEnv(changeSandboxEnv)
+	os.Setenv(changeSandboxEnv, "1")
+	defer func() {
+		if hadSandboxEnv {
+			os.Setenv(changeSandboxEnv, previousSandboxEnv)
+		} else {
+			os.Unsetenv(changeSandboxEnv)
+		}
+	}()
 	var buf bytes.Buffer
 	prevOut := stdout
 	stdout = &buf

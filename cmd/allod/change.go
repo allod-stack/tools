@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,8 +10,18 @@ import (
 	"forge.anarch.diy/allod/tools/internal/protection"
 )
 
+// changeSandboxEnv is the marker 'run' sets inside the sandbox it builds
+// (never on the pass-through allowlist, so nothing outside can set it):
+// with it set, 'record' and 'submit' resolve their repository as an
+// ordinary one rather than refuse a worker's own clone as the overseer's to
+// handle from outside.
+const changeSandboxEnv = "ALLOD_CHANGE_SANDBOX"
+
+func insideSandbox() bool {
+	return os.Getenv(changeSandboxEnv) == "1"
+}
+
 func changeMain(args []string) {
-	defer func() { cloneGitEnv = nil }()
 	if len(args) == 0 {
 		fmt.Fprint(stderr, changeUsageText)
 		exit(1)
@@ -43,13 +51,10 @@ func changeMain(args []string) {
 // 'change record', so a caller can tell this one apart.
 const exitMisplacedCheckout = 8
 
-// exitCloneOriginMismatch is unused by every other refusal, so a caller can
-// tell a clone whose origin no longer matches its parent's apart from the rest.
-const exitCloneOriginMismatch = 9
-
-// exitCloneConfigUnsafe is unused by every other refusal, so a caller can tell
-// a clone whose own '.git/config' could run a command apart from the rest.
-const exitCloneConfigUnsafe = 11
+// exitLedgeredClone is unused by every other refusal, so a caller can tell
+// "this path is a worker's clone, and the worker itself records and submits
+// it from inside its own sandbox" apart from the rest.
+const exitLedgeredClone = 11
 
 func requireCanonicalCheckout(found protection.Status) {
 	if !found.Misplaced() {
@@ -120,392 +125,6 @@ func repoUnderWorkDir(repo string) bool {
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-// nonEmptyLines splits git's one-URL-per-line output, dropping blanks.
-func nonEmptyLines(output string) []string {
-	var lines []string
-	for _, line := range strings.Split(output, "\n") {
-		if line != "" {
-			lines = append(lines, line)
-		}
-	}
-	return lines
-}
-
-// Compare every fetch and push URL; Git can push to multiple pushurl values.
-func requireCloneOriginMatches(parent, clone string) {
-	if reason := cloneOriginMismatchReason(parent, clone); reason != "" {
-		die(exitCloneOriginMismatch, "%s", reason)
-	}
-}
-
-func cloneOriginMismatchReason(parent, clone string) string {
-	if info, err := os.Stat(clone); err != nil || !info.IsDir() {
-		return ""
-	}
-	parentFetch, _ := gitOutput(parent, "remote", "get-url", "origin")
-	cloneFetchAll, _ := gitOutput(clone, "remote", "get-url", "--all", "origin")
-	clonePushAll, _ := gitOutput(clone, "remote", "get-url", "--push", "--all", "origin")
-	cloneFetch := nonEmptyLines(cloneFetchAll)
-	clonePush := nonEmptyLines(clonePushAll)
-	if len(cloneFetch) == 1 && cloneFetch[0] == parentFetch &&
-		len(clonePush) == 1 && clonePush[0] == parentFetch {
-		return ""
-	}
-	return fmt.Sprintf(
-		"clone '%s' has fetch URL(s) %v and push URL(s) %v, but the repo that ledgered it, '%s', has fetch URL '%s'; a worker can edit its own clone's remote, so this refuses to push or judge anything against an origin its overseer did not set",
-		clone, cloneFetch, clonePush, parent, parentFetch)
-}
-
-// Clone config is worker owned. Only inert keys and pinned branch settings pass.
-var changeConfigAllowlist = map[string]bool{
-	"core.repositoryformatversion": true,
-	"core.filemode":                true,
-	"core.logallrefupdates":        true,
-	"core.ignorecase":              true,
-	"core.precomposeunicode":       true,
-	"remote.origin.url":            true,
-	"remote.origin.pushurl":        true,
-	// git itself writes these for a reftable or sha256 repository; neither
-	// runs anything. extensions.worktreeconfig, and any other extensions.*
-	// key, stays refused — not named here, on purpose.
-	"extensions.refstorage":   true,
-	"extensions.objectformat": true,
-	// core.bare and remote.origin.fetch are not here, on purpose: both are
-	// pinned to the one value an ordinary clone has, below, rather than
-	// accepted with any value at all.
-}
-
-// changeConfigFetchRefspec is the fetch refspec an ordinary 'git clone'
-// writes; 'remote.origin.fetch' is allowed only with exactly this value.
-const changeConfigFetchRefspec = "+refs/heads/*:refs/remotes/origin/*"
-
-func changeConfigKeyAllowed(key, value, ledgerBranch string) bool {
-	if changeConfigAllowlist[key] {
-		return true
-	}
-	switch key {
-	case "core.bare":
-		return value == "false"
-	case "remote.origin.fetch":
-		return value == changeConfigFetchRefspec
-	}
-	if rest, ok := strings.CutPrefix(key, "branch."); ok {
-		name, ok := strings.CutPrefix(rest, ledgerBranch+".")
-		if !ok {
-			return false
-		}
-		switch name {
-		case "remote":
-			return value == "origin"
-		case "merge":
-			return value == "refs/heads/"+ledgerBranch
-		}
-		return false
-	}
-	return false
-}
-
-// git rewrites FETCH_HEAD, ORIG_HEAD, COMMIT_EDITMSG, packed-refs and reflogs without a
-// lockfile, so a symlink anywhere under .git redirects an outside command's write.
-func gitDirSymlinkUnsafeReason(clone, gitPath string) string {
-	var reason string
-	filepath.WalkDir(gitPath, func(path string, entry fs.DirEntry, err error) error {
-		if reason != "" {
-			return fs.SkipAll
-		}
-		if path == gitPath {
-			return nil
-		}
-		if err != nil {
-			reason = fmt.Sprintf("clone '%s' has a '.git' entry that could not be walked: %v", clone, err)
-			return fs.SkipAll
-		}
-		if entry.Type()&os.ModeSymlink != 0 {
-			rel, relErr := filepath.Rel(gitPath, path)
-			if relErr != nil {
-				rel = path
-			}
-			reason = fmt.Sprintf(
-				"clone '%s' has a symlink at '.git/%s'; git writes many files under .git without a lockfile, so an outside command's write there could go through it to wherever a worker chose, outside the clone entirely",
-				clone, filepath.ToSlash(rel))
-			return fs.SkipAll
-		}
-		return nil
-	})
-	return reason
-}
-
-// Inspect worker metadata before any host-side Git command uses the clone.
-// Empty means safe; list uses this form to keep reporting other clones.
-func cloneConfigUnsafeReason(clone, ledgerBranch, parent string) string {
-	if _, err := os.Stat(clone); err != nil {
-		return ""
-	}
-	gitPath := filepath.Join(clone, ".git")
-	if info, err := os.Lstat(gitPath); err != nil || !info.IsDir() {
-		return fmt.Sprintf(
-			"clone '%s' has no ordinary '.git' directory (missing, a gitfile, or a symlink); a worker can point '.git' at a directory of its own whose config this gate never reads but git still loads, so this refuses rather than follow it",
-			clone)
-	}
-	for _, worktreeFile := range []string{"commondir", "gitdir"} {
-		if _, err := os.Stat(filepath.Join(gitPath, worktreeFile)); err == nil {
-			return fmt.Sprintf(
-				"clone '%s' has a '.git/%s' file; that is how a linked worktree's own '.git' redirects git to load config, refs, and hooks from another directory entirely, one this gate never reads, so this refuses rather than trust it",
-				clone, worktreeFile)
-		}
-	}
-	if reason := gitDirSymlinkUnsafeReason(clone, gitPath); reason != "" {
-		return reason
-	}
-	configPath := filepath.Join(gitPath, "config")
-	if _, err := os.Stat(configPath); err != nil {
-		return fmt.Sprintf("clone '%s' has no '.git/config' to read", clone)
-	}
-	output, status := captureCommand("", nil, true, "git", "config", "--file", configPath, "--list")
-	if status != 0 {
-		return fmt.Sprintf(
-			"clone '%s' has a '.git/config' that 'git config --file --list' could not read (exit %d); this refuses rather than treat an unreadable config as an empty, safe one",
-			clone, status)
-	}
-	for _, line := range strings.Split(output, "\n") {
-		if line == "" {
-			continue
-		}
-		key, value, _ := strings.Cut(line, "=")
-		if changeConfigKeyAllowed(key, value, ledgerBranch) {
-			continue
-		}
-		return fmt.Sprintf(
-			"clone '%s' has a '.git/config' key '%s' that is not on the allowlist; a worker's own config can run a command the moment anything outside the sandbox next touches the clone, so this refuses first",
-			clone, key)
-	}
-	hooksDir := filepath.Join(gitPath, "hooks")
-	if entries, err := os.ReadDir(hooksDir); err == nil {
-		for _, hookEntry := range entries {
-			if strings.HasSuffix(hookEntry.Name(), ".sample") {
-				continue
-			}
-			info, err := hookEntry.Info()
-			if err != nil {
-				return fmt.Sprintf("clone '%s' has a hook that cannot be inspected: %v", clone, err)
-			}
-			if info.IsDir() || info.Mode()&0111 == 0 {
-				continue
-			}
-			return fmt.Sprintf(
-				"clone '%s' has an executable hook '.git/hooks/%s'; a worker's own hook runs the moment anything outside the sandbox next touches the clone, so this refuses first",
-				clone, hookEntry.Name())
-		}
-	} else if !os.IsNotExist(err) {
-		return fmt.Sprintf("clone '%s' has hooks that cannot be inspected: %v", clone, err)
-	}
-	if _, err := os.Stat(filepath.Join(gitPath, "config.worktree")); err == nil {
-		return fmt.Sprintf(
-			"clone '%s' has a '.git/config.worktree', a second place to carry a key the allowlist never sees; this refuses it outright",
-			clone)
-	}
-	if _, err := os.Stat(filepath.Join(gitPath, "info", "grafts")); err == nil {
-		return fmt.Sprintf(
-			"clone '%s' has a '.git/info/grafts' file; it rewrites a commit's own parentage as git reports it, which 'merge-base --is-ancestor' walks to judge a branch pushed, so this refuses rather than trust it",
-			clone)
-	}
-	if _, err := os.Stat(filepath.Join(gitPath, "shallow")); err == nil {
-		return fmt.Sprintf(
-			"clone '%s' has a '.git/shallow' file; a shallow clone's own grafted-in boundary commits rewrite parentage the same way '.git/info/grafts' does, so this refuses rather than trust it",
-			clone)
-	}
-	if _, err := os.Lstat(filepath.Join(gitPath, "objects", "info", "commit-graph")); err == nil {
-		return fmt.Sprintf("clone '%s' has a worker-controlled commit-graph; ancestry checks refuse it", clone)
-	} else if !os.IsNotExist(err) {
-		return fmt.Sprintf("clone '%s' commit-graph cannot be inspected: %v", clone, err)
-	}
-	if _, err := os.Lstat(filepath.Join(gitPath, "objects", "info", "commit-graphs")); err == nil {
-		return fmt.Sprintf("clone '%s' has worker-controlled commit-graphs; ancestry checks refuse them", clone)
-	} else if !os.IsNotExist(err) {
-		return fmt.Sprintf("clone '%s' commit-graphs cannot be inspected: %v", clone, err)
-	}
-	if output, status := captureCommand(clone, nil, true, "git", "for-each-ref", "refs/replace"); status != 0 {
-		return fmt.Sprintf(
-			"clone '%s': 'git for-each-ref refs/replace' could not be read (exit %d): %s; this refuses rather than treat an unreadable answer as 'no replace refs'",
-			clone, status, output)
-	} else if strings.TrimSpace(output) != "" {
-		return fmt.Sprintf(
-			"clone '%s' has at least one ref under 'refs/replace/'; it substitutes a different object's content wherever the replaced sha is looked up during traversal, which could make an unpushed commit's parent chain look descended from a remote head it never was, so this refuses rather than trust it",
-			clone)
-	}
-	if populated, errReason := hasPopulatedSubmodule(clone); errReason != "" {
-		return fmt.Sprintf("clone '%s' could not be checked for a populated submodule: %s; this refuses rather than treat an unreadable answer as 'no submodule'", clone, errReason)
-	} else if populated {
-		return fmt.Sprintf(
-			"clone '%s' has a populated submodule, or a '.git/modules' directory; 'git status' in the parent descends into a populated submodule and loads its own config, which this gate never reads, so sandboxed clones do not support them",
-			clone)
-	}
-	if reason := trackedHooksUnsafeReason(clone, parent); reason != "" {
-		return reason
-	}
-	return ""
-}
-
-func requireCloneConfigSafe(clone, ledgerBranch, parent string) {
-	if reason := cloneConfigUnsafeReason(clone, ledgerBranch, parent); reason != "" {
-		die(exitCloneConfigUnsafe, "%s", reason)
-	}
-}
-
-func trackedHooksDirName(repo string) string {
-	if data, err := os.ReadFile(filepath.Join(repo, ".hookspath")); err == nil {
-		line, _, _ := strings.Cut(string(data), "\n")
-		return line
-	}
-	if info, err := os.Stat(filepath.Join(repo, ".hooks")); err == nil && info.IsDir() {
-		return ".hooks"
-	}
-	return ""
-}
-
-func gitShowBytes(dir, object string) ([]byte, bool) {
-	cmd := exec.Command("git", "--no-replace-objects", "-C", dir, "show", object)
-	cmd.Env = gitCommandEnv()
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	if err := cmd.Run(); err != nil {
-		return nil, false
-	}
-	return out.Bytes(), true
-}
-
-// The worker's tracked hooks must match the parent's remote base byte for byte.
-// An overseer-side dispatcher otherwise executes worker edits as host user.
-func trackedHooksUnsafeReason(clone, parent string) string {
-	cloneHookspath, cloneErr := os.ReadFile(filepath.Join(clone, ".hookspath"))
-	parentHookspath, parentErr := os.ReadFile(filepath.Join(parent, ".hookspath"))
-	cloneHas, parentHas := cloneErr == nil, parentErr == nil
-	if cloneHas != parentHas || !bytes.Equal(cloneHookspath, parentHookspath) {
-		return fmt.Sprintf(
-			"clone '%s' has a '.hookspath' that differs from the parent checkout's own working-tree '.hookspath'; git-hooks/protected-refs-policy runs whatever directory it names from the clone's own working tree, so this refuses rather than trust a worker-controlled redirect",
-			clone)
-	}
-
-	hooksDirName := trackedHooksDirName(clone)
-	if hooksDirName == "" {
-		return ""
-	}
-	hooksDirPath := filepath.Join(clone, filepath.FromSlash(hooksDirName))
-	if info, err := os.Stat(hooksDirPath); err != nil || !info.IsDir() {
-		return ""
-	}
-
-	defaultBranch, ok := defaultRemoteBranch(parent)
-	if !ok {
-		return fmt.Sprintf(
-			"clone '%s' has a tracked hooks directory ('%s'), but the parent's own 'origin/<default branch>' cannot be resolved to check it against; this refuses rather than trust it unverified",
-			clone, hooksDirName)
-	}
-	base := "origin/" + defaultBranch
-
-	status, ok := gitOutput(clone, "status", "--porcelain", "--ignored", "--", hooksDirName)
-	if !ok {
-		return fmt.Sprintf(
-			"clone '%s' has a tracked hooks directory ('%s') whose 'git status --porcelain --ignored' could not be read; this refuses rather than skip the untracked/ignored check",
-			clone, hooksDirName)
-	}
-	for _, line := range strings.Split(status, "\n") {
-		if strings.HasPrefix(line, "??") || strings.HasPrefix(line, "!!") {
-			return fmt.Sprintf(
-				"clone '%s' has an untracked or ignored file under its tracked hooks directory ('%s'): %s",
-				clone, hooksDirName, strings.TrimSpace(line))
-		}
-	}
-
-	var reason string
-	filepath.WalkDir(hooksDirPath, func(path string, entry fs.DirEntry, err error) error {
-		if reason != "" {
-			return fs.SkipAll
-		}
-		if err != nil {
-			reason = fmt.Sprintf("clone '%s' has a tracked hooks directory ('%s') that could not be walked: %v", clone, hooksDirName, err)
-			return fs.SkipAll
-		}
-		if entry.IsDir() {
-			return nil
-		}
-		rel, relErr := filepath.Rel(clone, path)
-		if relErr != nil {
-			return nil
-		}
-		relSlash := filepath.ToSlash(rel)
-		cloneContent, readErr := os.ReadFile(path)
-		if readErr != nil {
-			reason = fmt.Sprintf("clone '%s' has a tracked hooks file '%s' that could not be read: %v", clone, relSlash, readErr)
-			return fs.SkipAll
-		}
-		baseContent, ok := gitShowBytes(parent, base+":"+relSlash)
-		if !ok {
-			reason = fmt.Sprintf(
-				"clone '%s' has a file under its tracked hooks directory ('%s') that '%s' does not have; a worker's own addition there runs the moment git-hooks/protected-refs-policy next touches the clone, so this refuses first",
-				clone, relSlash, base)
-			return fs.SkipAll
-		}
-		if !bytes.Equal(cloneContent, baseContent) {
-			reason = fmt.Sprintf(
-				"clone '%s' has a tracked hook ('%s') that differs from '%s''s own copy; a worker's own edit there runs the moment git-hooks/protected-refs-policy next touches the clone, so this refuses first",
-				clone, relSlash, base)
-			return fs.SkipAll
-		}
-		baseMode := treeEntryMode(parent, base, relSlash)
-		cloneIndexMode := indexEntryMode(clone, relSlash)
-		if baseMode != "" && cloneIndexMode != "" && cloneIndexMode != baseMode {
-			reason = fmt.Sprintf(
-				"clone '%s' has a tracked hook ('%s') whose index mode (%s) differs from '%s''s own tree entry (%s); a worker's own 'git update-index --chmod' there runs the moment git-hooks/protected-refs-policy next touches the clone, so this refuses first",
-				clone, relSlash, cloneIndexMode, base, baseMode)
-			return fs.SkipAll
-		}
-		fileInfo, statErr := os.Stat(path)
-		if statErr != nil {
-			reason = fmt.Sprintf("clone '%s' has a tracked hooks file '%s' that could not be stat'd: %v", clone, relSlash, statErr)
-			return fs.SkipAll
-		}
-		baseExecutable := baseMode == "100755"
-		cloneExecutable := fileInfo.Mode()&0111 != 0
-		if baseMode != "" && baseExecutable != cloneExecutable {
-			reason = fmt.Sprintf(
-				"clone '%s' has a tracked hook ('%s') whose working-tree executable bit (%v) differs from '%s''s own tree entry (%s); a worker's own 'chmod' there runs the moment git-hooks/protected-refs-policy next touches the clone, so this refuses first",
-				clone, relSlash, cloneExecutable, base, baseMode)
-			return fs.SkipAll
-		}
-		return nil
-	})
-	return reason
-}
-
-// treeEntryMode reads the git mode ('100644', '100755', ...) of path in
-// gitRef within dir, with 'git ls-tree', or "" if it cannot be resolved.
-func treeEntryMode(dir, gitRef, path string) string {
-	output, ok := gitOutput(dir, "ls-tree", gitRef, "--", path)
-	if !ok || output == "" {
-		return ""
-	}
-	fields := strings.Fields(output)
-	if len(fields) == 0 {
-		return ""
-	}
-	return fields[0]
-}
-
-// indexEntryMode reads the git mode path carries in dir's own index, with
-// 'git ls-files --stage', or "" if it is not staged there at all.
-func indexEntryMode(dir, path string) string {
-	output, ok := gitOutput(dir, "ls-files", "--stage", "--", path)
-	if !ok || output == "" {
-		return ""
-	}
-	fields := strings.Fields(output)
-	if len(fields) == 0 {
-		return ""
-	}
-	return fields[0]
-}
-
 func cloneFrom(parent, path, originURL string) (string, int) {
 	if output, status := captureCommand("", nil, true, "git", "clone", "--no-hardlinks", "--no-checkout", parent, path); status != 0 {
 		return output, status
@@ -521,10 +140,6 @@ func cloneFrom(parent, path, originURL string) (string, int) {
 	if output, status := captureCommand(path, nil, true, "git", "remote", "set-head", "origin", "-a"); status != 0 {
 		return output, status
 	}
-	// A parent that has gc'd carries objects/info/commit-graph, which clone copies in and the
-	// gate would refuse; clear it here, since it is the parent's doing, not the worker's.
-	os.Remove(filepath.Join(path, ".git", "objects", "info", "commit-graph"))
-	os.RemoveAll(filepath.Join(path, ".git", "objects", "info", "commit-graphs"))
 	return "", 0
 }
 
@@ -763,8 +378,8 @@ const (
 	unpushedUnknown
 )
 
-// unpushedAgainstBase is unpushedCommits' and unpushedCommitsForClone's
-// shared tail, once each has resolved what to compare HEAD against.
+// unpushedAgainstBase is unpushedCommits' own tail, once it has resolved
+// what to compare HEAD against.
 func unpushedAgainstBase(dir, base string) (unpushedResult, string) {
 	merges, status := captureCommand(dir, nil, false, "git", "rev-list", "--merges", base+"..HEAD")
 	if status != 0 {
@@ -810,54 +425,9 @@ func unpushedCommits(dir string) (unpushedResult, string) {
 	return unpushedAgainstBase(dir, base)
 }
 
-func remoteDefaultBranchSHA(dir string) (string, bool) {
-	output, status := captureCommand(dir, nil, true, "git", "ls-remote", "--symref", "origin", "HEAD")
-	if status != 0 {
-		return "", false
-	}
-	for _, line := range strings.Split(output, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) == 2 && fields[1] == "HEAD" && fields[0] != "ref:" {
-			return fields[0], true
-		}
-	}
-	return "", false
-}
-
-// Ask the real remote; a worker can forge remote-tracking refs and upstreams.
-// Unknown ancestry never counts as pushed.
-func unpushedCommitsForClone(dir, ledgerBranch string) (unpushedResult, string) {
-	output, status := captureCommand(dir, nil, true, "git", "ls-remote", "--exit-code", "origin", "refs/heads/"+ledgerBranch)
-	switch status {
-	case 0:
-		fields := strings.Fields(output)
-		if len(fields) == 0 {
-			return unpushedUnknown, "ls-remote origin returned no commit for refs/heads/" + ledgerBranch
-		}
-		remoteSHA := fields[0]
-		ancestorOutput, ancestorStatus := captureCommand(dir, nil, true, "git", "merge-base", "--is-ancestor", "HEAD", remoteSHA)
-		switch ancestorStatus {
-		case 0:
-			return unpushedNo, ""
-		case 1:
-			return unpushedYes, ""
-		default:
-			return unpushedUnknown, "could not compare HEAD to the remote's '" + remoteSHA + "': " + ancestorOutput
-		}
-	case 2:
-		defaultSHA, ok := remoteDefaultBranchSHA(dir)
-		if !ok {
-			return unpushedUnknown, "refs/heads/" + ledgerBranch + " is absent on origin, and origin's default branch head could not be resolved either"
-		}
-		// A rebase-merge lands under a new hash; judge by patch, as unpushedCommits does.
-		return unpushedAgainstBase(dir, defaultSHA)
-	default:
-		return unpushedUnknown, "could not check origin for refs/heads/" + ledgerBranch + ": " + output
-	}
-}
-
-// workingTreeState is the tail a linked worktree shares with a standalone
-// clone once it is known the directory exists and is not detached.
+// workingTreeState is a legacy linked worktree's state once it is known the
+// directory exists and is not detached; a standalone clone's state comes
+// from the forge instead, never from its own disk.
 func workingTreeState(path string) string {
 	if populated, _ := hasPopulatedSubmodule(path); populated {
 		return "submodule"
@@ -889,41 +459,31 @@ func worktreeState(path string, record worktreeRecord) string {
 	return workingTreeState(path)
 }
 
-func workingTreeStateForClone(path, ledgerBranch string) string {
-	status, ok := gitOutput(path, "status", "--porcelain")
-	if !ok {
-		return "unknown"
+// forgePRStateForBranch returns "" for no pull request, a short PR state when
+// one exists, and ok=false when the forge cannot be reached.
+func forgePRStateForBranch(parentRepo, branch string) (state string, ok bool) {
+	output, status := captureCommand(parentRepo, nil, true, "forge", "pr", "find-by-head", "-s", "all", branch)
+	if status != 0 {
+		return "", false
 	}
-	if status != "" {
-		return "dirty"
+	output = strings.TrimSpace(output)
+	if output == "" {
+		return "", true
 	}
-	result, _ := unpushedCommitsForClone(path, ledgerBranch)
-	switch result {
-	case unpushedYes:
-		return "unpushed"
-	case unpushedNo:
-		return "clean"
-	default:
-		return "unknown"
+	_, state, found := strings.Cut(output, "\t")
+	if !found {
+		return "", false
 	}
-}
-
-func cloneState(path, ledgerBranch string) string {
-	if info, err := os.Stat(path); err != nil || !info.IsDir() {
-		return "missing"
-	}
-	if branch, _ := gitOutput(path, "branch", "--show-current"); branch == "" {
-		return "detached"
-	}
-	return workingTreeStateForClone(path, ledgerBranch)
+	return state, true
 }
 
 // Hold the ledger lock across every clone read. A running worker gets a
-// "running" row without a host-side Git command against its clone.
+// "running" row without a host-side Git command against its clone; every
+// other row is read from the forge, never from the clone's own disk.
 func listRow(main, name string, entry changeLedgerEntry) {
 	lockPath, ok := ledgerFilePath(main, entry)
 	if !ok {
-		fmt.Fprintf(stdout, "%s\t%s\t%s\tunsafe\n", name, entry.path, entry.branch)
+		fmt.Fprintf(stdout, "%s\t%s\t%s\tunknown\n", name, entry.path, entry.branch)
 		return
 	}
 	lock, held := lockLedgerExclusive(lockPath)
@@ -932,26 +492,19 @@ func listRow(main, name string, entry changeLedgerEntry) {
 		return
 	}
 	defer lock.Release()
-	enableCloneGitEnv()
-	// A clone that fails the gate gets its own row, state 'unsafe', and
-	// no further git command ever runs in it; one unsafe clone must not
-	// stop 'list' from reporting every other one.
-	if cloneConfigUnsafeReason(entry.path, entry.branch, main) != "" {
-		fmt.Fprintf(stdout, "%s\t%s\t%s\tunsafe\n", name, entry.path, entry.branch)
+	if _, err := os.Stat(entry.path); os.IsNotExist(err) {
+		fmt.Fprintf(stdout, "%s\t%s\t%s\tmissing\n", name, entry.path, entry.branch)
 		return
 	}
-	// A clone whose origin no longer matches the parent's is exactly
-	// what 'cleanup' refuses (exit 9): 'list' must never call that
-	// 'clean', the one state that promises cleanup would succeed.
-	if cloneOriginMismatchReason(main, entry.path) != "" {
-		fmt.Fprintf(stdout, "%s\t%s\t%s\tunsafe\n", name, entry.path, entry.branch)
+	state, ok := forgePRStateForBranch(main, entry.branch)
+	if !ok {
+		fmt.Fprintf(stdout, "%s\t%s\t%s\tunknown\n", name, entry.path, entry.branch)
 		return
 	}
-	if branch, _ := gitOutput(entry.path, "branch", "--show-current"); branch != "" && branch != entry.branch {
-		fmt.Fprintf(stdout, "%s\t%s\t%s\tmoved\n", name, entry.path, entry.branch)
-		return
+	if state == "" {
+		state = "unsubmitted"
 	}
-	fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", name, entry.path, entry.branch, cloneState(entry.path, entry.branch))
+	fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", name, entry.path, entry.branch, state)
 }
 
 func listRepo(repoDir string) {
@@ -1052,41 +605,30 @@ func changeRecord(args []string) {
 			die(1, "unexpected argument for change record: %s", args[0])
 		}
 	}
-	repo, parentRepo, entry, isClone := resolveCloneOrRepo("")
-	if isClone {
-		lock := requireExclusiveLedgerLock(parentRepo, entry)
-		defer lock.Release()
-		enableCloneGitEnv()
-		requireCloneConfigSafe(repo, entry.branch, parentRepo)
+	sandboxed := insideSandbox()
+	repo, _, entry, isClone := resolveCloneOrRepo("")
+	if isClone && !sandboxed {
+		die(exitLedgeredClone,
+			"'%s' is a sandboxed worker's clone; the worker records and submits it from inside its own sandbox, not the overseer from outside: run 'allod change run %s -- allod change record ...'",
+			repo, entry.path)
 	}
-	protectionRepo := repo
-	if isClone {
-		protectionRepo = parentRepo
-	}
-	found, isProtected := lookupProtection(protectionRepo)
-	requireCanonicalCheckout(found)
 
-	if isClone {
-		requireCloneOriginMatches(parentRepo, repo)
+	found, isProtected := lookupProtection(repo)
+	if !sandboxed {
+		requireCanonicalCheckout(found)
 	}
 
 	branch := currentBranch(repo)
 
-	// Only the ledger's branch is trusted for a clone: a worker can rewrite the
-	// clone-owned handoff file, not the parent's ledger. Legacy worktrees keep the handoff check.
-	if isClone {
-		if branch != entry.branch {
-			die(3, "clone '%s' now has branch '%s' checked out, but its ledger lists branch '%s'; the checkout was moved after begin ran, so record refuses to commit into the wrong branch", repo, branch, entry.branch)
-		}
-	} else {
-		gitDir, ok := gitOutput(repo, "rev-parse", "--path-format=absolute", "--git-dir")
-		if !ok {
-			exit(1)
-		}
-		if handoff, err := os.ReadFile(filepath.Join(gitDir, "allod-change-branch")); err == nil {
-			if expected := strings.TrimSpace(string(handoff)); expected != branch {
-				die(3, "checkout '%s' now has branch '%s' checked out, but 'allod change begin' handed out branch '%s'; the checkout was moved after begin ran, so record refuses to commit into the wrong branch", repo, branch, expected)
-			}
+	// The handoff pin catches an accidental branch move; a worker can rewrite
+	// the pin, but only deliberately.
+	gitDir, ok := gitOutput(repo, "rev-parse", "--path-format=absolute", "--git-dir")
+	if !ok {
+		exit(1)
+	}
+	if handoff, err := os.ReadFile(filepath.Join(gitDir, "allod-change-branch")); err == nil {
+		if expected := strings.TrimSpace(string(handoff)); expected != branch {
+			die(3, "checkout '%s' now has branch '%s' checked out, but 'allod change begin' handed out branch '%s'; the checkout was moved after begin ran, so record refuses to commit into the wrong branch", repo, branch, expected)
 		}
 	}
 
@@ -1094,8 +636,9 @@ func changeRecord(args []string) {
 		die(2, "refusing to commit directly to protected branch '%s'; run 'allod change begin' first", branch)
 	}
 
-	// A clone and a linked worktree both belong to one agent; only a shared main checkout can hold another's edits.
-	if len(files) == 0 && !isClone && mainRepoDir(repo) == repo {
+	// A sandboxed worker's clone and a linked worktree both belong to one
+	// agent; only a shared main checkout can hold another's edits.
+	if len(files) == 0 && !sandboxed && mainRepoDir(repo) == repo {
 		if diff, ok := gitOutput(repo, "diff", "--name-only"); ok && diff != "" {
 			die(7, "refusing to stage unnamed tracked changes in a shared checkout: %s; use --files to name what to record", strings.ReplaceAll(diff, "\n", ", "))
 		}
@@ -1116,13 +659,7 @@ func changeRecord(args []string) {
 	}
 	shouldCommit := !gitQuiet(repo, "diff", "--cached", "--quiet")
 	if !shouldCommit {
-		var result unpushedResult
-		var detail string
-		if isClone {
-			result, detail = unpushedCommitsForClone(repo, entry.branch)
-		} else {
-			result, detail = unpushedCommits(repo)
-		}
+		result, detail := unpushedCommits(repo)
 		switch result {
 		case unpushedYes:
 		case unpushedNo:
@@ -1242,34 +779,32 @@ func changeSubmit(args []string) {
 	if !titleSet || title == "" {
 		die(1, "change submit requires a non-empty title")
 	}
-	repo, parentRepo, entry, isClone := resolveCloneOrRepo("")
-	protectionRepo := repo
-	if isClone {
-		lock := requireExclusiveLedgerLock(parentRepo, entry)
-		defer lock.Release()
-		enableCloneGitEnv()
-		requireCloneConfigSafe(repo, entry.branch, parentRepo)
-		protectionRepo = parentRepo
-		requireCloneOriginMatches(parentRepo, repo)
+	sandboxed := insideSandbox()
+	repo, _, entry, isClone := resolveCloneOrRepo("")
+	if isClone && !sandboxed {
+		die(exitLedgeredClone,
+			"'%s' is a sandboxed worker's clone; the worker records and submits it from inside its own sandbox, not the overseer from outside: run 'allod change run %s -- allod change submit ...'",
+			repo, entry.path)
 	}
-	found, _ := lookupProtection(protectionRepo)
-	requireCanonicalCheckout(found)
+
+	found, _ := lookupProtection(repo)
+	if !sandboxed {
+		requireCanonicalCheckout(found)
+	}
 	branch := currentBranch(repo)
-	// Same family as record's moved-checkout refusal: the ledger's branch is
-	// the only one trusted for a clone, checked before it is read for the PR.
-	if isClone && branch != entry.branch {
-		die(3, "clone '%s' now has branch '%s' checked out, but its ledger lists branch '%s'; the checkout was moved after begin ran, so submit refuses to open a PR from the wrong branch", repo, branch, entry.branch)
+	gitDir, ok := gitOutput(repo, "rev-parse", "--path-format=absolute", "--git-dir")
+	if !ok {
+		exit(1)
+	}
+	if handoff, err := os.ReadFile(filepath.Join(gitDir, "allod-change-branch")); err == nil {
+		if expected := strings.TrimSpace(string(handoff)); expected != branch {
+			die(3, "checkout '%s' now has branch '%s' checked out, but 'allod change begin' handed out branch '%s'; the checkout was moved after begin ran, so submit refuses to create a pull request from the wrong branch", repo, branch, expected)
+		}
 	}
 	if base == "" {
-		// A clone's own refs/remotes/origin/HEAD is worker-writable, so
-		// the PR base is resolved against the parent, never the clone.
-		baseRepo := repo
-		if isClone {
-			baseRepo = parentRepo
-		}
-		resolved, ok := defaultRemoteBranch(baseRepo)
+		resolved, ok := defaultRemoteBranch(repo)
 		if !ok {
-			die(1, "could not resolve the default branch of '%s' to use as the PR base; run: git -C %s remote set-head origin -a, or pass --base", baseRepo, baseRepo)
+			die(1, "could not resolve the default branch of '%s' to use as the PR base; run: git -C %s remote set-head origin -a, or pass --base", repo, repo)
 		}
 		base = resolved
 	}
@@ -1315,36 +850,37 @@ func changeSubmit(args []string) {
 }
 
 // cleanupClone deletes no branch in the parent: a clone's branch never lived there.
+// cleanupClone never runs git in the clone: a clone is removable once the
+// forge shows its branch's pull request merged or closed, judged from the
+// parent, not from the clone's own disk.
 func cleanupClone(parentRepo string, entry changeLedgerEntry) {
 	lock := requireExclusiveLedgerLock(parentRepo, entry)
 	defer lock.Release()
-	enableCloneGitEnv()
-	requireCloneConfigSafe(entry.path, entry.branch, parentRepo)
-	requireCloneOriginMatches(parentRepo, entry.path)
-	// Judge and delete only the ledger's branch: a worker could check out a clean
-	// pushed branch over it and let cleanup discard the ledgered branch's commits.
-	if branch, _ := gitOutput(entry.path, "branch", "--show-current"); branch != entry.branch {
-		die(3, "clone '%s' has branch '%s' checked out, but its ledger lists branch '%s'; cleanup refuses to judge or discard commits on the wrong branch", entry.path, branch, entry.branch)
+	info, statErr := os.Stat(entry.path)
+	switch {
+	case statErr != nil && os.IsNotExist(statErr):
+		if err := removeChangeLedgerEntry(parentRepo, entry.key); err != nil {
+			die(1, "clone '%s' is missing but its ledger entry could not be dropped: %v", entry.path, err)
+		}
+		fmt.Fprintf(stdout, "clone '%s' is missing; dropped its ledger entry in '%s'\n", entry.path, parentRepo)
+		return
+	case statErr != nil:
+		die(1, "could not check clone '%s': %v", entry.path, statErr)
+	case !info.IsDir():
+		die(1, "clone '%s' exists but is not a directory; this refuses rather than treat that as the clone being missing", entry.path)
 	}
-	dirty, dirtyStatus := captureCommand(entry.path, nil, true, "git", "status", "--porcelain")
-	if dirtyStatus != 0 {
-		die(1, "could not check whether clone '%s' is dirty: %s", entry.path, dirty)
+	state, ok := forgePRStateForBranch(parentRepo, entry.branch)
+	if !ok {
+		die(1, "could not ask the forge for the pull request on branch '%s'", entry.branch)
 	}
-	if dirty != "" {
-		die(1, "clone '%s' is dirty; clean it before cleanup", entry.path)
-	}
-	// Fetch before judging: the comparison below needs the remote's objects, and
-	// a rebase-merge plus branch deletion is what an unfetched clone cannot see.
-	// A stale local ref cannot make the answer wrong; a missing object can.
-	if output, status := captureCommand(entry.path, nil, true, "git", "fetch", "--prune", "origin"); status != 0 {
-		die(1, "could not fetch origin in clone '%s': %s", entry.path, output)
-	}
-	result, detail := unpushedCommitsForClone(entry.path, entry.branch)
-	switch result {
-	case unpushedYes:
-		die(1, "clone '%s' has unpushed commits; push or handle them before cleanup", entry.path)
-	case unpushedUnknown:
-		die(1, "cannot determine whether clone '%s' has unpushed commits: %s; inspect it before deliberately removing it with standard git", entry.path, detail)
+	switch state {
+	case "":
+		die(1, "branch '%s' has no pull request yet; the worker submits it with 'allod change run %s -- allod change submit ...', or remove '%s' with standard tools and run cleanup again to drop its ledger entry", entry.branch, entry.path, entry.path)
+	case "open":
+		die(1, "pull request for branch '%s' is still open; cleanup refuses until it is merged or closed", entry.branch)
+	case "merged", "closed":
+	default:
+		die(1, "forge reported an unrecognized state '%s' for the pull request on branch '%s'", state, entry.branch)
 	}
 	if err := os.RemoveAll(entry.path); err != nil {
 		die(1, "could not remove clone directory: %s", entry.path)
@@ -1366,19 +902,6 @@ func changeCleanup(args []string) {
 		die(1, "could not resolve path: %s", args[0])
 	}
 	if parentRepo, entry, isClone := resolveClone(target); isClone {
-		info, statErr := os.Stat(entry.path)
-		switch {
-		case statErr != nil && os.IsNotExist(statErr):
-			if err := removeChangeLedgerEntry(parentRepo, entry.key); err != nil {
-				die(1, "clone '%s' is missing but its ledger entry could not be dropped: %v", entry.path, err)
-			}
-			fmt.Fprintf(stdout, "clone '%s' is missing; dropped its ledger entry in '%s'\n", entry.path, parentRepo)
-			return
-		case statErr != nil:
-			die(1, "could not check clone '%s': %v", entry.path, statErr)
-		case !info.IsDir():
-			die(1, "clone '%s' exists but is not a directory; this refuses rather than treat that as the clone being missing", entry.path)
-		}
 		cleanupClone(parentRepo, entry)
 		return
 	}

@@ -36,8 +36,11 @@ touch "$HOME/.config/git/protected-refs-policy"
 git config --global user.name "Test User"
 git config --global user.email "test@example.invalid"
 
-# The one credential 'run' must never let a sandboxed command see.
-printf 'super-secret-token\n' > "$HOME/.config/git/forgejo-token"
+# The one credential 'run' must never let a sandboxed command see, as a symlink resolving
+# outside both the config tree and the Nix store: the agenix shape a real VM uses.
+forgejo_token_target="$TMP/agenix-forgejo-token"
+printf 'super-secret-token\n' > "$forgejo_token_target"
+ln -s "$forgejo_token_target" "$HOME/.config/git/forgejo-token"
 # A second credential under an arbitrary name ('forgejo-verifier-token') that 'forge' honors via
 # FORGE_TOKEN_FILE; only the allowlist of what may be bound keeps it out, regardless of content.
 printf 'second-secret-verifier-token\n' > "$HOME/.config/git/forgejo-verifier-token"
@@ -70,9 +73,19 @@ ln -s "$store_target" "$HOME/.config/git/forge-hosts"
 # A symlink to a directory, resolving inside the tree itself, would bind the whole tree a second
 # time under its own name, with no per-file exclusion applied to that second copy.
 ln -s "." "$HOME/.config/git/alias"
-# Never bound either, so a worker's clone never carries a private key.
+# The VM's own forge SSH identity: 'run' binds these by name, read-only,
+# never ~/.ssh as a whole.
 mkdir -p "$HOME/.ssh"
+# /etc/ssh/ssh_config is root-owned on the real host. The sandbox's user namespace maps that
+# owner to nobody, so this Include also exercises the private recursive copy rather than only
+# the private top-level ~/.ssh/config copy.
+printf 'Include /etc/ssh/ssh_config\nHost *\n  IdentityFile ~/.ssh/id_ed25519\n' > "$HOME/.ssh/config"
+printf 'forge.example ssh-ed25519 AAAAexamplehostkey\n' > "$HOME/.ssh/known_hosts"
 printf 'fake-private-key\n' > "$HOME/.ssh/id_ed25519"
+printf 'fake-public-key\n' > "$HOME/.ssh/id_ed25519.pub"
+# Not named by ~/.ssh/config at all: every named file being bound must not
+# make this one reachable too.
+printf 'fake-other-key\n' > "$HOME/.ssh/id_other"
 
 pass() {
   test_number=$((test_number + 1))
@@ -281,11 +294,43 @@ EOF
   printf '%s\n' "$bin"
 }
 
+# 'cleanup' asks the forge for the pull request on the branch it is about to remove; this
+# answers every branch merged, the same shape tests/allod-change.sh's make_mock_forge uses.
+make_mock_forge() {
+  local bin="$TMP/mock-forge-bin"
+  mkdir -p "$bin"
+  {
+    printf '#!%s\n' "$(command -v bash)"
+    cat <<'EOF'
+set -euo pipefail
+printf '%s\n' "$*" >> "$MOCK_FORGE_LOG"
+if [[ "$1 $2" == "pr find-by-head" ]]; then
+  shift 2
+  state_all=false
+  for arg in "$@"; do
+    [[ "$arg" == "all" ]] && state_all=true
+  done
+  if $state_all; then
+    printf '1\tmerged\n'
+  fi
+  exit 0
+fi
+echo "mock forge: unexpected args: $*" >&2
+exit 1
+EOF
+  } > "$bin/forge"
+  chmod +x "$bin/forge"
+  printf '%s\n' "$bin"
+}
+
 MOCK_BIN=$(make_mock_systemd_run)
 export MOCK_SYSTEMD_RUN_LOG="$TMP/systemd-run.log"
 touch "$MOCK_SYSTEMD_RUN_LOG"
 NIX_UNTRUSTED_BIN=$(make_mock_nix_netrc root "")
-export PATH="$MOCK_BIN:$NIX_UNTRUSTED_BIN:$PATH"
+FORGE_BIN=$(make_mock_forge)
+export MOCK_FORGE_LOG="$TMP/forge.log"
+touch "$MOCK_FORGE_LOG"
+export PATH="$MOCK_BIN:$NIX_UNTRUSTED_BIN:$FORGE_BIN:$PATH"
 run_sandboxed() {
   capture "$ALLOD" change run "$@"
 }
@@ -365,8 +410,8 @@ printf '{"fake":"onboarding-state"}\n' > "$HOME/.claude.json"
   fail "sabotage: a distinct credential exists under hooks"
 [[ -e "$HOME/.config/git/alias/forgejo-token" ]] && pass "sabotage: alias/forgejo-token resolves to the real token outside the sandbox" ||
   fail "sabotage: alias/forgejo-token resolves to the real token outside the sandbox"
-[[ -e "$HOME/.ssh/id_ed25519" ]] && pass "sabotage: ~/.ssh exists outside the sandbox" ||
-  fail "sabotage: ~/.ssh exists outside the sandbox"
+[[ -e "$HOME/.ssh/id_other" ]] && pass "sabotage: the unnamed identity file exists outside the sandbox" ||
+  fail "sabotage: the unnamed identity file exists outside the sandbox"
 [[ -e "$sibling_clone" ]] && pass "sabotage: the sibling clone exists outside the sandbox" ||
   fail "sabotage: the sibling clone exists outside the sandbox"
 [[ -e "$repo" ]] && pass "sabotage: the shared checkout exists outside the sandbox" ||
@@ -375,7 +420,7 @@ printf '{"fake":"onboarding-state"}\n' > "$HOME/.claude.json"
 # --- Mount set: absences ---
 
 run_sandboxed "$clone" -- bash -c "$probe_script" bash \
-  "$HOME/.config/git/forgejo-token" "$HOME/.config/git/forgejo-token-alias" \
+  "$HOME/.config/git/forgejo-token-alias" \
   "$HOME/.config/git/forgejo-verifier-token" \
   "$HOME/.config/git/hooks/forgejo-token-in-hooks" "$HOME/.config/git/hooks/forgejo-token-copy" \
   "$HOME/.config/git/hooks/second-credential" "$HOME/.config/git/hooks/second-credential-alias" \
@@ -383,9 +428,8 @@ run_sandboxed "$clone" -- bash -c "$probe_script" bash \
   "$HOME/.config/git/sshlink" "$HOME/.config/git/sshlink/id_ed25519" \
   "$HOME/.config/git/hooks/ordinary-hook" "$HOME/.config/git/forge-hosts" \
   "$HOME/.config/git/alias" "$HOME/.config/git/alias/forgejo-token" \
-  "$HOME/.ssh/id_ed25519" "$sibling_clone" "$repo"
+  "$HOME/.ssh/id_other" "$sibling_clone" "$repo"
 assert_status 0 "the probe run itself succeeds"
-assert_contains "$CAPTURE_OUTPUT" "ABSENT $HOME/.config/git/forgejo-token" "forgejo-token is absent inside the sandbox"
 assert_contains "$CAPTURE_OUTPUT" "ABSENT $HOME/.config/git/forgejo-verifier-token" \
   "a second credential under an arbitrary name is absent inside the sandbox too, the allowlist excludes anything not explicitly named"
 assert_contains "$CAPTURE_OUTPUT" "ABSENT $HOME/.config/git/forgejo-token-alias" \
@@ -414,7 +458,8 @@ assert_contains "$CAPTURE_OUTPUT" "ABSENT $HOME/.config/git/alias" \
   "a symlink to a directory (alias -> .) is absent inside the sandbox, never bound as if it were a single file"
 assert_contains "$CAPTURE_OUTPUT" "ABSENT $HOME/.config/git/alias/forgejo-token" \
   "nothing reachable through that directory symlink is bound either, forgejo-token included"
-assert_contains "$CAPTURE_OUTPUT" "ABSENT $HOME/.ssh/id_ed25519" "~/.ssh is absent inside the sandbox"
+assert_contains "$CAPTURE_OUTPUT" "ABSENT $HOME/.ssh/id_other" \
+  "an identity file ~/.ssh/config does not name is absent inside the sandbox, even though every file it does name is bound"
 assert_contains "$CAPTURE_OUTPUT" "ABSENT $sibling_clone" "a sibling clone is absent inside the sandbox"
 assert_contains "$CAPTURE_OUTPUT" "ABSENT $repo" "the shared checkout is absent inside the sandbox"
 
@@ -429,7 +474,9 @@ assert_contains "$CAPTURE_OUTPUT" "ABSENT $HOME/work/memory-repo/.git/HEAD" \
 # --- Mount set: presences ---
 
 run_sandboxed "$clone" -- bash -c "$probe_script" bash \
-  "$clone" "$HOME/.gitconfig" "$HOME/work/memory-repo/note.md" "$HOME/.claude/marker" "$HOME/.claude.json"
+  "$clone" "$HOME/.gitconfig" "$HOME/work/memory-repo/note.md" "$HOME/.claude/marker" "$HOME/.claude.json" \
+  "$HOME/.config/git/forgejo-token" \
+  "$HOME/.ssh/config" "$HOME/.ssh/known_hosts" "$HOME/.ssh/id_ed25519" "$HOME/.ssh/id_ed25519.pub"
 assert_status 0 "the presence probe run succeeds"
 assert_contains "$CAPTURE_OUTPUT" "PRESENT $clone" "the named clone is present inside the sandbox"
 assert_contains "$CAPTURE_OUTPUT" "PRESENT $HOME/.gitconfig" "~/.gitconfig is present inside the sandbox"
@@ -437,6 +484,40 @@ assert_contains "$CAPTURE_OUTPUT" "PRESENT $HOME/work/memory-repo/note.md" \
   "a registry repository flagged memory:true is present inside the sandbox"
 assert_contains "$CAPTURE_OUTPUT" "PRESENT $HOME/.claude/marker" "~/.claude is present inside the sandbox"
 assert_contains "$CAPTURE_OUTPUT" "PRESENT $HOME/.claude.json" "~/.claude.json is present inside the sandbox"
+assert_contains "$CAPTURE_OUTPUT" "PRESENT $HOME/.config/git/forgejo-token" \
+  "forgejo-token is present inside the sandbox: the worker's own forge credential"
+assert_contains "$CAPTURE_OUTPUT" "PRESENT $HOME/.ssh/config" "~/.ssh/config is present inside the sandbox"
+assert_contains "$CAPTURE_OUTPUT" "PRESENT $HOME/.ssh/known_hosts" "~/.ssh/known_hosts is present inside the sandbox"
+assert_contains "$CAPTURE_OUTPUT" "PRESENT $HOME/.ssh/id_ed25519" \
+  "the identity file ~/.ssh/config names is present inside the sandbox"
+assert_contains "$CAPTURE_OUTPUT" "PRESENT $HOME/.ssh/id_ed25519.pub" \
+  "its .pub sibling is bound alongside it"
+
+run_sandboxed "$clone" -- ssh -G forge.example
+assert_status 0 "ssh accepts the private user and system config include chains inside the user namespace"
+
+run_sandboxed "$clone" -- cat "$HOME/.config/git/forgejo-token"
+assert_status 0 \
+  "forgejo-token is readable inside the sandbox even though it is a symlink resolving outside ~/.config/git and the Nix store"
+assert_equal "$CAPTURE_OUTPUT" "$(cat "$forgejo_token_target")" \
+  "its content equals the symlink's target outside"
+
+# --- ~/.ssh/config as a symlink into the Nix store: ssh refuses a config owned by anyone but
+# the invoking user, so a private, invoking-user-owned copy is what must be bound. ---
+
+ssh_config_regular="$TMP/ssh-config-regular.saved"
+mv "$HOME/.ssh/config" "$ssh_config_regular"
+ln -s "$store_target" "$HOME/.ssh/config"
+run_sandboxed "$clone" -- stat -c '%u %a' "$HOME/.ssh/config"
+assert_status 0 "the ~/.ssh/config stat run succeeds"
+assert_equal "$CAPTURE_OUTPUT" "$(id -u) 600" \
+  "~/.ssh/config inside the sandbox is owned by the invoking user with mode 600, not the Nix store's root ownership"
+run_sandboxed "$clone" -- sha256sum "$HOME/.ssh/config"
+assert_status 0 "the ~/.ssh/config checksum run succeeds"
+assert_contains "$CAPTURE_OUTPUT" "$(sha256sum "$store_target" | cut -d' ' -f1)" \
+  "its content equals the symlink's target outside"
+rm -f "$HOME/.ssh/config"
+mv "$ssh_config_regular" "$HOME/.ssh/config"
 
 run_sandboxed "$clone" -- bash -c 'touch "$1/should-fail" 2>/dev/null; echo "write-status:$?"' bash "$HOME/work/memory-repo"
 assert_status 0 "the write-attempt run succeeds"
@@ -461,7 +542,7 @@ rm -f "$HOME/.claude/projects/alias"
 
 # The hard-link walk covers the whole runner directory, not only writable subdirectories: a
 # hard link directly under ~/.claude still aliases whatever it names.
-ln "$HOME/.config/git/forgejo-token" "$HOME/.claude/token-alias"
+ln "$forgejo_token_target" "$HOME/.claude/token-alias"
 run_sandboxed "$clone" -- true
 assert_status 14 "run refuses when a hard link sits directly under the runner's own base directory"
 assert_contains "$CAPTURE_OUTPUT" "hard link" "the refusal names the hard link"
@@ -505,17 +586,24 @@ fi
 # --- Environment: cleared except an allowlist ---
 
 export SECRET_PROBE=leak
+# ALLOD_CHANGE_SANDBOX is never on the pass-through allowlist, so planting a
+# different value for it outside must not reach the sandbox either: 'run'
+# always sets it to '1' itself, regardless of what the launching shell held.
+export ALLOD_CHANGE_SANDBOX=not-set-by-run
 run_sandboxed "$clone" -- bash -c '
   [ -z "${SECRET_PROBE:-}" ] && echo SECRET_ABSENT || echo "SECRET_PRESENT:$SECRET_PROBE"
   [ -n "${PATH:-}" ] && echo PATH_PRESENT || echo PATH_ABSENT
   [ "${HOME:-}" = "'"$HOME"'" ] && echo HOME_PRESENT || echo "HOME_WRONG:${HOME:-}"
+  echo "SANDBOX_MARKER:${ALLOD_CHANGE_SANDBOX:-<unset>}"
 '
 assert_status 0 "the environment probe run succeeds"
 assert_contains "$CAPTURE_OUTPUT" "SECRET_ABSENT" \
   "a variable outside the allowlist (planted in the launching shell) does not reach the sandbox"
 assert_contains "$CAPTURE_OUTPUT" "PATH_PRESENT" "PATH is present inside the sandbox"
 assert_contains "$CAPTURE_OUTPUT" "HOME_PRESENT" "HOME is present inside the sandbox, unchanged"
-unset SECRET_PROBE
+assert_contains "$CAPTURE_OUTPUT" "SANDBOX_MARKER:1" \
+  "ALLOD_CHANGE_SANDBOX is 1 inside the sandbox, not the different value the launching shell held: only 'run' itself sets it"
+unset SECRET_PROBE ALLOD_CHANGE_SANDBOX
 
 # --- git commit inside the clone; the parent is untouched ---
 
@@ -692,6 +780,8 @@ rm -rf "$unreadable_dir"
 assert_status 14 "run refuses past the point the private .claude.json copy exists"
 assert_equal "$(find "$TMP" -maxdepth 1 -name 'allod-claude-json-*' | wc -l)" "0" \
   "no private .claude.json copy is left behind in TMPDIR after the refusal"
+assert_equal "$(find "$TMP" -maxdepth 1 -name 'allod-ssh-config-*' | wc -l)" "0" \
+  "no private ssh config copies are left behind in TMPDIR after the refusal"
 
 # --- resolving from the working directory with no path given ---
 
@@ -732,40 +822,6 @@ git -C "$clone" checkout -q -b scratch
 capture "$ALLOD" change run "$clone" -- true
 assert_status 10 "run refuses a ledgered clone that is not on its ledgered agent/* branch"
 git -C "$clone" checkout -q "agent/$desc"
-
-pwned_run="$TMP/pwned-run"
-git -C "$clone" config credential.helper "!touch $pwned_run"
-capture "$ALLOD" change run "$clone" -- true
-assert_status 11 "run refuses a clone whose config could run a command"
-[[ ! -e "$pwned_run" ]] &&
-  pass "run's config refusal never ran the planted command" ||
-  fail "run's config refusal never ran the planted command" "found: $pwned_run"
-git -C "$clone" config --unset credential.helper
-
-# git-hooks/protected-refs-policy runs a tracked hook straight from the clone's working tree;
-# the same gate 'list'/'record'/'submit'/'cleanup' share refuses this too.
-mkdir -p "$clone/.hooks"
-tracked_hook_run_pwned="$TMP/tracked-hook-run-pwned-${RUN_ID}"
-printf '#!/bin/sh\ntouch %s\n' "$tracked_hook_run_pwned" > "$clone/.hooks/pre-commit"
-chmod +x "$clone/.hooks/pre-commit"
-capture "$ALLOD" change run "$clone" -- true
-assert_status 11 "run refuses a clone with an added tracked hook the parent's origin does not have"
-assert_contains "$CAPTURE_OUTPUT" "tracked hooks" "the refusal names the tracked hooks directory"
-rm -rf "$clone/.hooks"
-
-# A real repo's own 'git gc' writes '.git/objects/info/commit-graph', copied into a fresh clone
-# by 'git clone'; 'begin' now deletes it so a legitimate clone is still accepted.
-commit_graph_repo="$HOME/work/commit-graph-repo"
-init_repo "$commit_graph_repo" master
-git -C "$commit_graph_repo" commit-graph write --reachable
-commit_graph_desc="${RUN_ID}-commit-graph"
-commit_graph_clone=$(begin_clone "$commit_graph_desc" "$commit_graph_repo")
-[[ ! -e "$commit_graph_clone/.git/objects/info/commit-graph" ]] &&
-  pass "begin deletes a commit-graph copied in from a parent that had one of its own" ||
-  fail "begin deletes a commit-graph copied in from a parent that had one of its own" \
-    "still present: $commit_graph_clone/.git/objects/info/commit-graph"
-capture "$ALLOD" change run "$commit_graph_clone" -- true
-assert_status 0 "run accepts a clone whose parent had its own legitimate commit-graph before begin ran"
 
 capture "$ALLOD" change run "$clone" true
 assert_status 1 "run refuses a missing '--'"
@@ -934,7 +990,7 @@ assert_status 14 "run refuses a writable runner source symlink into a shared che
 rm "$HOME/.pi/agent/sessions"
 
 mkdir -p "$HOME/.claude/projects/unreadable"
-ln "$HOME/.config/git/forgejo-token" "$HOME/.claude/projects/unreadable/alias"
+ln "$forgejo_token_target" "$HOME/.claude/projects/unreadable/alias"
 chmod 000 "$HOME/.claude/projects/unreadable"
 capture "$ALLOD" change run "$clone" -- true
 assert_status 14 "run refuses an unreadable runner directory that could hide a credential alias"

@@ -118,8 +118,6 @@ func changeRun(args []string) {
 				"clone '%s' is locked by an outside command, or by another 'run' still in its own pre-flight; 'run' refuses to start until it finishes",
 				repo)
 		}
-		enableCloneGitEnv()
-		requireCloneConfigSafe(repo, entry.branch, parentRepo)
 		branch := currentBranch(repo)
 		if branch != entry.branch || !strings.HasPrefix(branch, "agent/") {
 			die(exitNotSandboxable,
@@ -141,6 +139,8 @@ func changeRun(args []string) {
 
 	claudeJSONCopy, discardClaudeJSONCopy := prepareClaudeJSONCopy(homeDir())
 	defer discardClaudeJSONCopy()
+	sshConfigCopies, discardSSHConfigCopies := prepareSSHConfigCopies(homeDir())
+	defer discardSSHConfigCopies()
 
 	systemdArgs := []string{
 		"--user", "--scope", "--quiet",
@@ -148,12 +148,13 @@ func changeRun(args []string) {
 		"--unit", runScopeName(branches),
 		"--", bwrapPath,
 	}
-	systemdArgs = append(systemdArgs, buildBwrapArgs(homeDir(), clones, os.Environ(), claudeJSONCopy, len(locks))...)
+	systemdArgs = append(systemdArgs, buildBwrapArgs(homeDir(), clones, os.Environ(), claudeJSONCopy, sshConfigCopies, len(locks))...)
 	systemdArgs = append(systemdArgs, "--")
 	systemdArgs = append(systemdArgs, command...)
 
 	status := runSandboxCommand(locks, systemdArgs)
 	discardClaudeJSONCopy()
+	discardSSHConfigCopies()
 	exit(status)
 }
 
@@ -464,7 +465,11 @@ func buildEnvArgs(environ []string) []string {
 			args = append(args, "--setenv", name, value)
 		}
 	}
-	return append(args, "--setenv", "TMPDIR", "/tmp")
+	args = append(args, "--setenv", "TMPDIR", "/tmp")
+	// Never on envAllowlist, so only 'run' itself ever sets this; 'record'
+	// and 'submit' read it to know they are inside their worker's own
+	// sandbox rather than being run against a clone from outside.
+	return append(args, "--setenv", changeSandboxEnv, "1")
 }
 
 const nixStoreRoot = "/nix/store"
@@ -477,14 +482,265 @@ var gitConfigAllowlist = map[string]bool{
 	"allowed-external-remotes":  true,
 	"forge-hosts":               true,
 	"active-pr-branches":        true,
+	// The worker's own forge credential, read by 'forge' inside the sandbox
+	// exactly as it is outside. 'forgejo-verifier-token' belongs to the
+	// verifier account, never the sandbox, and stays off this list.
+	"forgejo-token": true,
 }
 
-// Bind only policy files and Nix-store-managed hooks; arbitrary files under
-// hooks can be credentials under a second name.
+type sshConfigCopies struct {
+	dir                string
+	userConfig         string
+	systemConfig       string
+	systemConfigTarget string
+}
+
+// bindSSHCredentials binds private copies of the user and system client
+// configs and their include chain, then the VM's own forge SSH identity by
+// name, read only. Never bind '~/.ssh' as a whole, and never a netrc.
+func bindSSHCredentials(args []string, home string, copies sshConfigCopies) []string {
+	sshDir := filepath.Join(home, ".ssh")
+	config := filepath.Join(sshDir, "config")
+	knownHosts := filepath.Join(sshDir, "known_hosts")
+	if copies.dir != "" {
+		args = append(args, "--ro-bind", copies.dir, copies.dir)
+	}
+	if copies.systemConfig != "" {
+		// This comes after the /etc and /nix tree binds. NixOS makes
+		// /etc/ssh/ssh_config a symlink, which bwrap refuses as a mount
+		// destination, so shadow the regular file it resolves to instead.
+		args = append(args, "--ro-bind", copies.systemConfig, copies.systemConfigTarget)
+	}
+	if copies.userConfig != "" {
+		args = append(args, "--ro-bind", copies.userConfig, config)
+	}
+	args = append(args, "--ro-bind-try", knownHosts, knownHosts)
+	for _, path := range sshIdentityFiles(home, copies.userConfig, copies.systemConfig) {
+		args = append(args, "--ro-bind-try", path, path)
+	}
+	return args
+}
+
+// prepareSSHConfigCopies makes invoking-user-owned, mode-0600 copies of the
+// user and system client configs and recursively rewrites every resolvable
+// Include target to another such copy. In bwrap's user namespace root-owned
+// files appear owned by nobody, which OpenSSH refuses once it reads a user
+// config too.
+func prepareSSHConfigCopies(home string) (copies sshConfigCopies, discard func()) {
+	noop := func() {}
+	dir, err := os.MkdirTemp("", "allod-ssh-config-")
+	if err != nil {
+		die(exitSandboxSourceUnsafe, "cannot create private ssh config directory: %v", err)
+	}
+	discard = func() { os.RemoveAll(dir) }
+	copier := sshConfigCopier{
+		dir:    dir,
+		home:   home,
+		copies: make(map[string]string),
+	}
+	userConfig := filepath.Join(home, ".ssh", "config")
+	copies.userConfig, err = copier.copyConfig(userConfig, filepath.Join(home, ".ssh"))
+	if err != nil && !os.IsNotExist(err) {
+		discard()
+		die(exitSandboxSourceUnsafe, "cannot copy ssh config: %v", err)
+	}
+	const systemConfig = "/etc/ssh/ssh_config"
+	copies.systemConfigTarget, err = filepath.EvalSymlinks(systemConfig)
+	if err == nil {
+		copies.systemConfig, err = copier.copyConfig(systemConfig, "/etc/ssh")
+	}
+	if err != nil && !os.IsNotExist(err) {
+		discard()
+		die(exitSandboxSourceUnsafe, "cannot copy system ssh config: %v", err)
+	}
+	if copies.userConfig == "" && copies.systemConfig == "" {
+		discard()
+		return sshConfigCopies{}, noop
+	}
+	copies.dir = dir
+	return copies, discard
+}
+
+type sshConfigCopier struct {
+	dir    string
+	home   string
+	next   int
+	copies map[string]string
+}
+
+func (c *sshConfigCopier) copyConfig(path, relativeBase string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", os.ErrNotExist
+	}
+	key := relativeBase + "\x00" + resolved
+	if copyPath := c.copies[key]; copyPath != "" {
+		return copyPath, nil
+	}
+	c.next++
+	copyPath := filepath.Join(c.dir, fmt.Sprintf("config-%d", c.next))
+	c.copies[key] = copyPath
+	data, err := os.ReadFile(resolved)
+	if err != nil {
+		delete(c.copies, key)
+		return "", err
+	}
+	rewritten := rewriteSSHIncludes(string(data), func(pattern string) []string {
+		var copied []string
+		for _, target := range sshIncludeTargets(c.home, relativeBase, pattern) {
+			includeCopy, copyErr := c.copyConfig(target, relativeBase)
+			if copyErr == nil && includeCopy != "" {
+				copied = append(copied, includeCopy)
+			}
+		}
+		return copied
+	})
+	if err := os.WriteFile(copyPath, []byte(rewritten), 0o600); err != nil {
+		delete(c.copies, key)
+		return "", err
+	}
+	return copyPath, nil
+}
+
+func rewriteSSHIncludes(config string, resolve func(string) []string) string {
+	lines := strings.SplitAfter(config, "\n")
+	for i, line := range lines {
+		body := strings.TrimSuffix(line, "\n")
+		newline := strings.TrimPrefix(line, body)
+		if strings.HasSuffix(body, "\r") {
+			body = strings.TrimSuffix(body, "\r")
+			newline = "\r" + newline
+		}
+		fields := strings.Fields(body)
+		if len(fields) < 2 || !strings.EqualFold(fields[0], "include") {
+			continue
+		}
+		var targets []string
+		for _, pattern := range fields[1:] {
+			if strings.HasPrefix(pattern, "#") {
+				break
+			}
+			pattern = strings.Trim(pattern, `"'`)
+			targets = append(targets, resolve(pattern)...)
+		}
+		indent := body[:len(body)-len(strings.TrimLeft(body, " \t"))]
+		if len(targets) == 0 {
+			lines[i] = newline
+		} else {
+			lines[i] = indent + "Include " + strings.Join(targets, " ") + newline
+		}
+	}
+	return strings.Join(lines, "")
+}
+
+func sshIncludeTargets(home, relativeBase, pattern string) []string {
+	switch {
+	case pattern == "~":
+		pattern = home
+	case strings.HasPrefix(pattern, "~/"):
+		pattern = filepath.Join(home, strings.TrimPrefix(pattern, "~/"))
+	case strings.HasPrefix(pattern, "~"):
+		return nil
+	case !filepath.IsAbs(pattern):
+		pattern = filepath.Join(relativeBase, pattern)
+	}
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return nil
+	}
+	var paths []string
+	for _, match := range matches {
+		resolved, resolveErr := filepath.EvalSymlinks(match)
+		if resolveErr != nil {
+			continue
+		}
+		if info, statErr := os.Stat(resolved); statErr == nil && info.Mode().IsRegular() {
+			paths = append(paths, resolved)
+		}
+	}
+	return paths
+}
+
+// sshIdentityFiles expands '~' and '%d' in every 'IdentityFile' an OpenSSH
+// client config names, the way ssh itself does, and returns each that
+// resolves to a regular file plus its '.pub' sibling. A name that does not
+// resolve (missing, a directory, a dangling symlink) is silently skipped:
+// this binds what is there, it does not validate the config.
+func sshIdentityFiles(home string, sshConfigPaths ...string) []string {
+	var paths []string
+	seen := make(map[string]bool)
+	var scan func(string)
+	scan = func(sshConfigPath string) {
+		if sshConfigPath == "" || seen[sshConfigPath] {
+			return
+		}
+		seen[sshConfigPath] = true
+		data, err := os.ReadFile(sshConfigPath)
+		if err != nil {
+			return
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) == 0 {
+				continue
+			}
+			if strings.EqualFold(fields[0], "include") && len(fields) > 1 {
+				for _, include := range fields[1:] {
+					scan(strings.Trim(include, `"'`))
+				}
+				continue
+			}
+			values := fields[1:]
+			keyword := fields[0]
+			if before, after, found := strings.Cut(keyword, "="); found {
+				keyword = before
+				values = append([]string{after}, values...)
+			}
+			if !strings.EqualFold(keyword, "identityfile") {
+				continue
+			}
+			if len(values) > 0 && values[0] == "=" {
+				values = values[1:]
+			}
+			if len(values) == 0 {
+				continue
+			}
+			value := strings.Trim(strings.Join(values, " "), `"`)
+			value = strings.ReplaceAll(value, "%d", home)
+			switch {
+			case value == "~":
+				value = home
+			case strings.HasPrefix(value, "~/"):
+				value = filepath.Join(home, strings.TrimPrefix(value, "~/"))
+			}
+			if !filepath.IsAbs(value) {
+				continue
+			}
+			if info, statErr := os.Stat(value); statErr != nil || !info.Mode().IsRegular() {
+				continue
+			}
+			paths = append(paths, value)
+			if pub, statErr := os.Stat(value + ".pub"); statErr == nil && pub.Mode().IsRegular() {
+				paths = append(paths, value+".pub")
+			}
+		}
+	}
+	for _, sshConfigPath := range sshConfigPaths {
+		scan(sshConfigPath)
+	}
+	return paths
+}
+
+// Bind only policy files, the forge token, and Nix-store-managed hooks;
+// arbitrary files under hooks can be credentials under a second name.
 func bindGitConfigTree(args []string, gitConfigDir string) []string {
-	tokenPath := filepath.Join(gitConfigDir, "forgejo-token")
-	tokenInfo, tokenErr := os.Stat(tokenPath)
-	tokenContent, tokenContentErr := os.ReadFile(tokenPath)
 	configRoot := physicalPath(gitConfigDir)
 	walk := func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
@@ -499,20 +755,28 @@ func bindGitConfigTree(args []string, gitConfigDir string) []string {
 		}
 		if linkInfo.Mode()&os.ModeSymlink != 0 {
 			resolved := physicalPath(path)
-			if targetInfo, statErr := os.Stat(resolved); statErr == nil && targetInfo.IsDir() {
+			targetInfo, statErr := os.Stat(resolved)
+			if statErr == nil && targetInfo.IsDir() {
 				return nil
 			}
-			insideConfig := func() bool {
-				rel, relErr := filepath.Rel(configRoot, resolved)
-				if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-					return false
+			// An agenix-style secret: a top-level allowlisted name whose
+			// symlink resolves to a regular file outside both this tree and
+			// the store is still bound, wherever it resolves.
+			topLevelAllowlisted := statErr == nil && targetInfo.Mode().IsRegular() &&
+				filepath.Dir(path) == gitConfigDir && gitConfigAllowlist[entry.Name()]
+			if !topLevelAllowlisted {
+				insideConfig := func() bool {
+					rel, relErr := filepath.Rel(configRoot, resolved)
+					if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+						return false
+					}
+					first, _, _ := strings.Cut(filepath.ToSlash(rel), "/")
+					return first == "hooks" || gitConfigAllowlist[first]
+				}()
+				insideStore := resolved == nixStoreRoot || strings.HasPrefix(resolved, nixStoreRoot+string(filepath.Separator))
+				if !insideConfig && !insideStore {
+					return nil
 				}
-				first, _, _ := strings.Cut(filepath.ToSlash(rel), "/")
-				return first == "hooks" || gitConfigAllowlist[first]
-			}()
-			insideStore := resolved == nixStoreRoot || strings.HasPrefix(resolved, nixStoreRoot+string(filepath.Separator))
-			if !insideConfig && !insideStore {
-				return nil
 			}
 		}
 		if entry.IsDir() {
@@ -521,16 +785,6 @@ func bindGitConfigTree(args []string, gitConfigDir string) []string {
 		if rel, relErr := filepath.Rel(filepath.Join(gitConfigDir, "hooks"), path); relErr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			resolved := physicalPath(path)
 			if !strings.HasPrefix(resolved, nixStoreRoot+string(filepath.Separator)) {
-				return nil
-			}
-		}
-		if tokenErr == nil {
-			if info, statErr := os.Stat(path); statErr == nil && os.SameFile(info, tokenInfo) {
-				return nil
-			}
-		}
-		if tokenContentErr == nil {
-			if content, readErr := os.ReadFile(path); readErr == nil && bytes.Equal(content, tokenContent) {
 				return nil
 			}
 		}
@@ -559,7 +813,7 @@ var runnerDirs = []runnerDirSpec{
 	{".pi", []string{filepath.Join("agent", "sessions")}},
 }
 
-func buildBwrapArgs(home string, clones, environ []string, claudeJSONCopy string, lockFDCount int) []string {
+func buildBwrapArgs(home string, clones, environ []string, claudeJSONCopy string, sshConfigCopies sshConfigCopies, lockFDCount int) []string {
 	args := []string{
 		// Named unshares hard-fail where --unshare-all would silently continue without a namespace.
 		"--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
@@ -608,6 +862,7 @@ func buildBwrapArgs(home string, clones, environ []string, claudeJSONCopy string
 	if _, err := os.Stat(filepath.Join(home, ".gitconfig")); err == nil {
 		args = append(args, "--ro-bind", filepath.Join(home, ".gitconfig"), filepath.Join(home, ".gitconfig"))
 	}
+	args = bindSSHCredentials(args, home, sshConfigCopies)
 	args = bindGitConfigTree(args, filepath.Join(home, ".config", "git"))
 	for _, spec := range runnerDirs {
 		base := filepath.Join(home, spec.dir)

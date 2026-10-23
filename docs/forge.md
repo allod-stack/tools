@@ -64,7 +64,7 @@ forge pr merge {<number> | <url> | <branch>} (--merge | --rebase | --squash) \
   [--body <text> | --body-file <file>]
 forge pr review-comments <number>          # list inline comments with IDs
 forge pr reply <number> <comment-id> [--body <text> | --body-file <file>]
-forge pr find-by-head <branch>             # print PR number if open PR exists for branch
+forge pr find-by-head <branch> [-s open|all]  # print PR number (and, with -s all, its state) for branch
 ```
 
 `pr create` defaults `--head` to the current branch and `--base` to the
@@ -132,6 +132,12 @@ JSON.
 `pr list`, `pr find-by-head`, and `pr close`'s branch-name lookup page
 through every open pull request rather than stopping at the first page, so a
 match past the first 50 is still found.
+
+`pr find-by-head <branch>` defaults to `-s open`, matching the plain PR
+number it has always printed; `-s all` looks across every pull request
+state instead and prints `<number>\t<state>` (`open`, `closed`, or
+`merged`), for a caller that must tell a landed pull request from one still
+open without first finding it, not merely ruling out an open one.
 
 `pr snapshot` is the machine-readable interface for tools that need a pull
 request's exact commits. It emits a deliberately small, versioned schema rather

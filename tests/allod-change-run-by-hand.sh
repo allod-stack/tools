@@ -55,8 +55,8 @@ git clone -q --bare "$FIXTURE/repo" "$FIXTURE/remote.git"
 git -C "$FIXTURE/repo" remote add origin "$FIXTURE/remote.git"
 git -C "$FIXTURE/repo" fetch -q origin
 git -C "$FIXTURE/repo" remote set-head origin master
-# A real repo's own 'git gc' writes '.git/objects/info/commit-graph', copied by 'git clone'; the
-# fixture had none before, which is why nothing caught the gate refusing a legitimate clone.
+# A real repo's own 'git gc' writes '.git/objects/info/commit-graph', copied by 'git clone' into
+# every clone made from it; no command reads or minds it.
 git -C "$FIXTURE/repo" commit-graph write --reachable
 
 CLONE=$("$ALLOD" change begin -d "by-hand-probe-$$" "$FIXTURE/repo")
@@ -186,8 +186,8 @@ a_two_clone_run_names_both_and_is_writable_in_both() {
 }
 
 a_clone_of_a_repo_with_its_own_commit_graph_is_accepted() {
-  if [ -e "$CLONE/.git/objects/info/commit-graph" ]; then
-    fail_step "'begin' left the fixture repo's own commit-graph in the clone"
+  if [ ! -e "$CLONE/.git/objects/info/commit-graph" ]; then
+    fail_step "the fixture repo's own commit-graph was not copied into the clone by 'git clone'"
   fi
   run_sandboxed "$CLONE" -- true
   if [ "$STATUS" -ne 0 ]; then
@@ -270,6 +270,99 @@ EOF
   systemctl --user reset-failed "$unit" >/dev/null 2>&1 || true
 }
 
+# Read-only, and skipped rather than faked when absent: this script runs against the real
+# $HOME, never a fixture one, so it must not write to the VM's own forge credential.
+the_real_forge_token_is_readable_inside() {
+  if [ ! -r "$HOME/.config/git/forgejo-token" ]; then
+    printf '     no readable ~/.config/git/forgejo-token on this VM; nothing to probe\n'
+    return 0
+  fi
+  run_sandboxed "$CLONE" -- cat "$HOME/.config/git/forgejo-token"
+  if [ "$STATUS" -ne 0 ]; then
+    fail_step "the VM's own forgejo-token was not readable inside the sandbox" "$OUTPUT"
+  fi
+  if [ "$OUTPUT" != "$(cat "$HOME/.config/git/forgejo-token")" ]; then
+    fail_step "the token read inside the sandbox did not match the real file"
+  fi
+}
+
+# Read-only, and skipped when there is no readable token to probe with: a real forge binary on
+# PATH must see the bound token as its own, not just a readable file.
+the_real_forge_token_authenticates_inside() {
+  if [ ! -r "$HOME/.config/git/forgejo-token" ]; then
+    printf '     no readable ~/.config/git/forgejo-token on this VM; nothing to probe\n'
+    return 0
+  fi
+  run_sandboxed "$CLONE" -- forge auth status
+  if [ "$STATUS" -ne 0 ]; then
+    fail_step "'forge auth status' failed inside the sandbox" "$OUTPUT"
+  fi
+  printf '     %s\n' "$OUTPUT"
+}
+
+# Read-only too, and skipped when there is no ~/.ssh/config to read: every identity file it
+# names must be present inside, owned by the invoking user, not root or nobody.
+every_ssh_identity_file_is_present_and_owned() {
+  if [ ! -r "$HOME/.ssh/config" ]; then
+    printf '     no readable ~/.ssh/config on this VM; nothing to probe\n'
+    return 0
+  fi
+  local uid identity keyword value found=0
+  uid=$(id -u)
+  while read -r keyword value; do
+    case "$keyword" in
+      [Ii][Dd][Ee][Nn][Tt][Ii][Tt][Yy][Ff][Ii][Ll][Ee]) ;;
+      *) continue ;;
+    esac
+    value="${value%\"}"
+    value="${value#\"}"
+    value="${value//%d/$HOME}"
+    case "$value" in
+      "~") value="$HOME" ;;
+      "~/"*) value="$HOME/${value#\~/}" ;;
+    esac
+    [ -f "$value" ] || continue
+    found=1
+    run_sandboxed "$CLONE" -- stat -c '%u' "$value"
+    if [ "$STATUS" -ne 0 ]; then
+      fail_step "identity file '$value' was not present inside the sandbox" "$OUTPUT"
+    fi
+    if [ "$OUTPUT" != "$uid" ]; then
+      fail_step "identity file '$value' inside the sandbox is owned by uid $OUTPUT, not the invoking user ($uid)"
+    fi
+  done < "$HOME/.ssh/config"
+  if [ "$found" -eq 0 ]; then
+    printf '     ~/.ssh/config names no identity file that resolves to a regular file; nothing to probe\n'
+  fi
+}
+
+the_real_ssh_config_parses_inside() {
+  if ! command -v ssh >/dev/null 2>&1; then
+    printf '     no ssh binary on this VM; nothing to probe\n'
+    return 0
+  fi
+  if [ ! -r "$HOME/.ssh/config" ]; then
+    printf '     no readable ~/.ssh/config on this VM; nothing to probe\n'
+    return 0
+  fi
+  local host
+  host=$(awk '
+    tolower($1) == "host" {
+      for (i = 2; i <= NF; i++) {
+        if ($i != "*" && substr($i, 1, 1) != "!") { print $i; exit }
+      }
+    }
+  ' "$HOME/.ssh/config")
+  if [ -z "$host" ]; then
+    host=ssh-config-probe.invalid
+  fi
+  run_sandboxed "$CLONE" -- ssh -G "$host"
+  if [ "$STATUS" -ne 0 ]; then
+    fail_step "ssh -G '$host' rejected the config chain inside the sandbox" "$OUTPUT"
+  fi
+  printf '     ssh -G parsed the config for %s\n' "$host"
+}
+
 a_nix_build_succeeds_through_the_daemon_socket() {
   # 'derivation' needs no channel/flake registry lookup, unlike '<nixpkgs>', so this build stays
   # independent of NIX_PATH being cleared.
@@ -291,6 +384,10 @@ step 'a clone of a repo with its own commit-graph is accepted' a_clone_of_a_repo
 step 'the sandbox drops every capability over a real kernel' the_sandbox_drops_every_capability
 step 'a sandboxed commit lands on the clone, the parent is untouched' a_run_commits_inside_and_leaves_the_parent_alone
 step 'exceeding the memory cap kills only the scope' exceeding_the_cap_kills_only_the_scope
+step 'the real forgejo-token, if any, is readable inside the sandbox' the_real_forge_token_is_readable_inside
+step 'the real forgejo-token, if any, authenticates forge inside the sandbox' the_real_forge_token_authenticates_inside
+step 'every identity file the real ~/.ssh/config names, if any, is present and owned inside' every_ssh_identity_file_is_present_and_owned
+step 'ssh parses the real config include chain inside the sandbox' the_real_ssh_config_parses_inside
 step 'nix-build succeeds inside the sandbox through the daemon socket' a_nix_build_succeeds_through_the_daemon_socket
 
 if [ "$FAILURES" -ne 0 ]; then

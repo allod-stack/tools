@@ -25,19 +25,16 @@ ends the `<clone-path>` list the same way it does for `record --files`.
 A path that matches no ledger entry — including one that is not a
 repository at all — is refused with exit code 10 before any git command
 ever runs against it: `run` resolves a path to its ledgered clone the same
-git-free way the config-safety gate's own matching does (docs/allod-change.md,
-"The ledger"), but unlike `record`, `submit`, and `cleanup`, never falls
-back to resolving a plain, unledgered repo through `git rev-parse` — `run`
-only ever sandboxes a ledgered clone, so there is no reason to run git
-against anything else on the way to this refusal. A checkout not on the
-`agent/*` branch its ledger lists is refused the same way. A clone whose
-own `.git/config` could run a command the moment anything outside the
-sandbox next touches it (including a populated submodule, a `commondir` or
-`gitdir` file, or a gitfile redirecting `.git` itself) is refused with exit
-code 11, the same gate `list`, `record`, `submit`, and `cleanup` apply; see
-docs/allod-change.md, "The config-safety gate". `bwrap` missing from PATH,
-or `bwrap` failing to start, is refused (exit 1); `run` never falls back to
-an unsandboxed command.
+git-free way `record` and `submit`'s own outside refusal does
+(docs/allod-change.md, "The ledger"), but unlike them, never falls back to
+resolving a plain, unledgered repo through `git rev-parse` — `run` only
+ever sandboxes a ledgered clone, so there is no reason to run git against
+anything else on the way to this refusal. A checkout not on the `agent/*`
+branch its ledger lists is refused the same way, by the one git command
+`run` still runs against the clone before sandboxing it (`git branch
+--show-current`), to confirm what it is about to hand a worker its own
+credentials over. `bwrap` missing from PATH, or `bwrap` failing to start,
+is refused (exit 1); `run` never falls back to an unsandboxed command.
 
 `run` refuses, with exit code 12, when the invoking user is one of Nix's
 own trusted-users — `nix config show trusted-users`, checked by name, by
@@ -81,9 +78,10 @@ has more than one hard link — not only under the writable subdirectory
 bound read-write on top (`~/.claude/projects`, `~/.codex/sessions`,
 `~/.codex/log`, `~/.pi/agent/sessions`). A hard link under the base but
 outside that writable subdirectory still aliases whatever it links to —
-a hard link to the forgejo token placed directly under `~/.claude`, say,
-reachable by a path this gate never previously walked, is the same
-underlying inode as the real file wherever else it is bound read-only;
+a hard link to the forgejo verifier token placed directly under
+`~/.claude`, say, reachable by a path this check never previously walked,
+is the same underlying inode as the real file wherever else it is bound
+read-only;
 narrowing the walk to only the writable subdirectories, where the write
 risk is obvious, missed that the alias itself is the problem, not merely
 writing through it. The symlink check stays scoped to each writable
@@ -129,7 +127,7 @@ regardless of how many clones one run spans, for an operator to inspect or
 kill by hand. Nothing else parses that listing back apart any more: the
 actual guard against an outside command acting on a clone `run` still
 spans is a `flock` on the clone's own ledger file (docs/allod-change.md,
-"The config-safety gate"), taken and held for the whole sandboxed
+"list and cleanup, from the forge"), taken and held for the whole sandboxed
 command's lifetime, one clone at a time, entirely independent of the
 scope's name or whether `systemd-run` is even still alive to answer a
 query about it — the scope name exists for `systemctl --user` to show a
@@ -158,7 +156,12 @@ Only a fixed allowlist passes, each variable exactly as the caller's own
 environment set it: `HOME`, `PATH`, `TERM`, `LANG`, `LC_ALL`, every `LC_*`
 variable, `USER`, `LOGNAME`, `SHELL`, `TZ`, `COLORTERM`, and `NIX_REMOTE` if
 set. `TMPDIR` is always `/tmp`, the sandbox's own private tmpfs, never the
-caller's `TMPDIR`. Git identity inside comes from the bound global Git config,
+caller's `TMPDIR`, and `ALLOD_CHANGE_SANDBOX` is always `1`: neither is on
+the allowlist, so only `run` itself ever sets either one.
+`ALLOD_CHANGE_SANDBOX=1` is how `allod change record` and `allod change
+submit`, run inside, know they are the worker, not the overseer acting on
+the clone from outside (`docs/allod-change.md`, "Inside and outside the
+sandbox"). Git identity inside comes from the bound global Git config,
 never from a `GIT_*` environment variable — the allowlist does not carry
 those, by design, even if the caller's own `user.name` happens to be set
 that way.
@@ -200,10 +203,12 @@ responsibility, not something `run` inspects or restricts.
 | each named clone | read-write, at its real path | the worker's own tree — the only thing it may write to |
 | every registry repository flagged `"memory": true` | read-only, at its real checkout path under the work dir, with an empty `--tmpfs` over its own `.git` on top | the memory tree the worker reads first; the empty tmpfs over `.git` hides that checkout's own ledger (`.git/allod-changes`) and history — a memory checkout is bound in to be read, not to hand a worker another repo's change ledger |
 | `~/.gitconfig` | read-only, when present | legacy global Git config; `~/.config/git/config` supplies it on managed VMs |
-| `~/.config/git/config`, managed hooks, `protected-refs-policy`, and the named policy files | read-only | Only allowlisted names are mounted. Hook files must resolve into `/nix/store`; unmanaged files under `hooks/` are skipped. A global Git config, the managed `pre-commit` hook, and `protected-refs-policy` are required before the run starts. |
+| `~/.ssh/config`, `~/.ssh/known_hosts` | read-only, `--ro-bind-try` | the VM's own forge SSH identity, by name; never `~/.ssh` as a whole directory |
+| every `IdentityFile` `~/.ssh/config` names | read-only, `--ro-bind-try`, each with its `.pub` sibling when present | the SSH private key (and public key) `run` resolves out of the config it just bound, with a leading `~` and ssh's own home-directory token expanded to `$HOME`; a name that does not resolve to a regular file is silently skipped, never substituted |
+| `~/.config/git/config`, managed hooks, `protected-refs-policy`, the named policy files, and `~/.config/git/forgejo-token` | read-only | Only allowlisted names are mounted. Hook files must resolve into `/nix/store`; unmanaged files under `hooks/` are skipped. A global Git config, the managed `pre-commit` hook, and `protected-refs-policy` are required before the run starts. `forgejo-token` is the worker's own forge credential, the author account's, bound exactly like any other allowlisted name; `forgejo-verifier-token`, the merge token, stays absent by never being on the list. |
 | each runner's state directory (see "Runner state directories" below) | read-only as a whole, with its own session/log directories read-write on top | the runner's session state the worker needs to write, without handing it the runner's own configuration (hooks, MCP servers, extensions) to edit for the overseer's unsandboxed session to execute later |
 | `~/.claude.json` | a private copy, read-write, discarded when the run ends | Claude Code's account and onboarding state. Copied to a temp file before the run and bound at `~/.claude.json` in its place, so a worker's writes to it never reach the real file — a read-only bind makes Claude Code warn, and leaving it absent makes Claude Code recreate it from scratch either way |
-| `~/.ssh`, any netrc, every shared checkout, every other clone | absent | the point of the sandbox |
+| `~/.ssh` as a whole directory, any netrc, every shared checkout, every other clone | absent | `~/.ssh`'s own files are bound individually, above; nothing else of it, and none of the rest of this row, is the point of the sandbox |
 
 ## Runner state directories
 
@@ -269,18 +274,18 @@ provider credentials out of the agent environment entirely is
 allod/strategy#13; this command narrows what a worker can reach, not what
 the runner itself holds.
 
-A sandboxed commit is not hooked "unchanged": the global hooks under
-`~/.config/git/hooks` are bound read-only and run exactly as they do
-outside the sandbox, by default. But a worker can disable or redirect
-them from inside its own clone — unset `core.hooksPath`, point it
-elsewhere, or add an executable of its own under `.git/hooks` — and
-nothing in the sandbox stops that config write. What stops it from
-mattering is docs/allod-change.md's config-safety gate: it reads that
-config before the overseer's first git command against the clone and
-refuses if a hook was added or redirected, so the overseer never acts on
-a clone whose hooks it cannot trust. The real walls this command relies on
-are the absent credentials (no forge token, no SSH key) and the forge's
-own server-side branch protection — not "the hooks still ran".
+A worker holding the VM's own forge SSH key and token can disable or
+redirect its own clone's hooks, point `core.hooksPath`
+elsewhere, add an executable of its own under `.git/hooks`, push commits
+onto a sibling's `agent/*` branch, open PRs, and comment under the agent
+account — nothing in the sandbox stops any of that, and nothing outside
+the sandbox reads the clone's config to catch it either, because nothing
+outside the sandbox runs git in a clone at all any more
+(docs/allod-change.md, "Inside and outside the sandbox"). The walls this
+command relies on are the forge's own server-side rules — protected
+default branches, no force-push on `agent/*`, the token's existing scope
+— and the overseer's review of the branch once it reaches the forge, not
+a local gate reading the clone's config before acting on it.
 
 ## Store paths persist on the VM
 

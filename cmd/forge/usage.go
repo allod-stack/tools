@@ -36,8 +36,8 @@ PR commands:
       Close a pull request; -d deletes the remote head branch
   forge pr merge {<number> | <url> | <branch>} (-m | -r | -s) [-d] [--match-head-commit <sha>] [-t <text>] [-b <text> | -F <file>]
       Merge a pull request; not implemented: --auto, --admin, --author-email, fast-forward-only, manually-merged
-  forge pr find-by-head <branch>
-      Print PR number if an open PR exists for that head branch (empty if none)
+  forge pr find-by-head <branch> [-s open|all]
+      Print PR number if a pull request exists for that head branch (empty if none); -s all adds its state
 
 Auth commands:
   forge auth status
@@ -198,11 +198,16 @@ Flags:
   -F, --body-file <file>    Read body from file (use "-" for stdin)
   -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
 `,
-	"pr find-by-head": `Usage: forge pr find-by-head <branch> [-R <owner/repo>]
+	"pr find-by-head": `Usage: forge pr find-by-head <branch> [-s open|all] [-R <owner/repo>]
 
-Print PR number if an open PR exists for that head branch (empty if none).
+Print PR number if a pull request exists for that head branch (empty if
+none). Default -s open matches today's behaviour exactly: a bare number, and
+only an open pull request counts. -s all matches a pull request in any
+state and prints "<number>\t<state>" instead, state being open, closed, or
+merged.
 
 Flags:
+  -s, --state <state>       open (default) or all
   -R, --repo <owner/repo>   Target repository (default: inferred from git remote)
 `,
 	"pr close": `Usage: forge pr close {<number> | <url> | <branch>} [-c <text>] [-d] [-R <owner/repo>]

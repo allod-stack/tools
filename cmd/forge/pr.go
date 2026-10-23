@@ -437,21 +437,51 @@ func prCreate(args []string) {
 // prFindByHead mirrors pr_find_by_head (forge line 746): the PR number for an
 // open PR with this head branch, and nothing at all — not even a newline —
 // when there is none. The pulls list endpoint ignores a head filter, so the
-// matching happens here.
+// matching happens here. '-s all' instead prints "<number>\t<state>" for a
+// head branch's pull request in any state (open, closed, or merged), so a
+// caller can tell a landed pull request from one still open.
 func prFindByHead(args []string) {
 	if containsHelpFlag(args) {
 		commandUsage("pr find-by-head")
 		return
 	}
-	parseRepoPositionals("pr find-by-head", args)
-	if len(positionalArgs) != 1 {
+	state := "open"
+	var branches []string
+	for len(args) > 0 {
+		switch {
+		case args[0] == "-R" || args[0] == "--repo":
+			setRepoOption(args)
+			args = args[2:]
+		case args[0] == "-s" || args[0] == "--state":
+			requireOptionValue(args[0], len(args))
+			switch args[1] {
+			case "open", "all":
+				state = args[1]
+			default:
+				die("--state must be one of: open, all")
+			}
+			args = args[2:]
+		case strings.HasPrefix(args[0], "-"):
+			die("unknown option for pr find-by-head: %s", args[0])
+		default:
+			branches = append(branches, args[0])
+			args = args[1:]
+		}
+	}
+	if len(branches) != 1 {
 		die("usage: forge pr find-by-head <branch>")
 	}
 	requireRepo()
-	headBranch := positionalArgs[0]
+	headBranch := branches[0]
 
-	// Every open PR must be seen to rule a head branch out, so this fetches
-	// every page (allod/tools#89).
+	// The API's head filter is unreliable, so every page in scope is scanned.
+	if state == "all" {
+		number, prState := prNumberAndStateForHead(fetchPages("/repos/"+repoOpt+"/pulls?state=all", 0), headBranch)
+		if number != "" {
+			fmt.Fprintf(stdout, "%s\t%s\n", number, prState)
+		}
+		return
+	}
 	number := prNumberForHead(fetchPages("/repos/"+repoOpt+"/pulls?state=open", 0), headBranch)
 	if number != "" {
 		fmt.Fprintln(stdout, number)
@@ -799,6 +829,44 @@ func prNumberForHead(pulls []any, head string) string {
 		return chompNewlines(jqString(number))
 	}
 	return ""
+}
+
+// prShortState is prStatusCell without the merge date: open, closed, or
+// merged, for a caller ('pr find-by-head -s all') that only needs to tell
+// the three apart, never render one for a human.
+func prShortState(pr any) string {
+	state := jqString(jsonField(pr, "state"))
+	if state != "closed" {
+		return state
+	}
+	if merged, _ := jsonField(pr, "merged").(bool); merged {
+		return "merged"
+	}
+	return "closed"
+}
+
+// prNumberAndStateForHead is prNumberForHead's '-s all' counterpart: an open
+// pull request is preferred; otherwise the first match and its state are returned.
+func prNumberAndStateForHead(pulls []any, head string) (string, string) {
+	firstNumber, firstState := "", ""
+	for _, pr := range pulls {
+		if ref, ok := jsonPath(pr, "head", "ref").(string); !ok || ref != head {
+			continue
+		}
+		number := jsonField(pr, "number")
+		if number == nil || number == false {
+			continue
+		}
+		state := prShortState(pr)
+		numberText := chompNewlines(jqString(number))
+		if state == "open" {
+			return numberText, state
+		}
+		if firstNumber == "" {
+			firstNumber, firstState = numberText, state
+		}
+	}
+	return firstNumber, firstState
 }
 
 // bashEcho writes one argument the way the bash `echo` builtin does.

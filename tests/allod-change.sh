@@ -253,6 +253,10 @@ make_restricted_path_without_forge() {
   printf '%s\n' "$bin"
 }
 
+# MOCK_FORGE_ALL_STATE and MOCK_FORGE_ALL_NUMBER answer '-s all' (cleanup and
+# list's own query): empty MOCK_FORGE_ALL_STATE means no pull request for
+# the branch at all. MOCK_FORGE_FAIL, set to anything, forces every call to
+# fail, for the "forge did not answer" cases.
 make_mock_forge() {
   local mode="$1"
   local bin="$TMP/forge-${mode}-bin"
@@ -264,7 +268,25 @@ set -euo pipefail
 
 printf '%s\n' "$*" >> "$MOCK_FORGE_LOG"
 
+if [[ -n "${MOCK_FORGE_FAIL:-}" ]]; then
+  echo "mock forge: forced failure" >&2
+  exit 1
+fi
+
 if [[ "$1 $2" == "pr find-by-head" ]]; then
+  shift 2
+  state_all=false
+  for arg in "$@"; do
+    if [[ "$arg" == "all" ]]; then
+      state_all=true
+    fi
+  done
+  if $state_all; then
+    if [[ -n "${MOCK_FORGE_ALL_STATE:-}" ]]; then
+      printf '%s\t%s\n' "${MOCK_FORGE_ALL_NUMBER:-99}" "$MOCK_FORGE_ALL_STATE"
+    fi
+    exit 0
+  fi
   if [[ "${MOCK_FORGE_MODE:-}" == "existing" ]]; then
     printf '42\n'
   fi
@@ -332,18 +354,6 @@ while (( i <= argc )); do
         printf '%s\n' "$*" >> "$GIT_PUSH_LOG"
       fi
       ;;
-    status)
-      if [[ "$MOCK_GIT_MODE" == "fail-status" ]]; then
-        echo "mock git: status forced to fail" >&2
-        exit 1
-      fi
-      ;;
-    ls-files)
-      if [[ "$MOCK_GIT_MODE" == "fail-ls-files" ]]; then
-        echo "mock git: ls-files forced to fail" >&2
-        exit 1
-      fi
-      ;;
   esac
   i=$((i + 1))
 done
@@ -379,6 +389,18 @@ EOF
   } > "$bin/git"
   chmod +x "$bin/git"
   printf '%s\n' "$bin"
+}
+
+# Plants a core.hooksPath directory in the clone's own .git/config, with one
+# hook under it that touches marker: proof that no outside command ran any
+# git command in the clone at all, which would otherwise be the one way the
+# hook could fire (no sandboxed worker is running inside it either).
+plant_never_run_hook() {
+  local path="$1" marker="$2" dir="$TMP/never-run-hooks-$RANDOM"
+  mkdir -p "$dir"
+  printf '#!/bin/sh\ntouch "%s"\n' "$marker" > "$dir/post-checkout"
+  chmod +x "$dir/post-checkout"
+  git -C "$path" config core.hooksPath "$dir"
 }
 
 # begin tests
@@ -602,7 +624,9 @@ assert_equal "$(cat "$git_dir/allod-change-branch")" "agent/$desc" \
 assert_equal "$(git -C "$repo" branch --show-current)" "master" \
   "begin --resume leaves the shared checkout on its default branch"
 printf 'resumed twice\n' > "$path/tracked.txt"
+export ALLOD_CHANGE_SANDBOX=1
 record_in_repo "$path" -m "second commit on the resumed branch" >/dev/null
+unset ALLOD_CHANGE_SANDBOX
 assert_equal "$(git -C "$repo" ls-remote origin "refs/heads/agent/$desc" | cut -f1)" \
   "$(git -C "$path" rev-parse HEAD)" \
   "record pushes a resumed branch additively"
@@ -707,11 +731,14 @@ repo="$HOME/work/list-rows"
 init_repo "$repo" master
 desc="${RUN_ID}-rows"
 path=$(begin_clone "$desc" "$repo")
-capture "$ALLOD" change list "$repo"
+forge_log="$TMP/forge-list-rows.log"
+export MOCK_FORGE_LOG="$forge_log" MOCK_FORGE_ALL_STATE="" MOCK_FORGE_ALL_NUMBER=""
+forge_bin=$(make_mock_forge list-rows)
+capture_with_path "$forge_bin:$PATH" "$ALLOD" change list "$repo"
 assert_status 0 "list exits 0 with a clone present"
 assert_equal "$(printf '%s' "$CAPTURE_OUTPUT" | grep -c .)" "1" "list prints one row per ledgered clone"
-assert_equal "$CAPTURE_OUTPUT" "$(printf 'list-rows\t%s\tagent/%s\tclean' "$path" "$desc")" \
-  "list row carries repo, path, branch, and state: a fresh clone with no commits of its own is clean, even though its branch was never pushed under its own name, because HEAD is still reachable from origin's default branch"
+assert_equal "$CAPTURE_OUTPUT" "$(printf 'list-rows\t%s\tagent/%s\tunsubmitted' "$path" "$desc")" \
+  "list row carries repo, path, branch, and state: a fresh clone with no pull request yet is unsubmitted, read from the forge, never from the clone's own disk"
 
 # The ledger is the whole mechanism: a two-line file under the parent's own
 # .git, named for the description, gone once 'cleanup' runs.
@@ -722,18 +749,12 @@ ledger_file="$git_dir/allod-changes/$desc"
   fail "begin -d writes a ledger entry in the parent" "missing: $ledger_file"
 assert_equal "$(sed -n '1p' "$ledger_file")" "$path" "the ledger entry's first line is the clone's path"
 assert_equal "$(sed -n '2p' "$ledger_file")" "agent/$desc" "the ledger entry's second line is the clone's branch"
-# unpushedCommitsForClone falls back to origin's default branch head when the ledger branch is
-# absent remotely; this clone has no commit beyond that, so no push is needed first.
-capture record_in_repo "$path" -m "nothing to record"
-assert_status 4 "record on a fresh, uncommitted clone has nothing to commit and nothing unpushed to push either"
-capture "$ALLOD" change cleanup "$path"
-assert_status 0 "cleanup removes a clean clone, with no push needed first"
-[[ ! -e "$ledger_file" ]] &&
-  pass "cleanup drops the parent's ledger entry" ||
-  fail "cleanup drops the parent's ledger entry" "still exists: $ledger_file"
-[[ ! -d "$path" ]] &&
-  pass "cleanup removes the clone directory" ||
-  fail "cleanup removes the clone directory" "still exists: $path"
+capture_with_path "$forge_bin:$PATH" "$ALLOD" change cleanup "$path"
+assert_status 1 "cleanup refuses a clone whose branch has no pull request yet"
+assert_contains "$CAPTURE_OUTPUT" "no pull request" "the no-pull-request refusal is actionable"
+assert_contains "$CAPTURE_OUTPUT" "allod change run" "the no-pull-request refusal names the worker's own command"
+rm -rf "$path"
+rm -f "$ledger_file"
 
 other_repo="$HOME/work/list-other"
 init_repo "$other_repo" master
@@ -749,56 +770,100 @@ capture "$ALLOD" change list "$other_repo"
 assert_contains "$CAPTURE_OUTPUT" "$other_path" "list <repo-path> lists that repo's clones"
 assert_not_contains "$CAPTURE_OUTPUT" "$path" "list <repo-path> scopes to that repo only"
 
-# One case per state, each checked against what cleanup actually does.
+# Clone states come from the forge: one case per state, each checked
+# against what cleanup actually does, driven by the mock forge's '-s all'
+# answer.
+
+list_with_forge() {
+  local repo="$1" forge_bin="$2"
+  capture_with_path "$forge_bin:$PATH" "$ALLOD" change list "$repo"
+}
+
+cleanup_with_forge() {
+  local path="$1" forge_bin="$2"
+  capture_with_path "$forge_bin:$PATH" "$ALLOD" change cleanup "$path"
+}
 
 repo="$HOME/work/list-states"
 init_repo "$repo" master
 
-desc="${RUN_ID}-state-clean"
-path=$(begin_clone "$desc" "$repo")
-# Pushed once then committed again: exercises the 'present' ls-remote path, not the default-branch
-# fallback a never-pushed clone takes.
-printf 'already landed\n' > "$path/tracked.txt"
-git -C "$path" commit -qam "already landed"
-git -C "$path" push -q origin HEAD
-assert_list_matches_cleanup "$repo" "$path" clean "a clone with a commit, genuinely pushed under its own branch name"
+forge_log="$TMP/forge-list-states.log"
+export MOCK_FORGE_LOG="$forge_log"
+forge_bin=$(make_mock_forge list-states)
 
-desc="${RUN_ID}-state-dirty"
+desc="${RUN_ID}-state-open"
 path=$(begin_clone "$desc" "$repo")
-printf 'dirty\n' > "$path/tracked.txt"
-assert_list_matches_cleanup "$repo" "$path" dirty "a dirty clone"
+MOCK_FORGE_ALL_NUMBER=7 MOCK_FORGE_ALL_STATE=open list_with_forge "$repo" "$forge_bin"
+assert_contains "$CAPTURE_OUTPUT" $'\topen' "list reports open for a branch with an open pull request"
+MOCK_FORGE_ALL_NUMBER=7 MOCK_FORGE_ALL_STATE=open cleanup_with_forge "$path" "$forge_bin"
+assert_status 1 "cleanup refuses a clone whose pull request is still open"
+assert_contains "$CAPTURE_OUTPUT" "still open" "the open-pull-request refusal is actionable"
+[[ -d "$path" ]] &&
+  pass "cleanup's open-pull-request refusal preserves the clone" ||
+  fail "cleanup's open-pull-request refusal preserves the clone" "missing: $path"
 
-desc="${RUN_ID}-state-unpushed"
+desc="${RUN_ID}-state-merged"
 path=$(begin_clone "$desc" "$repo")
-printf 'unpushed\n' > "$path/tracked.txt"
-git -C "$path" commit -qam "unpushed"
-# Exercises the default-branch fallback (branch never pushed): a real local commit neither remote
-# head is an ancestor of still refuses.
-assert_list_matches_cleanup "$repo" "$path" unpushed "a clone with one local commit on an otherwise never-pushed branch"
-
-# git cherry compares non-merge patches. A merge commit absent from the base
-# must still block deletion even when both of its parents are already there.
-repo="$HOME/work/list-state-merge"
-init_repo "$repo" master
-printf 'second base\n' > "$repo/tracked.txt"
-git -C "$repo" commit -qam "second base"
+plant_never_run_hook "$path" "$TMP/never-run-merged-${RUN_ID}"
+# Model #297's landing shape before the forge answers: the branch is
+# rebase-merged under a new hash and then deleted. The recorded PR head and
+# merged state remain authoritative; cleanup must not inspect the clone.
+printf 'rebase-merged\n' > "$path/tracked.txt"
+git -C "$path" commit -qam "rebase-merged work"
+git -C "$path" push -q origin "HEAD:refs/heads/agent/$desc"
+source_sha=$(git -C "$path" rev-parse HEAD)
+git -C "$repo" fetch -q origin "agent/$desc"
+git -C "$repo" cherry-pick "$source_sha" >/dev/null
+git -C "$repo" commit -q --amend -m 'rebase-merged work (forge)'
 git -C "$repo" push -q origin master
-desc="${RUN_ID}-state-merge"
-path=$(begin_clone "$desc" "$repo")
-base_commit=$(git -C "$path" rev-parse HEAD)
-base_parent=$(git -C "$path" rev-parse HEAD^)
-base_tree=$(git -C "$path" rev-parse 'HEAD^{tree}')
-merge_commit=$(printf 'local merge\n' | git -C "$path" commit-tree "$base_tree" -p "$base_commit" -p "$base_parent")
-git -C "$path" reset -q --hard "$merge_commit"
-assert_list_matches_cleanup "$repo" "$path" unpushed "a clone with an unpushed merge commit"
+git -C "$repo" push -q origin --delete "agent/$desc"
+[[ "$(git -C "$path" rev-parse HEAD)" != "$(git -C "$repo" rev-parse HEAD)" ]] &&
+  pass "the merged-PR fixture lands the patch under a new hash before deleting its branch" ||
+  fail "the merged-PR fixture lands the patch under a new hash before deleting its branch"
+git_dir=$(git -C "$repo" rev-parse --path-format=absolute --git-dir)
+ledger_file="$git_dir/allod-changes/$desc"
+MOCK_FORGE_ALL_NUMBER=8 MOCK_FORGE_ALL_STATE=merged list_with_forge "$repo" "$forge_bin"
+assert_contains "$CAPTURE_OUTPUT" $'\tmerged' "list reports merged after a patch-equivalent landing deletes the pull request's branch"
+MOCK_FORGE_ALL_NUMBER=8 MOCK_FORGE_ALL_STATE=merged cleanup_with_forge "$path" "$forge_bin"
+assert_status 0 "cleanup removes the branch-deleted clone whose pull request is merged"
+[[ ! -d "$path" ]] &&
+  pass "cleanup deletes the clone directory once merged" ||
+  fail "cleanup deletes the clone directory once merged" "still exists: $path"
+[[ ! -e "$ledger_file" ]] &&
+  pass "cleanup drops the ledger entry once merged" ||
+  fail "cleanup drops the ledger entry once merged" "still exists: $ledger_file"
+[[ ! -e "$TMP/never-run-merged-${RUN_ID}" ]] &&
+  pass "cleanup never ran the clone's own core.hooksPath hook" ||
+  fail "cleanup never ran the clone's own core.hooksPath hook" "marker present"
 
-desc="${RUN_ID}-state-detached"
+desc="${RUN_ID}-state-closed"
 path=$(begin_clone "$desc" "$repo")
-git -C "$path" checkout -q --detach
-assert_list_matches_cleanup "$repo" "$path" detached "a clone with a detached HEAD"
+plant_never_run_hook "$path" "$TMP/never-run-closed-${RUN_ID}"
+MOCK_FORGE_ALL_NUMBER=9 MOCK_FORGE_ALL_STATE=closed list_with_forge "$repo" "$forge_bin"
+assert_contains "$CAPTURE_OUTPUT" $'\tclosed' "list reports closed for a branch with a closed, unmerged pull request"
+MOCK_FORGE_ALL_NUMBER=9 MOCK_FORGE_ALL_STATE=closed cleanup_with_forge "$path" "$forge_bin"
+assert_status 0 "cleanup removes a clone whose pull request is closed without merging"
+[[ ! -d "$path" ]] &&
+  pass "cleanup deletes the clone directory once closed" ||
+  fail "cleanup deletes the clone directory once closed" "still exists: $path"
+[[ ! -e "$TMP/never-run-closed-${RUN_ID}" ]] &&
+  pass "cleanup never ran the closed clone's own core.hooksPath hook either" ||
+  fail "cleanup never ran the closed clone's own core.hooksPath hook either" "marker present"
+
+desc="${RUN_ID}-state-forge-fails"
+path=$(begin_clone "$desc" "$repo")
+MOCK_FORGE_FAIL=1 list_with_forge "$repo" "$forge_bin"
+assert_contains "$CAPTURE_OUTPUT" $'\tunknown' "list reports unknown when the forge does not answer"
+MOCK_FORGE_FAIL=1 cleanup_with_forge "$path" "$forge_bin"
+assert_status 1 "cleanup refuses when the forge does not answer"
+assert_contains "$CAPTURE_OUTPUT" "could not ask the forge" "the forge-failure refusal names it"
+unset MOCK_FORGE_FAIL
+rm -rf "$path"
+rm -f "$git_dir/allod-changes/$desc"
 
 # A deleted clone is 'missing', never 'prunable': no worktree-prune side channel exists, so cleanup
 # drops the ledger entry itself; the ledger match must happen before resolveGitRepo would refuse.
+# 'missing' is checked before the forge is ever asked anything, so no mock forge is needed here.
 repo="$HOME/work/list-missing"
 init_repo "$repo" master
 desc="${RUN_ID}-missing"
@@ -814,88 +879,23 @@ assert_contains "$CAPTURE_OUTPUT" "is missing" "cleanup on a missing clone says 
   pass "cleanup drops the ledger entry of a missing clone" ||
   fail "cleanup drops the ledger entry of a missing clone" "still exists: $ledger_file"
 
-# A deliberately stale local remote-tracking ref must not block a clean clone: unpushedCommitsForClone
-# asks the real remote via ls-remote, never the local ref.
-repo="$HOME/work/cleanup-fetches-first"
+# A ledgered path that exists as a regular file is not missing; list still
+# asks the forge for the branch's pull-request state.
+repo="$HOME/work/list-not-a-directory"
 init_repo "$repo" master
-desc="${RUN_ID}-cleanup-fetches-first"
-path=$(begin_clone "$desc" "$repo")
-printf 'relayed\n' > "$path/tracked.txt"
-git -C "$path" commit -qam "relayed elsewhere"
-git -C "$path" push -q origin "HEAD:refs/heads/agent/$desc"
-git -C "$path" branch -q --set-upstream-to="origin/agent/$desc"
-stale=$(git -C "$path" rev-parse HEAD^)
-git -C "$path" update-ref "refs/remotes/origin/agent/$desc" "$stale"
-capture "$ALLOD" change cleanup "$path"
-assert_status 0 \
-  "cleanup asks the real remote directly, so a stale local tracking ref does not block a clean clone"
-[[ ! -d "$path" ]] &&
-  pass "cleanup removes the clone once the real remote shows it clean" ||
-  fail "cleanup removes the clone once the real remote shows it clean" "still exists: $path"
+desc="${RUN_ID}-list-not-a-directory"
+list_file_git_dir=$(git -C "$repo" rev-parse --path-format=absolute --git-dir)
+mkdir -p "$list_file_git_dir/allod-changes"
+list_file_path="$HOME/changes/${RUN_ID}-list-not-a-directory-file"
+touch "$list_file_path"
+printf '%s\nagent/%s\n' "$list_file_path" "$desc" > "$list_file_git_dir/allod-changes/$desc"
+MOCK_FORGE_ALL_NUMBER=10 MOCK_FORGE_ALL_STATE=open list_with_forge "$repo" "$forge_bin"
+assert_contains "$CAPTURE_OUTPUT" "${list_file_path}"$'\t'"agent/$desc"$'\topen' \
+  "list asks the forge about a ledgered path that exists as a regular file"
+rm -f "$list_file_path" "$list_file_git_dir/allod-changes/$desc"
 
-# A rebase-merged, forge-deleted branch (allod/tools#297): the merge lands under a
-# new hash the clone never fetched; cleanup must fetch and judge by patch, not hash.
-repo="$HOME/work/cleanup-rebase-merge"
-init_repo "$repo" master
-desc="${RUN_ID}-cleanup-rebase-merge"
-path=$(begin_clone "$desc" "$repo")
-printf 'rebase-merged\n' > "$path/tracked.txt"
-git -C "$path" commit -qam "rebase-merged work"
-git -C "$path" push -q origin "HEAD:refs/heads/agent/$desc"
-# The forge side: apply the patch onto master under a new hash, delete the branch.
-git -C "$repo" fetch -q origin "agent/$desc"
-git -C "$repo" checkout -q -B "forge-rebase-${RUN_ID}" master
-git -C "$repo" cherry-pick FETCH_HEAD
-git -C "$repo" commit -q --amend -m 'rebase-merged work (forge)'
-git -C "$repo" push -q origin "HEAD:refs/heads/master"
-git -C "$repo" push -q origin --delete "agent/$desc"
-git -C "$repo" checkout -q master
-git -C "$repo" branch -qD "forge-rebase-${RUN_ID}"
-[[ "$(git -C "$path" rev-parse HEAD)" != "$(git -C "$repo" rev-parse origin/master)" ]] &&
-  pass "the fixture rebase-merge really produced a hash the clone has never seen" ||
-  fail "the fixture rebase-merge really produced a hash the clone has never seen" 'identical hashes: the fixture proves nothing'
-capture "$ALLOD" change list "$repo"
-assert_contains "$CAPTURE_OUTPUT" 'unknown' \
-  'list without a fetch reports the never-fetched rewrite as unknown, not clean'
-capture "$ALLOD" change cleanup "$path"
-assert_status 0 \
-  "cleanup fetches, so a rebase-merged branch deleted on origin cleans up instead of dying on a missing object"
-[[ ! -d "$path" ]] &&
-  pass "cleanup removes the rebase-merged clone" ||
-  fail "cleanup removes the rebase-merged clone" "still exists: $path"
-
-# A forged local remote-tracking ref claiming an unpushed branch already landed must not fool
-# cleanup either: only the real remote is trusted.
-repo="$HOME/work/unpushed-local-ref-lie"
-init_repo "$repo" master
-desc="${RUN_ID}-unpushed-local-ref-lie"
-path=$(begin_clone "$desc" "$repo")
-printf 'real work\n' > "$path/tracked.txt"
-git -C "$path" commit -qam "real work, never pushed"
-git -C "$path" update-ref "refs/remotes/origin/agent/$desc" "$(git -C "$path" rev-parse HEAD)"
-capture "$ALLOD" change cleanup "$path"
-assert_status 1 "cleanup refuses a clone whose only evidence of being pushed is its own local remote-tracking ref"
-assert_contains "$CAPTURE_OUTPUT" "unpushed" "the refusal says the branch is unpushed, not clean"
-[[ -d "$path" ]] &&
-  pass "the local-ref lie does not make cleanup discard real, unpushed work" ||
-  fail "the local-ref lie does not make cleanup discard real, unpushed work" "missing: $path"
-git -C "$path" push -q origin HEAD
-capture "$ALLOD" change cleanup "$path"
-assert_status 0 "cleanup succeeds once the branch is genuinely pushed"
-
-# ls-remote genuinely unreachable (not just 'branch absent', exit 2) must read 'unknown', never
-# pushed or clean; breaking origin identically in parent and clone keeps the origin check happy.
-repo="$HOME/work/list-state-clone-unknown"
-init_repo "$repo" master
-desc="${RUN_ID}-state-clone-unknown"
-path=$(begin_clone "$desc" "$repo")
-broken_origin="$TMP/does-not-exist-${RUN_ID}.git"
-git -C "$repo" remote set-url origin "$broken_origin"
-git -C "$path" remote set-url origin "$broken_origin"
-assert_list_matches_cleanup "$repo" "$path" unknown "a clone whose remote cannot even be reached"
-
-# This fixture has no origin at all, which 'begin' now refuses outright, so it is built as a
-# raw linked worktree instead.
+# This fixture has no origin at all, which 'begin' refuses outright, so it is built as a raw
+# linked worktree instead; legacy worktree states are untouched.
 repo="$HOME/work/list-state-unknown"
 init_repo_no_remote "$repo" master
 desc="${RUN_ID}-state-unknown"
@@ -913,78 +913,6 @@ assert_list_matches_cleanup "$repo" "$path" unknown "a worktree with no remote c
 assert_contains "$CAPTURE_OUTPUT" "no origin remote" \
   "unknown cleanup refusal names why comparison failed"
 
-# The config gate refuses a populated submodule (exit 11) for record/submit/cleanup/run, but
-# 'list' reports that row 'unsafe' and keeps listing the rest.
-sub_repo="$HOME/work/list-submodule"
-init_repo_with_submodule "$sub_repo" master
-
-desc="${RUN_ID}-state-sub-unpopulated"
-path=$(begin_clone "$desc" "$sub_repo")
-assert_equal "$(git -C "$path" status --porcelain)" "" "an unpopulated submodule leaves a clean status"
-git -C "$path" push -q origin HEAD
-assert_list_matches_cleanup "$sub_repo" "$path" clean "a clone whose submodule is unpopulated"
-
-desc="${RUN_ID}-state-sub-populated"
-path=$(begin_clone "$desc" "$sub_repo")
-populate_submodules "$path"
-assert_equal "$(git -C "$path" status --porcelain)" "" \
-  "a populated submodule at its recorded commit leaves a clean status"
-assert_equal "$(list_state_for "$sub_repo" "$path")" "unsafe" \
-  "list reports unsafe, not a crash, for a clone with a populated submodule"
-capture "$ALLOD" change cleanup "$path"
-assert_status 11 "cleanup refuses a clone with a populated submodule, sandboxed clones do not support them"
-[[ -d "$path" ]] &&
-  pass "cleanup's submodule refusal preserves the clone" ||
-  fail "cleanup's submodule refusal preserves the clone" "missing: $path"
-# allod itself can never clean this one up with cleanup (it too refuses),
-# so later tests against $sub_repo's ledger need it gone by hand.
-sub_git_dir=$(git -C "$sub_repo" rev-parse --path-format=absolute --git-dir)
-rm -rf "$path"
-rm -f "$sub_git_dir/allod-changes/$desc"
-
-desc="${RUN_ID}-state-sub-populated-alongside"
-other_path=$(begin_clone "$desc" "$sub_repo")
-populate_submodules "$other_path"
-other_path2_desc="${RUN_ID}-state-sub-populated-sibling"
-other_path2=$(begin_clone "$other_path2_desc" "$sub_repo")
-git -C "$other_path2" push -q origin HEAD
-capture "$ALLOD" change list "$sub_repo"
-assert_status 0 "list does not die when one of several clones is unsafe"
-assert_contains "$CAPTURE_OUTPUT" "$other_path	agent/$desc	unsafe" \
-  "the unsafe clone's own row says so"
-assert_contains "$CAPTURE_OUTPUT" "$other_path2	agent/$other_path2_desc	clean" \
-  "a safe sibling clone still gets its own row"
-rm -rf "$other_path"
-rm -f "$sub_git_dir/allod-changes/$desc"
-"$ALLOD" change cleanup "$other_path2" >/dev/null
-
-# Precedence, one assertion per adjacent pair of the reporting order.
-
-repo="$HOME/work/list-precedence"
-init_repo "$repo" master
-
-desc="${RUN_ID}-detached-dirty"
-path=$(begin_clone "$desc" "$repo")
-git -C "$path" checkout -q --detach
-printf 'dirty\n' > "$path/tracked.txt"
-assert_equal "$(list_state_for "$repo" "$path")" "detached" "list reports detached ahead of dirty"
-
-desc="${RUN_ID}-submodule-dirty"
-path=$(begin_clone "$desc" "$sub_repo")
-populate_submodules "$path"
-printf 'dirty\n' > "$path/tracked.txt"
-assert_equal "$(list_state_for "$sub_repo" "$path")" "unsafe" \
-  "list reports unsafe ahead of reporting dirty"
-rm -rf "$path"
-rm -f "$sub_git_dir/allod-changes/$desc"
-
-desc="${RUN_ID}-dirty-unpushed"
-path=$(begin_clone "$desc" "$repo")
-printf 'committed\n' > "$path/tracked.txt"
-git -C "$path" commit -qam "unpushed"
-printf 'dirty\n' > "$path/tracked.txt"
-assert_equal "$(list_state_for "$repo" "$path")" "dirty" "list reports dirty ahead of unpushed"
-
 # legacy linked worktree tests (drain window)
 # 'begin' makes no more of these; 'list'/'record'/'cleanup' must still handle one made before.
 
@@ -994,6 +922,24 @@ init_repo "$repo" master
 desc="${RUN_ID}-legacy-clean"
 path=$(make_legacy_worktree "$desc" "$repo" master)
 assert_list_matches_cleanup "$repo" "$path" clean "a fresh legacy worktree"
+
+# Legacy linked worktrees still use Git history. Once the source branch has
+# disappeared, patch equivalence against the freshly fetched default branch
+# recognizes a rebase-style landing instead of requiring the old hash.
+desc="${RUN_ID}-legacy-rebase-landed"
+path=$(make_legacy_worktree "$desc" "$repo" master)
+printf 'legacy rebase landing\n' > "$path/tracked.txt"
+git -C "$path" commit -qam "legacy rebase landing"
+git -C "$path" push -q origin "HEAD:refs/heads/agent/$desc"
+source_sha=$(git -C "$path" rev-parse HEAD)
+git -C "$repo" fetch -q origin "agent/$desc"
+git -C "$repo" cherry-pick "$source_sha" >/dev/null
+git -C "$repo" commit -q --amend -m 'legacy rebase landing (forge)'
+git -C "$repo" push -q origin master
+git -C "$repo" push -q origin --delete "agent/$desc"
+git -C "$repo" fetch -q --prune origin
+assert_list_matches_cleanup "$repo" "$path" clean \
+  "a legacy worktree whose deleted branch landed patch-equivalently"
 
 desc="${RUN_ID}-legacy-locked"
 path=$(make_legacy_worktree "$desc" "$repo" master)
@@ -1107,102 +1053,118 @@ remote_has_branch "$repo" feature &&
 assert_equal "$(git -C "$repo" log -1 --format=%s)" "record nonprotected" \
   "record uses provided commit message"
 
-repo="$HOME/work/record-protected"
+# Outside the sandbox, a ledgered clone is the worker's own: record and
+# submit refuse it outright, before any lock and before any git command
+# runs against it.
+repo="$HOME/work/record-outside-sandboxed-clone"
 init_repo "$repo" master
-protect_repo "$repo" master
-desc="${RUN_ID}-record-protected"
+desc="${RUN_ID}-outside-sandboxed-clone"
+path=$(begin_clone "$desc" "$repo")
+head_before=$(git -C "$path" rev-parse HEAD)
+capture record_in_repo "$path" -m "must be refused"
+assert_status 11 "record refuses a ledgered clone from outside the sandbox"
+assert_contains "$CAPTURE_OUTPUT" "allod change run" \
+  "the outside record refusal names the worker's own sandboxed command"
+assert_equal "$(git -C "$path" rev-parse HEAD)" "$head_before" "the refused record committed nothing"
+
+capture submit_in_repo "$path" -t "must be refused" --dry-run
+assert_status 11 "submit refuses a ledgered clone from outside the sandbox"
+assert_contains "$CAPTURE_OUTPUT" "allod change run" \
+  "the outside submit refusal names the worker's own sandboxed command"
+
+# The ledger match that decides this is pure path comparison, never a git
+# command; the logging git proves none runs against the clone either way.
+git_call_log="$TMP/git-call-log-${RUN_ID}"
+: > "$git_call_log"
+logging_git_bin=$(make_logging_git "$git_call_log")
+saved_path_for_log="$PATH"
+export PATH="$logging_git_bin:$PATH"
+capture record_in_repo "$path" -m "must be refused"
+export PATH="$saved_path_for_log"
+assert_status 11 "record (logging git) still refuses the clone from outside the sandbox"
+calls_against_clone=$(grep -F -- "$path" "$git_call_log" || true)
+[[ -z "$calls_against_clone" ]] &&
+  pass "no git command runs against the clone before the outside refusal" ||
+  fail "no git command runs against the clone before the outside refusal" "$calls_against_clone"
+
+# Inside the sandbox (ALLOD_CHANGE_SANDBOX=1, set only by 'run' in practice):
+# record and submit treat the clone as an ordinary repository. A clone never
+# sits at its repo's own registered path (it lives under ~/changes), so
+# protection can only reach it through the origin-identity match, never the
+# exact-path one: the parent sits at 'work/acme/sandboxed-<run>', which is
+# both its own registered entry (so the parent itself is not misplaced) and
+# the tail of its origin's own path (so the clone's origin-identity lookup
+# finds the same entry), exactly the way a real forge URL's owner/repo tail
+# would.
+repo="$HOME/work/acme/sandboxed-${RUN_ID}"
+sandboxed_remote="$TMP/remotes/acme/sandboxed-${RUN_ID}.git"
+mkdir -p "$(dirname "$repo")" "$(dirname "$sandboxed_remote")"
+git init -q --bare -b master "$sandboxed_remote"
+git init -q -b master "$repo"
+git -C "$repo" config user.name "Test User"
+git -C "$repo" config user.email "test@example.invalid"
+printf 'base\n' > "$repo/tracked.txt"
+git -C "$repo" add tracked.txt
+git -C "$repo" commit -qm initial
+git -C "$repo" remote add origin "$sandboxed_remote"
+git -C "$repo" push -q -u origin master
+git -C "$repo" fetch -q origin
+git -C "$repo" remote set-head origin master
+printf 'work/acme/sandboxed-%s master\n' "$RUN_ID" >> "$HOME/.config/git/protected-branches"
+desc="${RUN_ID}-sandboxed"
 path=$(begin_clone "$desc" "$repo")
 printf 'changed\n' > "$path/tracked.txt"
-capture record_in_repo "$path" -m "record protected clone"
-assert_status 0 "record commits and pushes a protected repo's clone"
-remote_has_branch "$repo" "agent/$desc" &&
-  pass "record pushes a protected repo's clone's agent branch" ||
-  fail "record pushes a protected repo's clone's agent branch"
+export ALLOD_CHANGE_SANDBOX=1
+capture record_in_repo "$path" -m "record inside the sandbox"
+unset ALLOD_CHANGE_SANDBOX
+assert_status 0 "record inside the sandbox commits and pushes a protected repo's clone"
+bare_sha=$(git -C "$repo" ls-remote origin "refs/heads/agent/$desc" | cut -f1)
+remote=$(git -C "$repo" remote get-url origin)
+# Read the pushed commit back from the bare origin, never from the clone: a
+# clone's own refs are the worker's to rewrite.
+assert_equal "$(git -C "$remote" log -1 --format=%s "$bare_sha" 2>/dev/null)" "record inside the sandbox" \
+  "the bare origin, not the clone, shows the pushed commit's message"
 
-# Switching the clone to the parent's protected branch is refused by the ledger check (exit 3)
-# alone, even with the clone-owned handoff file removed entirely.
+# Moved checkout: pinned by the clone's own handoff file, exactly as a
+# legacy worktree's is, now that the ledger is invisible inside.
+git -C "$path" switch -q -c some/other-branch
+printf 'changed again\n' > "$path/tracked.txt"
+export ALLOD_CHANGE_SANDBOX=1
+capture record_in_repo "$path" -m "must be refused"
+unset ALLOD_CHANGE_SANDBOX
+assert_status 3 "record inside the sandbox refuses a checkout moved off its own handoff branch"
+assert_contains "$CAPTURE_OUTPUT" "agent/$desc" "the moved-checkout refusal names the handoff branch"
+export ALLOD_CHANGE_SANDBOX=1
+capture submit_in_repo "$path" -t "must be refused" --dry-run
+unset ALLOD_CHANGE_SANDBOX
+assert_status 3 "submit inside the sandbox refuses a checkout moved off its own handoff branch"
+assert_contains "$CAPTURE_OUTPUT" "checkout was moved after begin" \
+  "submit's moved-checkout refusal explains the handoff mismatch"
+git -C "$path" checkout -q -- tracked.txt
+git -C "$path" switch -q "agent/$desc"
+
+# Protected branch: branch protection by origin still applies inside the
+# sandbox. The handoff file is removed first, the same way a checkout that
+# predates 'begin -d' carries none, so this isolates the protection check
+# from the moved-checkout one just above (switching off agent/$desc at all
+# is itself a moved checkout, and that check runs first).
 git -C "$path" checkout -q master
 git_dir=$(git -C "$path" rev-parse --path-format=absolute --git-dir)
 rm -f "$git_dir/allod-change-branch"
 printf 'edit\n' > "$path/tracked.txt"
+export ALLOD_CHANGE_SANDBOX=1
 capture record_in_repo "$path" -m "must be refused"
-assert_status 3 "record from a clone switched off agent/* is refused by the ledger check, handoff file or not"
-assert_contains "$CAPTURE_OUTPUT" "agent/$desc" "the ledger refusal names the ledger's branch"
+unset ALLOD_CHANGE_SANDBOX
+assert_status 2 "record inside the sandbox still refuses a protected branch"
 git -C "$path" checkout -q -- tracked.txt
 git -C "$path" checkout -q "agent/$desc"
 
-repo="$HOME/work/record-clone-origin-changed"
-init_repo "$repo" master
-desc="${RUN_ID}-origin-changed"
-path=$(begin_clone "$desc" "$repo")
-head_before=$(git -C "$path" rev-parse HEAD)
-git -C "$path" remote set-url origin "https://forge.example/someone/else.git"
-printf 'changed\n' > "$path/tracked.txt"
-capture record_in_repo "$path" -m "must be refused"
-assert_status 9 "record refuses a clone whose origin no longer matches its parent's"
-assert_contains "$CAPTURE_OUTPUT" "https://forge.example/someone/else.git" \
-  "the origin-mismatch refusal names the clone's origin"
-assert_equal "$(git -C "$path" diff --cached --name-only)" "" \
-  "the refused record staged nothing"
-assert_equal "$(git -C "$path" rev-parse HEAD)" "$head_before" \
-  "the refused record committed nothing"
-
-repo="$HOME/work/record-rewritten-handoff"
-init_repo "$repo" master
-desc="${RUN_ID}-rewritten-handoff"
-path=$(begin_clone "$desc" "$repo")
-head_before=$(git -C "$path" rev-parse HEAD)
-# record must refuse by the ledger's branch even when the clone-owned handoff file is rewritten
-# to lie about it.
-git -C "$path" checkout -q -b scratch
-git_dir=$(git -C "$path" rev-parse --path-format=absolute --git-dir)
-printf 'scratch\n' > "$git_dir/allod-change-branch"
-printf 'changed\n' > "$path/tracked.txt"
-capture record_in_repo "$path" -m "must be refused"
-assert_status 3 "record refuses a clone on a branch its rewritten handoff file agrees with but its ledger does not"
-assert_contains "$CAPTURE_OUTPUT" "agent/$desc" "the refusal names the ledger's branch, not the handoff file's"
-assert_equal "$(git -C "$path" rev-parse HEAD)" "$head_before" \
-  "the refused record committed nothing"
-
-repo="$HOME/work/record-clone-pushurl-changed"
-init_repo "$repo" master
-desc="${RUN_ID}-pushurl-changed"
-path=$(begin_clone "$desc" "$repo")
-head_before=$(git -C "$path" rev-parse HEAD)
-# 'git remote get-url origin' reports only the fetch URL; a push-URL-only redirect must still
-# be caught.
-git -C "$path" remote set-url --push origin "$TMP/attacker-pushurl.git"
-printf 'changed\n' > "$path/tracked.txt"
-capture record_in_repo "$path" -m "must be refused"
-assert_status 9 "record refuses a clone whose push URL no longer matches its parent's"
-assert_contains "$CAPTURE_OUTPUT" "$TMP/attacker-pushurl.git" \
-  "the push-url mismatch refusal names the clone's push URL"
-assert_equal "$(git -C "$path" rev-parse HEAD)" "$head_before" \
-  "the refused record committed nothing"
-
-repo="$HOME/work/record-clone-second-pushurl"
-init_repo "$repo" master
-desc="${RUN_ID}-second-pushurl"
-path=$(begin_clone "$desc" "$repo")
-head_before=$(git -C "$path" rev-parse HEAD)
-# 'get-url --push' without '--all' shows only the first configured push URL;
-# 'git push' pushes to every one, so a second, added URL must not go unseen.
-git -C "$path" remote set-url --add --push origin "$TMP/attacker-second-pushurl.git"
-printf 'changed\n' > "$path/tracked.txt"
-capture record_in_repo "$path" -m "must be refused"
-assert_status 9 "record refuses a clone with a second push URL the parent never had"
-assert_contains "$CAPTURE_OUTPUT" "$TMP/attacker-second-pushurl.git" \
-  "the second-push-url refusal names it"
-assert_equal "$(git -C "$path" rev-parse HEAD)" "$head_before" \
-  "the refused record committed nothing"
-
-repo="$HOME/work/submit-clone-pushurl-changed"
-init_repo "$repo" master
-desc="${RUN_ID}-submit-pushurl-changed"
-path=$(begin_clone "$desc" "$repo")
-git -C "$path" remote set-url --push origin "$TMP/attacker-pushurl-2.git"
-capture submit_in_repo "$path" -t "must be refused" --dry-run
-assert_status 9 "submit refuses a clone whose push URL no longer matches its parent's"
+export ALLOD_CHANGE_SANDBOX=1
+capture submit_in_repo "$path" -t "sandboxed submit" --dry-run
+unset ALLOD_CHANGE_SANDBOX
+assert_status 0 "submit --dry-run inside the sandbox resolves the base from the clone's own origin/HEAD"
+assert_contains "$CAPTURE_OUTPUT" "Base: master" \
+  "submit --dry-run names the clone's own default branch as the base"
 
 repo="$HOME/work/record-protected-default"
 init_repo "$repo" master
@@ -1213,23 +1175,6 @@ assert_status 2 "record refuses protected branch before staging"
 git -C "$repo" diff --cached --quiet &&
   pass "record leaves index untouched when protected branch is refused" ||
   fail "record leaves index untouched when protected branch is refused"
-
-repo="$HOME/work/record-moved-checkout"
-init_repo "$repo" master
-desc="${RUN_ID}-moved-checkout"
-path=$(begin_clone "$desc" "$repo")
-git -C "$path" switch -q -c some/other-branch
-printf 'changed\n' > "$path/tracked.txt"
-status_before=$(git -C "$path" status --porcelain)
-head_before=$(git -C "$path" rev-parse HEAD)
-capture record_in_repo "$path" -m "moved checkout"
-assert_status 3 "record refuses a checkout moved off the branch begin handed out"
-assert_contains "$CAPTURE_OUTPUT" "agent/$desc" "record names the branch begin handed out"
-assert_contains "$CAPTURE_OUTPUT" "some/other-branch" "record names the branch actually checked out"
-assert_equal "$(git -C "$path" status --porcelain)" "$status_before" \
-  "record leaves a moved checkout's working tree unchanged"
-assert_equal "$(git -C "$path" rev-parse HEAD)" "$head_before" \
-  "record makes no commit in a moved checkout"
 
 repo="$HOME/work/record-untracked"
 init_repo "$repo" master
@@ -1293,8 +1238,10 @@ init_repo "$repo" master
 desc="${RUN_ID}-sweep-clone"
 path=$(begin_clone "$desc" "$repo")
 printf 'changed\n' > "$path/tracked.txt"
+export ALLOD_CHANGE_SANDBOX=1
 capture record_in_repo "$path" -m "clone sweep unaffected"
-assert_status 0 "record still stages tracked modifications in a clone with no --files"
+unset ALLOD_CHANGE_SANDBOX
+assert_status 0 "record inside the sandbox still stages tracked modifications in a clone with no --files"
 assert_equal "$(git -C "$path" log -1 --format=%s)" "clone sweep unaffected" \
   "record commits the clone's swept change"
 
@@ -1422,8 +1369,10 @@ git -C "$path" add file1.txt file2.txt
 git -C "$path" commit -qm "add tracked files"
 printf 'one changed\n' > "$path/file1.txt"
 printf 'two changed\n' > "$path/file2.txt"
+export ALLOD_CHANGE_SANDBOX=1
 capture record_in_repo "$path" -m "bare dashdash" --
-assert_status 0 "record accepts a bare -- with no path"
+unset ALLOD_CHANGE_SANDBOX
+assert_status 0 "record inside the sandbox accepts a bare -- with no path"
 files=$(changed_files_in_head "$path")
 assert_contains "$files" "file1.txt" "bare -- falls back to add -u for the first file"
 assert_contains "$files" "file2.txt" "bare -- falls back to add -u for the second file"
@@ -1455,16 +1404,20 @@ git -C "$path" commit -qm "add tracked files"
 printf 'one changed\n' > "$path/file1.txt"
 printf 'two changed\n' > "$path/file2.txt"
 printf 'new\n' > "$path/untracked.txt"
+export ALLOD_CHANGE_SANDBOX=1
 capture record_in_repo "$path" -m "tracked changes"
-assert_status 1 "record refuses untracked files when staging tracked modifications in a clone"
+unset ALLOD_CHANGE_SANDBOX
+assert_status 1 "record inside the sandbox refuses untracked files when staging tracked modifications in a clone"
 assert_contains "$CAPTURE_OUTPUT" "untracked.txt" "record names the untracked file it refuses to leave out"
 git -C "$path" diff --cached --quiet &&
   pass "record stages nothing when untracked files block it" ||
   fail "record stages nothing when untracked files block it"
 
 rm "$path/untracked.txt"
+export ALLOD_CHANGE_SANDBOX=1
 capture record_in_repo "$path" -m "tracked changes"
-assert_status 0 "record without -f stages tracked modifications in a clone"
+unset ALLOD_CHANGE_SANDBOX
+assert_status 0 "record inside the sandbox without -f stages tracked modifications in a clone"
 files=$(changed_files_in_head "$path")
 assert_contains "$files" "file1.txt" "record add -u includes first tracked file"
 assert_contains "$files" "file2.txt" "record add -u includes second tracked file"
@@ -1651,373 +1604,39 @@ capture submit_in_repo "$repo" -t "No default" -b "$body"
 assert_status 1 "submit refuses a PR base it cannot resolve rather than guessing master"
 assert_contains "$CAPTURE_OUTPUT" "remote set-head" "submit names the origin/HEAD repair"
 
-# A worker's own clone config can run a command the moment anything outside the sandbox next
-# touches it; record/submit/list/cleanup must all refuse first.
-
-repo="$HOME/work/config-gate-credential"
-init_repo "$repo" master
-desc="${RUN_ID}-config-gate-credential"
-path=$(begin_clone "$desc" "$repo")
-pwned="$TMP/pwned-${RUN_ID}"
-git -C "$path" config credential.helper "!touch $pwned"
-
-capture record_in_repo "$path" -m "must be refused"
-assert_status 11 "record refuses a clone whose config could run a command"
-assert_contains "$CAPTURE_OUTPUT" "credential.helper" "the config refusal names the unsafe key"
-[[ ! -e "$pwned" ]] &&
-  pass "record's config refusal never ran the planted command" ||
-  fail "record's config refusal never ran the planted command" "found: $pwned"
-
-# resolveGitRepo used to run 'git rev-parse --show-toplevel' against the target before the ledger
-# matched; the logging git proves that call no longer happens before the gate's refusal.
-git_call_log="$TMP/git-call-log-${RUN_ID}"
-: > "$git_call_log"
-logging_git_bin=$(make_logging_git "$git_call_log")
-saved_path_for_log="$PATH"
-export PATH="$logging_git_bin:$PATH"
-capture record_in_repo "$path" -m "must be refused"
-export PATH="$saved_path_for_log"
-assert_status 11 "record (logging git) still refuses the clone whose config could run a command"
-# Other repos' own ledger-index walk legitimately runs 'show-toplevel' on their own directories;
-# what must never appear is that call naming this clone.
-toplevel_against_clone=$(grep -F -- "show-toplevel" "$git_call_log" | grep -F -- "$path" || true)
-[[ -z "$toplevel_against_clone" ]] &&
-  pass "no 'git rev-parse --show-toplevel' runs against the clone before the config gate's refusal" ||
-  fail "no 'git rev-parse --show-toplevel' runs against the clone before the config gate's refusal" \
-    "$toplevel_against_clone"
-
-capture submit_in_repo "$path" -t "must be refused" --dry-run
-assert_status 11 "submit refuses a clone whose config could run a command"
-[[ ! -e "$pwned" ]] &&
-  pass "submit's config refusal never ran the planted command" ||
-  fail "submit's config refusal never ran the planted command" "found: $pwned"
-
-assert_equal "$(list_state_for "$repo" "$path")" "unsafe" \
-  "list reports unsafe, not a crash, for a clone whose config could run a command"
-[[ ! -e "$pwned" ]] &&
-  pass "list's own check never ran the planted command" ||
-  fail "list's own check never ran the planted command" "found: $pwned"
-
-capture "$ALLOD" change cleanup "$path"
-assert_status 11 "cleanup refuses a clone whose config could run a command"
-[[ ! -e "$pwned" ]] &&
-  pass "cleanup's config refusal never ran the planted command" ||
-  fail "cleanup's config refusal never ran the planted command" "found: $pwned"
-[[ -d "$path" ]] &&
-  pass "cleanup's config refusal preserves the clone" ||
-  fail "cleanup's config refusal preserves the clone" "missing: $path"
-git -C "$path" config --unset credential.helper
-git -C "$path" push -q origin HEAD
-capture "$ALLOD" change cleanup "$path"
-assert_status 0 "cleanup succeeds once the unsafe config key is gone"
-
-repo="$HOME/work/config-gate-hook"
-init_repo "$repo" master
-desc="${RUN_ID}-config-gate-hook"
-path=$(begin_clone "$desc" "$repo")
-pwned_hook="$TMP/pwned-hook-${RUN_ID}"
-hook_dir=$(git -C "$path" rev-parse --path-format=absolute --git-dir)/hooks
-mkdir -p "$hook_dir"
-printf '#!/bin/sh\ntouch "%s"\n' "$pwned_hook" > "$hook_dir/pre-push"
-chmod +x "$hook_dir/pre-push"
-capture record_in_repo "$path" -m "must be refused"
-assert_status 11 "record refuses a clone with an added executable hook"
-assert_contains "$CAPTURE_OUTPUT" "pre-push" "the hook refusal names the hook"
-[[ ! -e "$pwned_hook" ]] &&
-  pass "the planted hook never ran" ||
-  fail "the planted hook never ran" "found: $pwned_hook"
-
-repo="$HOME/work/config-gate-allowlisted"
-init_repo "$repo" master
-desc="${RUN_ID}-config-gate-allowlisted"
-path=$(begin_clone "$desc" "$repo")
-# Only the ledger branch's own remote/merge, pinned to the one value begin
-# itself sets, are allowed; re-asserting that exact value is harmless.
-git -C "$path" config "branch.agent/$desc.remote" origin
-git -C "$path" config "branch.agent/$desc.merge" "refs/heads/agent/$desc"
-printf 'edit\n' > "$path/tracked.txt"
-capture record_in_repo "$path" -m "allowlisted config keys still work"
-assert_status 0 "record succeeds when the clone's config carries only allowlisted keys"
-
-repo="$HOME/work/config-gate-rebase-refused"
-init_repo "$repo" master
-desc="${RUN_ID}-config-gate-rebase-refused"
-path=$(begin_clone "$desc" "$repo")
-git -C "$path" config "branch.agent/$desc.rebase" true
-capture record_in_repo "$path" -m "must be refused"
-assert_status 11 "record refuses branch.<ledger branch>.rebase, not on the allowlist"
-
-repo="$HOME/work/config-gate-other-branch-refused"
-init_repo "$repo" master
-desc="${RUN_ID}-config-gate-other-branch-refused"
-path=$(begin_clone "$desc" "$repo")
-git -C "$path" config "branch.someother.remote" origin
-capture record_in_repo "$path" -m "must be refused"
-assert_status 11 "record refuses a branch.* key for a branch that is not the ledger's own"
-
-repo="$HOME/work/config-gate-wrong-remote-refused"
-init_repo "$repo" master
-desc="${RUN_ID}-config-gate-wrong-remote-refused"
-path=$(begin_clone "$desc" "$repo")
-git -C "$path" config "branch.agent/$desc.remote" .
-capture record_in_repo "$path" -m "must be refused"
-assert_status 11 "record refuses branch.<ledger branch>.remote set to anything but origin"
-
-# extensions.refstorage/.objectformat pass the allowlist since git writes them itself; faking a
-# reftable/sha256 repo via 'git config' alone would make git misbehave unrelated to this gate.
-
-repo="$HOME/work/config-gate-extensions-worktreeconfig-refused"
-init_repo "$repo" master
-desc="${RUN_ID}-config-gate-extensions-worktreeconfig-refused"
-path=$(begin_clone "$desc" "$repo")
-git -C "$path" config extensions.worktreeconfig true
-capture record_in_repo "$path" -m "must be refused"
-assert_status 11 "record refuses extensions.worktreeconfig"
-
-repo="$HOME/work/config-gate-extensions-other-refused"
-init_repo "$repo" master
-desc="${RUN_ID}-config-gate-extensions-other-refused"
-path=$(begin_clone "$desc" "$repo")
-git -C "$path" config extensions.somethingelse true
-capture record_in_repo "$path" -m "must be refused"
-assert_status 11 "record refuses an extensions.* key that is not on the allowlist"
-
-# remote.origin.fetch and core.bare are pinned to the one value an ordinary clone has, never
-# accepted with any value, or a worker could redirect fetch or go bare.
-repo="$HOME/work/config-gate-fetch-refspec"
-init_repo "$repo" master
-desc="${RUN_ID}-config-gate-fetch-refspec"
-path=$(begin_clone "$desc" "$repo")
-git -C "$path" config remote.origin.fetch "+refs/heads/agent/*:refs/remotes/origin/agent/*"
-capture record_in_repo "$path" -m "must be refused"
-assert_status 11 "record refuses a remote.origin.fetch refspec other than the one an ordinary clone has"
-
-repo="$HOME/work/config-gate-core-bare"
-init_repo "$repo" master
-desc="${RUN_ID}-config-gate-core-bare"
-path=$(begin_clone "$desc" "$repo")
-git -C "$path" config core.bare true
-capture record_in_repo "$path" -m "must be refused"
-assert_status 11 "record refuses core.bare set to true"
-
-# A '.git/config' 'git config --file --list' itself cannot even read must
-# never be treated as an empty, safe one: refuse, not pass.
-repo="$HOME/work/config-gate-unreadable-config"
-init_repo "$repo" master
-desc="${RUN_ID}-config-gate-unreadable-config"
-path=$(begin_clone "$desc" "$repo")
-printf '[section\nkey = value\n' > "$path/.git/config"
-capture record_in_repo "$path" -m "must be refused"
-assert_status 11 "record refuses a clone whose .git/config git itself cannot parse"
-assert_contains "$CAPTURE_OUTPUT" "could not read" "the refusal names the parse failure"
-
-repo="$HOME/work/config-gate-gitdir-swap"
-init_repo "$repo" master
-desc="${RUN_ID}-config-gate-gitdir-swap"
-path=$(begin_clone "$desc" "$repo")
-# A worker can replace '.git' with a gitfile pointing at a directory it controls; this gate never
-# reads it unless '.git' is an ordinary directory.
-mv "$path/.git" "$path/.gitdir"
-printf 'gitdir: %s/.gitdir\n' "$path" > "$path/.git"
-capture record_in_repo "$path" -m "must be refused"
-assert_status 11 "record refuses a clone whose .git is a gitfile redirect"
-capture submit_in_repo "$path" -t "must be refused" --dry-run
-assert_status 11 "submit refuses a clone whose .git is a gitfile redirect"
-assert_equal "$(list_state_for "$repo" "$path")" "unsafe" \
-  "list reports unsafe, not a crash, for a clone whose .git is a gitfile redirect"
-capture "$ALLOD" change cleanup "$path"
-assert_status 11 "cleanup refuses a clone whose .git is a gitfile redirect"
-# allod can never act on this clone again either, so it is reclaimed by hand.
-gitdir_swap_main=$(git -C "$repo" rev-parse --path-format=absolute --git-dir)
-rm -rf "$path"
-rm -f "$gitdir_swap_main/allod-changes/$desc"
-
-# A linked worktree's own 'commondir' file redirects git to load config/refs/hooks from another
-# directory this gate never reads, so it refuses outright before looking.
-repo="$HOME/work/config-gate-commondir"
-init_repo "$repo" master
-desc="${RUN_ID}-config-gate-commondir"
-path=$(begin_clone "$desc" "$repo")
-commondir_sibling="$TMP/commondir-sibling-${RUN_ID}"
-commondir_pwned="$TMP/commondir-pwned-${RUN_ID}"
-mkdir -p "$commondir_sibling"
-printf '[credential]\n\thelper = "!touch %s"\n' "$commondir_pwned" > "$commondir_sibling/config"
-printf '%s\n' "$commondir_sibling" > "$path/.git/commondir"
-capture record_in_repo "$path" -m "must be refused"
-assert_status 11 "record refuses a clone whose .git/commondir redirects to another directory"
-assert_contains "$CAPTURE_OUTPUT" "commondir" "the refusal names the commondir file"
-capture "$ALLOD" change cleanup "$path"
-assert_status 11 "cleanup refuses a clone whose .git/commondir redirects to another directory"
-[[ ! -e "$commondir_pwned" ]] &&
-  pass "the commondir refusal never read, let alone ran, the sibling's config" ||
-  fail "the commondir refusal never read, let alone ran, the sibling's config" "found: $commondir_pwned"
-commondir_main=$(git -C "$repo" rev-parse --path-format=absolute --git-dir)
-rm -rf "$path"
-rm -f "$commondir_main/allod-changes/$desc"
-
-# The same for a bare 'gitdir' file (the other half of a linked worktree's
-# '.git' admin directory, pointing the other way).
-repo="$HOME/work/config-gate-gitdir-file"
-init_repo "$repo" master
-desc="${RUN_ID}-config-gate-gitdir-file"
-path=$(begin_clone "$desc" "$repo")
-printf 'gitdir: %s/elsewhere\n' "$TMP" > "$path/.git/gitdir"
-capture record_in_repo "$path" -m "must be refused"
-assert_status 11 "record refuses a clone whose .git/gitdir names another directory"
-assert_contains "$CAPTURE_OUTPUT" "gitdir" "the refusal names the gitdir file"
-gitdir_file_main=$(git -C "$repo" rev-parse --path-format=absolute --git-dir)
-rm -rf "$path"
-rm -f "$gitdir_file_main/allod-changes/$desc"
-
-# The allowlist read of '.git/config' must run before hasPopulatedSubmodule's own 'git ls-files',
-# a real git invocation that loads the clone's full config.
-repo="$HOME/work/config-gate-order-submodule-then-config"
-init_repo "$repo" master
-desc="${RUN_ID}-config-gate-order-submodule-then-config"
-path=$(begin_clone "$desc" "$repo")
-populate_submodules "$path"
-pwned_order="$TMP/pwned-order-${RUN_ID}"
-git -C "$path" config credential.helper "!touch $pwned_order"
-order_log="$TMP/git-call-log-order-${RUN_ID}"
-: > "$order_log"
-order_logging_git_bin=$(make_logging_git "$order_log")
-saved_path_for_order="$PATH"
-export PATH="$order_logging_git_bin:$PATH"
-capture record_in_repo "$path" -m "must be refused"
-export PATH="$saved_path_for_order"
-assert_status 11 "record refuses a clone with both a populated submodule and a hostile config"
-assert_contains "$CAPTURE_OUTPUT" "credential.helper" \
-  "the hostile config is named, not the submodule: the config check runs first"
-ls_files_against_clone=$(grep -F -- "ls-files" "$order_log" | grep -F -- "$path" || true)
-[[ -z "$ls_files_against_clone" ]] &&
-  pass "hasPopulatedSubmodule's own 'git ls-files' never runs against a clone whose config already failed the gate" ||
-  fail "hasPopulatedSubmodule's own 'git ls-files' never runs against a clone whose config already failed the gate" \
-    "$ls_files_against_clone"
-[[ ! -e "$pwned_order" ]] &&
-  pass "the planted credential.helper command never ran" ||
-  fail "the planted credential.helper command never ran" "found: $pwned_order"
-order_main=$(git -C "$repo" rev-parse --path-format=absolute --git-dir)
-rm -rf "$path"
-rm -f "$order_main/allod-changes/$desc"
-
-# git-hooks/protected-refs-policy runs a tracked hook by executable-on-disk status, not git
-# tracking, straight from the clone's working tree; the gate refuses unless it matches the parent.
-repo="$HOME/work/tracked-hooks-added"
-init_repo "$repo" master
-desc="${RUN_ID}-tracked-hooks-added"
-path=$(begin_clone "$desc" "$repo")
-mkdir -p "$path/.hooks"
-tracked_hook_pwned="$TMP/tracked-hook-pwned-${RUN_ID}"
-printf '#!/bin/sh\ntouch %s\n' "$tracked_hook_pwned" > "$path/.hooks/pre-commit"
-chmod +x "$path/.hooks/pre-commit"
-capture record_in_repo "$path" -m "must be refused"
-assert_status 11 "record refuses a clone with an added tracked hook (.hooks/pre-commit) the parent's origin does not have"
-assert_contains "$CAPTURE_OUTPUT" "tracked hooks" "the refusal names the tracked hooks directory"
-capture submit_in_repo "$path" -t "must be refused" --dry-run
-assert_status 11 "submit refuses the same clone"
-assert_equal "$(list_state_for "$repo" "$path")" "unsafe" \
-  "list reports unsafe, not a crash, for a clone with an added tracked hook"
-[[ ! -e "$tracked_hook_pwned" ]] &&
-  pass "the planted tracked hook never ran" ||
-  fail "the planted tracked hook never ran" "found: $tracked_hook_pwned"
-tracked_hooks_added_main=$(git -C "$repo" rev-parse --path-format=absolute --git-dir)
-rm -rf "$path"
-rm -f "$tracked_hooks_added_main/allod-changes/$desc"
-
-# A repo whose origin already tracks '.hooks/pre-commit': an unmodified
-# clone passes, a modified one is refused.
-repo="$HOME/work/tracked-hooks-base"
-init_repo "$repo" master
-mkdir -p "$repo/.hooks"
-printf '#!/bin/sh\necho ok\n' > "$repo/.hooks/pre-commit"
-chmod +x "$repo/.hooks/pre-commit"
-# The dispatcher only runs a tracked hook that is executable on disk, so this one must stay inert
-# unless a clone's copy's mode diverges.
-printf '#!/bin/sh\necho ok\n' > "$repo/.hooks/pre-push"
-chmod -x "$repo/.hooks/pre-push"
-git -C "$repo" add .hooks/pre-commit .hooks/pre-push
-git -C "$repo" commit -qm "add a tracked pre-commit hook"
-git -C "$repo" push -q origin master
-git -C "$repo" fetch -q origin
-
-desc="${RUN_ID}-tracked-hooks-identical"
-path=$(begin_clone "$desc" "$repo")
-printf 'more\n' >> "$path/tracked.txt"
-capture record_in_repo "$path" -m "an identical tracked hook does not block a legitimate commit"
-assert_status 0 "record succeeds when the clone's tracked hook is byte-identical to the parent's origin"
-tracked_hooks_identical_main=$(git -C "$repo" rev-parse --path-format=absolute --git-dir)
-"$ALLOD" change cleanup "$path" >/dev/null 2>&1 || rm -rf "$path"
-rm -f "$tracked_hooks_identical_main/allod-changes/$desc"
-
-desc="${RUN_ID}-tracked-hooks-modified"
-path=$(begin_clone "$desc" "$repo")
-printf '#!/bin/sh\ntouch %s/tracked-hook-pwned-modified-%s\n' "$TMP" "$RUN_ID" > "$path/.hooks/pre-commit"
-capture record_in_repo "$path" -m "must be refused"
-assert_status 11 "record refuses a clone whose existing tracked hook was modified from the parent's origin"
-tracked_hooks_modified_main=$(git -C "$repo" rev-parse --path-format=absolute --git-dir)
-rm -rf "$path"
-rm -f "$tracked_hooks_modified_main/allod-changes/$desc"
-
-# Byte-identical content is not enough: a chmod +x with no git command at all still makes the
-# dispatcher run it.
-desc="${RUN_ID}-tracked-hooks-chmod"
-path=$(begin_clone "$desc" "$repo")
-[[ ! -x "$path/.hooks/pre-push" ]] &&
-  pass "the clone's own copy of .hooks/pre-push starts non-executable, matching the parent's origin" ||
-  fail "the clone's own copy of .hooks/pre-push starts non-executable, matching the parent's origin"
-chmod +x "$path/.hooks/pre-push"
-capture record_in_repo "$path" -m "must be refused"
-assert_status 11 "record refuses a clone whose tracked hook was chmod +x'd, even with unchanged content"
-assert_contains "$CAPTURE_OUTPUT" "executable bit" "the refusal names the mode mismatch"
-tracked_hooks_chmod_main=$(git -C "$repo" rev-parse --path-format=absolute --git-dir)
-rm -rf "$path"
-rm -f "$tracked_hooks_chmod_main/allod-changes/$desc"
-
-# A '.hookspath' the parent's own working tree does not have: refused
-# outright, regardless of what it names.
-desc="${RUN_ID}-tracked-hookspath-added"
-path=$(begin_clone "$desc" "$repo")
-printf '.hooks\n' > "$path/.hookspath"
-capture record_in_repo "$path" -m "must be refused"
-assert_status 11 "record refuses a clone that adds a .hookspath the parent does not have"
-assert_contains "$CAPTURE_OUTPUT" "hookspath" "the refusal names the hookspath mismatch"
-tracked_hookspath_added_main=$(git -C "$repo" rev-parse --path-format=absolute --git-dir)
-rm -rf "$path"
-rm -f "$tracked_hookspath_added_main/allod-changes/$desc"
-
+# A running worker's clone is hands-off for 'cleanup' and 'list' alike
+# (exit 13); 'record' and 'submit' no longer touch the ledger lock at all,
+# since they refuse any ledgered clone from outside before reaching it.
 repo="$HOME/work/active-scope"
 init_repo "$repo" master
 desc="${RUN_ID}-active-scope"
 path=$(begin_clone "$desc" "$repo")
-# listRow must hold its lock through every one of its own git calls, not just probe and release;
+# listRow must hold its lock through its own forge query, not just probe and release;
 # one locked entry must not block or corrupt another's row.
 other_desc="${RUN_ID}-active-scope-sibling"
 other_path=$(begin_clone "$other_desc" "$repo")
-printf 'edit\n' > "$path/tracked.txt"
-# Closes the window between the gate reading the clone and the git command that follows: outside
+forge_log="$TMP/forge-active-scope.log"
+export MOCK_FORGE_LOG="$forge_log" MOCK_FORGE_ALL_STATE="" MOCK_FORGE_ALL_NUMBER=""
+forge_bin=$(make_mock_forge active-scope)
+# Closes the window between resolving the clone and the forge query that follows: outside
 # commands refuse while the ledger file is locked, with no systemctl involved at all.
 active_scope_ledger_file="$(git -C "$repo" rev-parse --path-format=absolute --git-dir)/allod-changes/$desc"
 exec {active_scope_lock_fd}>>"$active_scope_ledger_file"
 flock -x "$active_scope_lock_fd"
-capture record_in_repo "$path" -m "must be refused"
-assert_status 13 "record refuses while the clone's own ledger file is locked"
-assert_contains "$CAPTURE_OUTPUT" "locked" "the lock refusal names what it found"
-capture submit_in_repo "$path" -t "must be refused" --dry-run
-assert_status 13 "submit refuses while the clone's own ledger file is locked"
-capture "$ALLOD" change cleanup "$path"
+cleanup_with_forge "$path" "$forge_bin"
 assert_status 13 "cleanup refuses while the clone's own ledger file is locked"
-capture "$ALLOD" change list "$path"
-assert_contains "$CAPTURE_OUTPUT" $'\trunning' "explicit clone list honors the ledger lock"
+assert_contains "$CAPTURE_OUTPUT" "locked" "the lock refusal names what it found"
 [[ -d "$path" ]] &&
   pass "cleanup's active-lock refusal preserves the clone" ||
   fail "cleanup's active-lock refusal preserves the clone" "missing: $path"
-assert_equal "$(list_state_for "$repo" "$path")" "running" \
-  "list reports running, never runs git at all, while the clone's own ledger file is locked"
-assert_equal "$(list_state_for "$repo" "$other_path")" "clean" \
+list_with_forge "$repo" "$forge_bin"
+assert_contains "$CAPTURE_OUTPUT" "$path	agent/$desc	running" \
+  "list reports running, never asks the forge at all, while the clone's own ledger file is locked"
+assert_contains "$CAPTURE_OUTPUT" "$other_path	agent/$other_desc	unsubmitted" \
   "the sibling clone's own row is unaffected: one locked ledger entry does not block or corrupt another's, in the same 'list' call"
 exec {active_scope_lock_fd}>&-
-capture record_in_repo "$path" -m "record once the lock is released"
-assert_status 0 "record succeeds once the clone's ledger file is no longer locked"
+rm -rf "$path" "$other_path"
+rm -f "$active_scope_ledger_file" "$(dirname "$active_scope_ledger_file")/$other_desc"
 
 # cleanup tests
 
@@ -2041,24 +1660,6 @@ assert_contains "$CAPTURE_OUTPUT" "could not check clone" "the stat-error refusa
 rm -f "$bogus_parent"
 rm -f "$stat_error_git_dir/allod-changes/$desc"
 
-# A fake git failing only 'status' isolates cleanup's own dirty-check failure from
-# hasPopulatedSubmodule's, which a wholesale-broken git would trip first instead.
-repo="$HOME/work/cleanup-status-fails"
-init_repo "$repo" master
-desc="${RUN_ID}-cleanup-status-fails"
-path=$(begin_clone "$desc" "$repo")
-export REAL_GIT
-mock_git_path=$(make_mock_git_path cleanup-status-fails fail-status)
-capture_with_path "$mock_git_path" "$ALLOD" change cleanup "$path"
-assert_status 1 "cleanup refuses rather than treat a failed 'git status' as clean"
-assert_contains "$CAPTURE_OUTPUT" "could not check whether clone" "the status-failure refusal names it"
-[[ -d "$path" ]] &&
-  pass "the status-failure refusal preserves the clone" ||
-  fail "the status-failure refusal preserves the clone" "missing: $path"
-rm -rf "$path"
-status_fails_main=$(git -C "$repo" rev-parse --path-format=absolute --git-dir)
-rm -f "$status_fails_main/allod-changes/$desc"
-
 # A path that exists and stats cleanly but is a plain file, not a directory, needs the dedicated
 # IsDir check; it must never read as 'missing' either.
 repo="$HOME/work/cleanup-not-a-directory"
@@ -2080,187 +1681,6 @@ assert_contains "$CAPTURE_OUTPUT" "not a directory" "the not-a-directory refusal
   fail "the not-a-directory refusal leaves the ledger entry in place" "entry was dropped"
 rm -f "$not_dir_path"
 rm -f "$not_dir_git_dir/allod-changes/$desc"
-
-repo="$HOME/work/cleanup-clean"
-init_repo "$repo" master
-protect_repo "$repo" master
-desc="${RUN_ID}-cleanup-clean"
-path=$(begin_clone "$desc" "$repo")
-git_dir=$(git -C "$repo" rev-parse --path-format=absolute --git-dir)
-ledger_file="$git_dir/allod-changes/$desc"
-push_log="$TMP/cleanup-push.log"
-: > "$push_log"
-# Pushed once with the real git before the mock takes over, since unpushedCommitsForClone now
-# asks the real remote directly rather than falling back to origin's default branch.
-git -C "$path" push -q origin HEAD
-export REAL_GIT GIT_PUSH_LOG="$push_log"
-mock_git_path=$(make_mock_git_path cleanup)
-capture_with_path "$mock_git_path" "$ALLOD" change cleanup "$path"
-assert_status 0 "cleanup removes a clean clone"
-[[ ! -d "$path" ]] &&
-  pass "cleanup deletes the clone directory" ||
-  fail "cleanup deletes the clone directory" "still exists: $path"
-[[ ! -e "$ledger_file" ]] &&
-  pass "cleanup drops the parent's ledger entry" ||
-  fail "cleanup drops the parent's ledger entry" "still exists: $ledger_file"
-assert_equal "$(cat "$push_log")" "" "cleanup does not push anything"
-
-repo="$HOME/work/cleanup-pushurl-changed"
-init_repo "$repo" master
-desc="${RUN_ID}-cleanup-pushurl-changed"
-path=$(begin_clone "$desc" "$repo")
-# A worker can repoint origin's push URL at a bare repo inside its own
-# clone and push there; cleanup must not then delete the only copy.
-git -C "$path" remote set-url --push origin "$TMP/attacker-cleanup-pushurl.git"
-capture "$ALLOD" change cleanup "$path"
-assert_status 9 "cleanup refuses a clone whose push URL no longer matches its parent's"
-[[ -d "$path" ]] &&
-  pass "cleanup over a push-url mismatch preserves the clone" ||
-  fail "cleanup over a push-url mismatch preserves the clone" "missing: $path"
-# 'list' must never call this clone 'clean': that promises cleanup would
-# succeed, and cleanup refuses it outright (exit 9, just above).
-assert_equal "$(list_state_for "$repo" "$path")" "unsafe" \
-  "list reports unsafe, not clean, for a clone whose push URL no longer matches its parent's"
-
-repo="$HOME/work/cleanup-branch-changed"
-init_repo "$repo" master
-desc="${RUN_ID}-cleanup-branch-changed"
-path=$(begin_clone "$desc" "$repo")
-printf 'would be discarded\n' > "$path/tracked.txt"
-git -C "$path" commit -qam "unpushed on the ledgered branch"
-# cleanup must judge and ever discard only the ledgered branch, never whatever is checked out,
-# even after a worker switches to a different, clean, already-pushed one.
-git -C "$path" checkout -q -b "agent/${desc}-elsewhere" --no-track origin/master
-assert_equal "$(list_state_for "$repo" "$path")" "moved" \
-  "list reports moved, not clean, for a clone checked out on a branch its ledger does not list"
-capture "$ALLOD" change cleanup "$path"
-assert_status 3 "cleanup refuses a clone checked out on a branch its ledger does not list"
-[[ -d "$path" ]] &&
-  pass "cleanup over a branch mismatch preserves the clone" ||
-  fail "cleanup over a branch mismatch preserves the clone" "missing: $path"
-git -C "$path" checkout -q "agent/$desc"
-assert_equal "$(git -C "$path" log -1 --format=%s)" "unpushed on the ledgered branch" \
-  "the ledgered branch's unpushed commit survives the refused cleanup"
-
-repo="$HOME/work/cleanup-dirty"
-init_repo "$repo" master
-protect_repo "$repo" master
-desc="${RUN_ID}-cleanup-dirty"
-path=$(begin_clone "$desc" "$repo")
-printf 'dirty\n' > "$path/tracked.txt"
-capture "$ALLOD" change cleanup "$path"
-[[ "$CAPTURE_STATUS" -ne 0 ]] || fail "cleanup refuses a dirty clone" "$CAPTURE_OUTPUT"
-assert_contains "$CAPTURE_OUTPUT" "dirty" "cleanup dirty failure is actionable"
-
-repo="$HOME/work/cleanup-unpushed"
-init_repo "$repo" master
-protect_repo "$repo" master
-desc="${RUN_ID}-cleanup-unpushed"
-path=$(begin_clone "$desc" "$repo")
-printf 'unpushed\n' > "$path/tracked.txt"
-git -C "$path" commit -qam "unpushed"
-capture "$ALLOD" change cleanup "$path"
-[[ "$CAPTURE_STATUS" -ne 0 ]] || fail "cleanup refuses unpushed worktree" "$CAPTURE_OUTPUT"
-assert_contains "$CAPTURE_OUTPUT" "unpushed" "cleanup unpushed failure is actionable"
-
-# GIT_NO_REPLACE_OBJECTS defeats a replace ref that would make an unrelated remote head look
-# already landed; cloneConfigUnsafeReason's own refs/replace check now refuses even earlier.
-repo="$HOME/work/cleanup-replace-ref"
-init_repo "$repo" master
-desc="${RUN_ID}-cleanup-replace-ref"
-path=$(begin_clone "$desc" "$repo")
-printf 'real unpushed work\n' > "$path/tracked.txt"
-git -C "$path" commit -qam "real unpushed work"
-head_sha=$(git -C "$path" rev-parse HEAD)
-# An orphan commit under the ledger branch's own name is genuinely not an ancestor of HEAD, so
-# this reads unpushed without the replace ref.
-orphan_sha=$(git -C "$path" commit-tree "$(git -C "$path" rev-parse HEAD^{tree})" -m "orphan remote head")
-git -C "$path" push -q origin "$orphan_sha:refs/heads/agent/$desc"
-# The replace ref substitutes a fake commit descending from HEAD, so walking the replaced
-# object's parents (not its own top-level identity) would wrongly find HEAD reachable.
-fake_sha=$(git -C "$path" commit-tree "$(git -C "$path" rev-parse HEAD^{tree})" -p "$head_sha" -m "fake descendant of HEAD")
-git -C "$path" replace "$orphan_sha" "$fake_sha"
-capture "$ALLOD" change cleanup "$path"
-assert_status 11 "cleanup refuses outright the moment a replace ref exists, via the config gate, before judging the branch pushed or not at all"
-assert_contains "$CAPTURE_OUTPUT" "refs/replace" "the config-gate refusal names refs/replace"
-[[ -d "$path" ]] &&
-  pass "the replace-ref attempt does not make cleanup discard real, unpushed work" ||
-  fail "the replace-ref attempt does not make cleanup discard real, unpushed work" "missing: $path"
-git -C "$path" replace -d "$orphan_sha"
-
-# With the replace ref gone, this still correctly reports unpushed, now on its own merits rather
-# than the config gate's earlier refusal.
-capture "$ALLOD" change cleanup "$path"
-assert_status 1 "cleanup now reaches the real unpushed check once the replace ref is gone"
-assert_contains "$CAPTURE_OUTPUT" "unpushed" "cleanup reports the branch as unpushed on its own merits"
-# The earlier orphan push diverged history, so a plain push is a non-fast-forward; force is fine
-# on this disposable fixture.
-git -C "$path" push -qf origin HEAD
-capture "$ALLOD" change cleanup "$path"
-assert_status 0 "cleanup succeeds once genuinely pushed"
-
-# A graft line for HEAD's own commit, substituting its real parent for the remote head, makes
-# HEAD falsely look descended from a commit it never was.
-repo="$HOME/work/cleanup-grafts"
-init_repo "$repo" master
-desc="${RUN_ID}-cleanup-grafts"
-path=$(begin_clone "$desc" "$repo")
-printf 'real unpushed work\n' > "$path/tracked.txt"
-git -C "$path" commit -qam "real unpushed work"
-head_sha=$(git -C "$path" rev-parse HEAD)
-orphan_sha=$(git -C "$path" commit-tree "$(git -C "$path" rev-parse HEAD^{tree})" -m "orphan remote head")
-git -C "$path" push -q origin "$orphan_sha:refs/heads/agent/$desc"
-mkdir -p "$path/.git/info"
-printf '%s %s\n' "$head_sha" "$orphan_sha" > "$path/.git/info/grafts"
-capture "$ALLOD" change cleanup "$path"
-assert_status 11 "cleanup refuses outright the moment '.git/info/grafts' exists, via the config gate, before judging the branch pushed or not at all"
-assert_contains "$CAPTURE_OUTPUT" "grafts" "the config-gate refusal names grafts"
-[[ -d "$path" ]] &&
-  pass "the graft does not make cleanup discard real, unpushed work" ||
-  fail "the graft does not make cleanup discard real, unpushed work" "missing: $path"
-rm -f "$path/.git/info/grafts"
-capture "$ALLOD" change cleanup "$path"
-assert_status 1 "cleanup now reaches the real unpushed check once the graft is gone"
-assert_contains "$CAPTURE_OUTPUT" "unpushed" "cleanup reports the branch as unpushed on its own merits"
-git -C "$path" push -qf origin HEAD
-capture "$ALLOD" change cleanup "$path"
-assert_status 0 "cleanup succeeds once genuinely pushed"
-
-# '.git/shallow' is refused the same way without needing a genuinely shallow clone: a plain
-# planted file exercises the same refusal.
-repo="$HOME/work/cleanup-shallow"
-init_repo "$repo" master
-desc="${RUN_ID}-cleanup-shallow"
-path=$(begin_clone "$desc" "$repo")
-printf 'shallow-marker\n' > "$path/.git/shallow"
-capture "$ALLOD" change cleanup "$path"
-assert_status 11 "cleanup refuses outright the moment '.git/shallow' exists"
-assert_contains "$CAPTURE_OUTPUT" "shallow" "the config-gate refusal names shallow"
-rm -f "$path/.git/shallow"
-git -C "$path" push -q origin HEAD
-capture "$ALLOD" change cleanup "$path"
-assert_status 0 "cleanup succeeds once '.git/shallow' is gone and the branch is pushed"
-
-# A relayed commit lands on the default branch under a new hash, same patch: the
-# clone reads as landed, by the same judgment as the rebase-merge case above.
-repo="$HOME/work/cleanup-relayed"
-init_repo "$repo" master
-desc="${RUN_ID}-cleanup-relayed"
-path=$(begin_clone "$desc" "$repo")
-printf 'relayed\n' > "$path/tracked.txt"
-git -C "$path" commit -qam "relayed change"
-source_sha=$(git -C "$path" rev-parse HEAD)
-patch_file="$TMP/relayed.patch"
-git -C "$path" format-patch -1 --stdout > "$patch_file"
-GIT_COMMITTER_DATE='2030-01-01T00:00:00Z' git -C "$repo" am -q "$patch_file"
-relayed_sha=$(git -C "$repo" rev-parse HEAD)
-[[ "$source_sha" != "$relayed_sha" ]] && pass "relay fixture rewrites the commit ID" ||
-  fail "relay fixture rewrites the commit ID" "both commits: $source_sha"
-git -C "$repo" push -q origin master
-# A clone's refs/remotes/origin/* is its own, unshared with the parent, so it only learns of a
-# relayed push once it fetches for itself.
-git -C "$path" fetch -q origin
-assert_list_matches_cleanup "$repo" "$path" clean "a patch-equivalent relayed clone reads as landed, not unpushed"
 
 repo="$HOME/work/cleanup-regular"
 init_repo "$repo" master
@@ -2427,148 +1847,10 @@ alt_desc="${RUN_ID}-symlink-home"
 alt_path=$(HOME="$alt_home" XDG_CONFIG_HOME="$alt_home/.config" "$ALLOD" change begin -d "$alt_desc" "$alt_repo")
 WORKTREES+=("$alt_path")
 printf 'edit\n' > "$alt_path/tracked.txt"
-capture record_at "$alt_path" "$alt_home" -m "symlink home" --files tracked.txt
-assert_status 0 "record from a clone succeeds when \$HOME is a symlink"
-assert_not_contains "$CAPTURE_OUTPUT" "misplaced" \
-  "a clone under a symlinked \$HOME is not read as a misplaced checkout of itself"
-
-repo="$HOME/work/host-git-execution"
-init_repo "$repo" master
-desc="${RUN_ID}-host-git-execution"
-path=$(begin_clone "$desc" "$repo")
-host_hook_marker="$TMP/host-hook-ran"
-mkdir -p "$path/host-hooks"
-printf '#!/bin/sh\ntouch "%s"\n' "$host_hook_marker" > "$path/host-hooks/pre-commit"
-chmod +x "$path/host-hooks/pre-commit"
-git config --global core.hooksPath "$path/host-hooks"
-printf 'changed\n' > "$path/tracked.txt"
-capture record_in_repo "$path" -m "safe host Git" --files tracked.txt host-hooks/pre-commit
-assert_status 0 "record succeeds despite a global hook pointing into worker files"
-[[ ! -e "$host_hook_marker" ]] && pass "host Git never executes a worker-selected global hook" ||
-  fail "host Git never executes a worker-selected global hook"
-git config --global --unset core.hooksPath
-
-filter_marker="$TMP/host-filter-ran"
-mkdir -p "$path/scripts"
-printf '#!/bin/sh\ntouch "%s"\ncat\n' "$filter_marker" > "$path/scripts/filter"
-chmod +x "$path/scripts/filter"
-git config --global filter.audit.clean ./scripts/filter
-printf 'tracked.txt filter=audit\n' > "$path/.gitattributes"
-printf 'filtered\n' > "$path/tracked.txt"
-git -C "$path" add tracked.txt
-[[ -e "$filter_marker" ]] && pass "sabotage: worker attributes can invoke a global filter outside the safe Git path" ||
-  fail "sabotage: worker attributes can invoke a global filter outside the safe Git path"
-rm -f "$filter_marker"
-capture record_in_repo "$path" -m "safe attributes" --files tracked.txt .gitattributes scripts/filter
-assert_status 0 "record succeeds with attributes naming a global filter"
-[[ ! -e "$filter_marker" ]] && pass "host Git never executes the worker-selected global filter" ||
-  fail "host Git never executes the worker-selected global filter"
-git config --global --unset filter.audit.clean
-
-logs_path="$path/.git/logs/HEAD"
-mv "$logs_path" "$logs_path.saved"
-ln -s "$TMP/reflog-target" "$logs_path"
-capture "$ALLOD" change list "$path"
-assert_contains "$CAPTURE_OUTPUT" $'\tunsafe' "explicit clone list refuses a reflog symlink"
-capture record_in_repo "$path" -m "must refuse"
-assert_status 11 "record refuses a reflog symlink before Git can append through it"
-rm "$logs_path"
-mv "$logs_path.saved" "$logs_path"
-
-touch "$path/.git/objects/info/commit-graph"
-capture "$ALLOD" change cleanup "$path"
-assert_status 11 "cleanup refuses a worker-controlled commit graph"
-rm "$path/.git/objects/info/commit-graph"
-
-# The old gate walked only '.git/logs'; git writes many files under .git without a lockfile
-# (FETCH_HEAD, packed-refs, etc.), so the walk now covers the whole tree.
-outside_target="$TMP/outside-fetch-head-target"
-printf 'untouched\n' > "$outside_target"
-fetch_head_path="$path/.git/FETCH_HEAD"
-rm -f "$fetch_head_path"
-ln -s "$outside_target" "$fetch_head_path"
-capture record_in_repo "$path" -m "must refuse"
-assert_status 11 "record refuses a symlink at .git/FETCH_HEAD before git can write through it"
-assert_contains "$CAPTURE_OUTPUT" "FETCH_HEAD" "the refusal names the symlinked file"
-assert_equal "$(cat "$outside_target")" "untouched" \
-  "the file outside the clone that FETCH_HEAD pointed to is untouched"
-rm "$fetch_head_path"
-
-# hasPopulatedSubmodule's own 'git ls-files --stage' failing must refuse,
-# never silently read as 'no submodule' and let the gate pass.
-repo="$HOME/work/submodule-check-fails"
-init_repo "$repo" master
-desc="${RUN_ID}-submodule-check-fails"
-path=$(begin_clone "$desc" "$repo")
-export REAL_GIT
-mock_git_path=$(make_mock_git_path submodule-check-fails fail-ls-files)
-capture_with_path "$mock_git_path" "$ALLOD" change cleanup "$path"
-assert_status 11 "cleanup refuses rather than treat a failed 'git ls-files --stage' as 'no submodule'"
-assert_contains "$CAPTURE_OUTPUT" "could not be checked for a populated submodule" \
-  "the refusal names the submodule check failure"
-
-# 'list' must never say 'clean' for a clone whose own 'git status --porcelain' it could not
-# actually read.
-repo="$HOME/work/list-status-fails"
-init_repo "$repo" master
-desc="${RUN_ID}-list-status-fails"
-path=$(begin_clone "$desc" "$repo")
-git -C "$path" push -qf origin HEAD
-mock_git_path=$(make_mock_git_path list-status-fails fail-status)
-capture_with_path "$mock_git_path" "$ALLOD" change list "$repo"
-assert_contains "$CAPTURE_OUTPUT" $'\tunknown' \
-  "list reports unknown, never clean, when its own 'git status --porcelain' fails"
-
-# A failing 'git status --porcelain --ignored' must refuse, never silently skip the
-# untracked/ignored check it was there to run.
-repo="$HOME/work/tracked-hooks-status-fails"
-init_repo "$repo" master
-mkdir -p "$repo/.hooks"
-printf '#!/bin/sh\necho ok\n' > "$repo/.hooks/pre-commit"
-chmod +x "$repo/.hooks/pre-commit"
-git -C "$repo" add .hooks/pre-commit
-git -C "$repo" commit -qm "add a tracked pre-commit hook"
-git -C "$repo" push -q origin master
-git -C "$repo" fetch -q origin
-desc="${RUN_ID}-tracked-hooks-status-fails"
-path=$(begin_clone "$desc" "$repo")
-mock_git_path=$(make_mock_git_path tracked-hooks-status-fails fail-status)
-capture_with_path "$mock_git_path" "$ALLOD" change cleanup "$path"
-assert_status 11 "cleanup refuses rather than skip the tracked-hooks untracked/ignored check when 'git status' fails"
-assert_contains "$CAPTURE_OUTPUT" "could not be read" "the refusal names the tracked-hooks status failure"
-
-# A clone's own refs/remotes/origin/HEAD is worker-writable; submit must resolve the PR base
-# against the parent's real default branch instead.
-repo="$HOME/work/submit-base-from-parent"
-init_repo "$repo" master
-git -C "$repo" checkout -qb other-default master
-git -C "$repo" push -q origin other-default
-git -C "$repo" checkout -q master
-desc="${RUN_ID}-submit-base-from-parent"
-path=$(begin_clone "$desc" "$repo")
-git -C "$path" remote set-head origin other-default
-capture submit_in_repo "$path" -t "base from parent" -b "body" --dry-run
-assert_status 0 "submit dry-run succeeds for a clone whose own origin/HEAD was moved"
-assert_contains "$CAPTURE_OUTPUT" "Base: master" \
-  "submit resolves the PR base against the parent's real default branch, not the clone's own tampered origin/HEAD"
-
-# A real repo's own 'git gc' writes '.git/objects/info/commit-graph', which 'git clone' copies
-# into the clone; 'begin' clears it so the gate's own check does not refuse a brand-new clone.
-repo="$HOME/work/commit-graph-at-begin"
-init_repo "$repo" master
-git -C "$repo" commit-graph write --reachable
-desc="${RUN_ID}-commit-graph-at-begin"
-path=$(begin_clone "$desc" "$repo")
-[[ ! -e "$path/.git/objects/info/commit-graph" ]] &&
-  pass "begin deletes a commit-graph copied in from a parent that had one of its own" ||
-  fail "begin deletes a commit-graph copied in from a parent that had one of its own" \
-    "still present: $path/.git/objects/info/commit-graph"
-[[ ! -e "$path/.git/objects/info/commit-graphs" ]] &&
-  pass "begin deletes a commit-graphs/ chain copied in the same way" ||
-  fail "begin deletes a commit-graphs/ chain copied in the same way" \
-    "still present: $path/.git/objects/info/commit-graphs"
-capture "$ALLOD" change cleanup "$path"
-assert_status 0 "cleanup accepts a clone whose parent had its own legitimate commit-graph before begin ran"
+capture record_at "$alt_path" "$alt_home" -m "symlink home"
+assert_status 11 "record refuses the clone from outside the sandbox even when \$HOME is a symlink"
+assert_contains "$CAPTURE_OUTPUT" "allod change run" \
+  "resolveClone's physical-path matching still identifies the clone despite the symlinked \$HOME"
 
 printf '\nTests run: %d\n' "$test_number"
 printf 'All %d allod change tests passed.\n' "$test_number"

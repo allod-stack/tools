@@ -78,7 +78,8 @@ file yet is proved by the checks plus the PR's own Validation commands,
 rerun by the verifier, until its file lands.
 
 - [change](change.md): `allod change` begin, list, record, submit, cleanup
-  and run; clone isolation, the ledger, the config-safety gate.
+  and run; clone isolation, the ledger, the sandboxed record/submit flow,
+  forge-derived cleanup and list.
 - [forge](forge.md): `forge` auth and token, pull request, issue, label and
   milestone commands; `pr merge` with its read-back; the error contract.
 - [workspace](workspace.md): `pull-all` and `work-diff` over `~/work`.

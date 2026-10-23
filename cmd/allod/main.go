@@ -167,22 +167,11 @@ A worktree 'begin -d' made before this change keeps working in 'list',
 
 'list' prints one tab-separated row per clone this repo's ledger lists, plus
 one per remaining linked worktree from before this change — repo, path,
-branch, state — where the state is the one thing standing between that entry
-and 'cleanup': missing, prunable, locked, detached, submodule, dirty,
-unpushed, unknown, unsafe, running, moved, or clean. 'missing' and 'prunable'
-both mean the directory is gone; 'cleanup' on a 'missing' clone drops its
-ledger entry directly and says so, since there is no admin side-channel to
-clear first, while 'prunable' is a worktree whose admin entry 'git worktree
-prune' still clears. 'unsafe' means the clone fails the config-safety gate
-described below, or its own origin no longer matches the parent's (checked
-the same non-dying way, with no git command run); 'list' never dies on
-either — its row is printed with state 'unsafe', and listing continues to
-the next clone. 'running' means the clone's ledger file is currently locked
-by something else (almost always a 'run' still sandboxing a command inside
-it), so 'list' takes no lock and runs no git command against it either.
-'moved' means the clone itself is not checked out on the ledger's own
-branch. Both exist so 'clean' keeps meaning exactly "'cleanup' would succeed
-here right now".
+branch, state. A legacy worktree's state is the one thing standing between
+it and 'cleanup': missing, prunable, locked, detached, submodule, dirty,
+unpushed, unknown, or clean. A clone's state instead comes from the forge,
+never from its own disk (see "Inside and outside the sandbox" below):
+missing, running, unsubmitted, open, merged, closed, or unknown.
 
 'cleanup' treats a clone as 'missing' only when checking it reports exactly
 that (os.IsNotExist). Any other error checking it — permission denied, or a
@@ -196,42 +185,21 @@ there", never "missing", even though checking it raised no error at all.
 '--files a --files b' both stage a and b. It stops at the next option, so it
 can go anywhere in the line; pass a path that begins with '-' after '--',
 which ends option parsing. With no path named, record stages every tracked
-change — safe in a clone or worktree from 'begin -d', which belongs to one
-agent alone, but in a shared checkout that would include another agent's, so
-there record refuses and names the paths; pass --files to say what to stage.
+change — safe inside a sandboxed worker's own clone or a legacy worktree
+from 'begin -d', which belongs to one agent alone, but in a shared checkout
+that would include another agent's, so there record refuses and names the
+paths; pass --files to say what to stage.
 
 'record' and 'submit' also refuse, with exit code 3, if the checkout was
-moved to a different branch: for a ledgered clone the trusted branch is
-always the parent's ledger entry, never anything inside the clone itself,
-including its own handoff file; a legacy worktree, which carries no ledger
-entry, is still judged by the handoff file 'begin' wrote. 'cleanup' applies
-the same ledger check to a clone before it judges or discards anything on
-whatever happens to be checked out. For a ledgered clone, 'list', 'record',
-and 'cleanup' judge "unpushed" against the real remote directly, never a
-local remote-tracking ref or the clone's own configured upstream (both a
-worker's to rewrite without ever pushing anything): 'git -C <clone>
-ls-remote --exit-code origin refs/heads/<ledger branch>' gives the
-branch's actual head there (absent means nothing pushed under that branch
-name yet), and the branch counts as pushed only once 'git merge-base
---is-ancestor HEAD <remote sha>' holds. 'cleanup' also refuses, naming the
-failure, on any git error along the way — that ls-remote, that
-merge-base, or its own 'git status --porcelain' dirty check — never
-reading a failure as clean or pushed.
-
-A repo is protected by what its 'origin' names, not by where it sits: if
-origin names a repo ~/.config/git/protected-branches lists and the checkout is
-not at that entry's path, 'begin' and 'record' refuse on every branch, naming
-the expected and the actual path. Move the checkout there. A repo whose origin
-matches no entry is unprotected. 'record' and 'submit' resolve a clone to the
-repo whose ledger lists it and apply that repo's protection, so a ledgered
-clone is judged by its parent and never flagged as a misplaced checkout of
-itself.
-
-'record', 'submit', and 'cleanup' refuse, with exit code 9, a clone whose
-origin no longer matches the repo that issued it: both the fetch and the
-push URL (each with '--all', since 'git push' pushes to every configured
-push URL while 'get-url --push' without '--all' shows only the first) must
-be exactly one URL, equal to the parent's own fetch URL.
+moved to a different branch: the trusted branch is always the one
+'allod change begin' handed out, in the handoff file at
+'.git/allod-change-branch', never whatever is checked out when the worker
+switched branches inside its own clone after that. A repo is protected by
+what its 'origin' names, not by where it sits: if origin names a repo
+~/.config/git/protected-branches lists and the checkout is not at that
+entry's path, 'begin' and, outside the sandbox, 'record' refuse on every
+branch, naming the expected and the actual path; move the checkout there.
+A repo whose origin matches no entry is unprotected.
 
 'begin -d' and '--resume' refuse a repository that is not under the work
 directory ($WORK_DIR, default ~/work): 'list', 'record', 'submit', and
@@ -239,107 +207,36 @@ directory ($WORK_DIR, default ~/work): 'list', 'record', 'submit', and
 every repository under there, so a clone issued from anywhere else would
 get a ledger entry none of them could ever find again.
 
-The overseer runs git against a worker's clone from outside the sandbox,
-and git itself can execute what the clone's own '.git/config' names:
-credential.helper, core.hooksPath, core.fsmonitor, core.sshCommand,
-core.gitProxy, core.editor, diff.external, a filter's clean or smudge
-command, a merge driver, gpg.program, include.path, and includeIf.* among
-them. 'list', 'record', 'submit', 'cleanup', and 'run' all refuse, with
-exit code 11, before their first git command against a clone: if '.git' is
-missing, not an ordinary directory (a gitfile or a symlink can point
-anywhere a worker controls, whose config this gate would otherwise never
-see but git still loads), or has no 'config' to read; if '.git' holds a
-'commondir' or 'gitdir' file (how a linked worktree's own '.git' redirects
-git to load config, refs, and hooks from another directory entirely, one
-this gate never reads); if a symlink exists anywhere under '.git' at all
-(not only in '.git/logs'), since git writes many files there without a
-lockfile first (FETCH_HEAD, ORIG_HEAD, COMMIT_EDITMSG, packed-refs, and
-reflogs among them) and a symlink in place of any of them lets an outside
-command's write go through it to wherever a worker chose; if the clone
-has a populated submodule or a '.git/modules' directory ('git status' in
-the parent descends into one and loads its own config — sandboxed clones
-do not support them; a failing 'git ls-files --stage' there is itself
-unsafe, never read as 'no submodule'); if '.git/hooks' holds an
-executable file not named '*.sample'; if a
-'.git/config.worktree' exists; or if '.git/config' itself carries a key
-outside a fixed allowlist (the core and remote.origin settings an ordinary
-clone has, plus extensions.refstorage and extensions.objectformat, which
-git itself writes for a reftable or sha256 repository —
-extensions.worktreeconfig and any other extensions.* key stay refused;
-remote.origin.fetch and core.bare are pinned the same way, to the one
-value an ordinary clone has, rather than accepted with any value) —
-branch.* is allowed only for the ledger's own branch, and only 'remote =
-origin' and 'merge = refs/heads/<ledger branch>', the one shape 'begin'
-itself sets; every other branch.* key, for that branch or any other, is
-refused; if a '.git/info/grafts' file, a '.git/shallow' file, or any ref
-under refs/replace/ exists ('git for-each-ref refs/replace', with the
-clone's own ledger lock already held) — each rewrites a commit's own
-parentage as git reports it, which merge-base --is-ancestor walks to
-judge a branch pushed, so any one is refused outright, whatever it
-currently points to, rather than asked to behave; or if a tracked hook is unsafe. The config is read with 'git
-config --file <path> --list', which only reads the file and never runs
-anything, and a non-zero exit from that read is itself unsafe, never
-treated as an empty file with nothing to vet; the populated-submodule
-check runs last, once the config itself has already passed every other
-check, because it is a real 'git ls-files' invocation inside the clone —
-unlike the '--file'-scoped config read, this one loads the clone's
-'.git/config' in full, so it must never run against a clone whose config
-has not yet been vetted. Every outside command also runs git with
-GIT_NO_REPLACE_OBJECTS=1, so a worker's own refs/replace/<sha> inside the
-clone cannot substitute a different object's content wherever that sha is
-looked up (a parent commit during a merge-base walk, say) to fake a branch
-as already pushed.
+Inside and outside the sandbox: nothing outside 'allod change run' ever
+runs git in a worker's clone any more. Outside, 'record' and 'submit'
+refuse a clone this repo's ledger lists, with exit code 11, before any git
+command and before any lock: the worker records and submits its own clone
+from inside its own sandbox, not the overseer from outside — run 'allod
+change run <clone> -- allod change record ...' (or 'submit ...'). Inside
+the sandbox, ALLOD_CHANGE_SANDBOX=1 — set only by 'run', in the sandboxed
+environment it builds, never on the pass-through allowlist, so nothing
+outside can set it — tells 'record' and 'submit' they are that worker:
+they resolve the repository as an ordinary one (the parent's ledger is
+invisible inside anyway), skip the misplaced-checkout refusal above (exit
+8) and the shared-checkout sweep refusal above, and otherwise behave
+exactly as they do for any repository: branch protection by origin, the
+moved-branch refusal (exit 3) from the clone's own handoff file, an
+additive 'git push -u origin HEAD', and 'forge pr create' with the bound
+token.
 
-A tracked hook is git-hooks/protected-refs-policy's own concern, not
-'.git's: that global hook dispatcher, which every runner's own hooks
-under ~/.config/git/hooks point at, also runs '$repo/.hooks/<hook>' — or
-the directory '$repo/.hookspath' names — straight from the clone's own
-working tree, before the clone's own '.git/hooks', checking only whether
-the file is executable on disk, never whether git tracks it. This gate
-refuses unless: '.hookspath' is absent from the clone or byte-identical
-to the parent's own working-tree '.hookspath'; every file under the
-tracked hooks directory that precedence settles on is byte-identical to
-the parent's own 'origin/<default branch>' blob at that path (read with
-'git show', run in the parent, trusted, never the clone); that same
-file's git mode, in both the clone's own index ('git ls-files --stage')
-and its working-tree executable bit, matches the parent's
-'origin/<default branch>' tree entry for it — a worker's own 'chmod +x'
-on an otherwise byte-identical, non-executable tracked file is refused
-too, since the dispatcher runs any file there by hook name, whatever its
-mode; that directory holds no file the base does not; and no untracked or
-ignored file exists under it. The contract this makes literally true: a
-change to a tracked hook never comes from a sandboxed worker; the
-overseer makes it in the parent's own change flow, the same as any other
-change to the repository.
-
-A path is resolved to its clone (and its clone to its parent's ledger
-entry) by matching physical, absolute paths against every ledger under the
-work directory, in pure Go — no git command runs against the target path
-to do this. Only once that match decides whether the path is a clone does
-this gate read its config, and only once the gate passes does 'list',
-'record', 'submit', 'cleanup', or 'run' run any git command against it;
-see docs/allod-change.md for the contract this gate is enforcing.
-
-'record', 'submit', 'cleanup', and 'list' also take an exclusive,
-non-blocking flock on the clone's own ledger file (the two-line file
-under the parent's .git/allod-changes that names the clone and its
-branch) before their first git command against it, and hold it until
-they are done ('list' holds it through every one of its own git commands
-for that row — the config gate's, the origin check's, the branch check's,
-and cloneState's own 'git status'/'git ls-remote' alike — one row at a
-time, never only probed and released up front); 'run' takes that same
-exclusive lock first too, for its own pre-flight (the config gate, the
-tracked-hooks check, the branch check), then converts it to shared,
-atomically (a second flock call on the same descriptor converts the
-lock's own type rather than releasing and reacquiring it), for the whole
-life of the sandboxed command. Two concurrent 'run's over the same clone
-serialize their pre-flight rather than race each other's git commands. A
-command that cannot get the lock it needs refuses, with exit code 13,
-naming the clone, rather than wait: outside commands act on a clone only
-when nothing is running inside it, and a file-level lock either succeeds
-or it does not, closing the race a systemd-scope query could not — no
-scope name, unit, or session bus to list or parse back apart, and no
-window between asking "is anything running" and finding out for sure.
+'cleanup' and 'list' never run git in a clone either: a clone's
+removability, and its row in 'list', both come from 'forge pr find-by-head
+-s all <branch>', asked with the parent repository as the forge's working
+directory, never the clone's own disk. No pull request for the branch:
+'cleanup' refuses, naming the worker's own submit command; 'list' prints
+'unsubmitted'. Open: 'cleanup' refuses; 'list' prints 'open'. Merged or
+closed: 'cleanup' removes the clone directory and drops its ledger entry;
+'list' prints the state. The forge not answering is a refusal naming the
+error for 'cleanup', or 'unknown' for 'list'. 'cleanup' still takes the
+clone's own ledger lock first — the same two-line file under the parent's
+.git/allod-changes that names the clone and its branch — and refuses with
+exit code 13, naming the clone, while a running worker holds it; a
+'missing' clone drops its ledger entry without asking the forge anything.
 
 'run' runs <command> inside a bubblewrap sandbox that can reach nothing but
 the named clones, never falling back to an unsandboxed run: a path that
@@ -420,9 +317,9 @@ with ':' in the order given ('+' is not a legal systemd unit-name
 character), plus a random suffix, so 'systemctl --user
 list-units allod-run-*' lists every run for any clone's swarm regardless
 of how many clones one run spans, and two runs over the same clone set
-never collide — this naming is now purely for an operator to inspect or
-kill a scope by hand; no outside command's own refusal depends on
-querying systemctl any more (see the ledger-lock paragraph above).
+never collide — this naming is purely for an operator to inspect or kill a
+scope by hand; no outside command's own refusal depends on querying
+systemctl, which 'cleanup's own ledger lock (above) does instead.
 Exceeding the memory cap kills the scope and only the scope; the
 command's own exit status is this process's exit status either way.
 
@@ -430,18 +327,22 @@ Inside the sandbox: every named clone is read-write at its real path;
 ~/.gitconfig and every registry repository flagged "memory": true are
 read-only at their real paths, with an empty tmpfs mounted over that
 checkout's own '.git' on top, so no ledger or history of a memory repo
-(including its own '.git/allod-changes') is visible inside; under
-~/.config/git/ only an allowlist is bound read-only, never an exclusion
-list: 'config', the 'hooks' directory (walked recursively),
-'protected-refs-policy', 'protected-branches', 'signing-required-branches',
-'allowed-external-remotes', 'forge-hosts', and 'active-pr-branches' — every
-name git-hooks/protected-refs-policy itself reads — and nothing else under
-~/.config/git is bound, whatever its own name, so a second credential
-deployed there under a name of its own (one 'forge' would honor through
-FORGE_TOKEN_FILE, say) is excluded by never being on the list, not by
-being matched and skipped by name. Within 'hooks/', a hard link or a
-symlink resolving to 'forgejo-token's own content is still excluded the
-same way at every depth. A symlink's own target must itself be
+(including its own '.git/allod-changes') is visible inside. The VM's own
+forge SSH identity is bound read-only, by name, never ~/.ssh as a whole:
+'~/.ssh/config', '~/.ssh/known_hosts', and every 'IdentityFile'
+'~/.ssh/config' names (a leading tilde, and ssh's own home-directory
+token, expanded to $HOME, bound along with its '.pub' sibling when
+present), each with '--ro-bind-try' so a fixture
+$HOME without any of them still runs. Under ~/.config/git/ only an
+allowlist is bound read-only, never an exclusion list: 'config', the
+'hooks' directory (walked recursively), 'protected-refs-policy',
+'protected-branches', 'signing-required-branches',
+'allowed-external-remotes', 'forge-hosts', 'active-pr-branches', and
+'forgejo-token' — the worker's own forge credential, the author account's,
+bound exactly like any other allowlisted name — and nothing else under
+~/.config/git is bound, whatever its own name: 'forgejo-verifier-token'
+(the merge token, the verifier account's, never the sandbox's) stays
+absent by never being on the list. A symlink's own target must itself be
 allowlisted too, not merely somewhere physically under ~/.config/git:
 'hooks/x -> ../some-other-credential' resolves inside the tree, but if
 'some-other-credential' is not itself one of the allowlisted names, it is
@@ -463,7 +364,8 @@ a private temporary file at the start of the run, which is bound
 read-write at ~/.claude.json inside the sandbox and discarded when the run
 ends, so a worker's writes to it never reach the real file.
 
-Nothing else of $HOME is visible, and ~/.ssh never is. /nix, /etc,
+Nothing else of $HOME is visible, and ~/.ssh is never bound as a whole
+directory — only the files named above. /nix, /etc,
 /run/current-system, /bin, and /usr are read-only, plus /run/wrappers if
 it exists; /etc is bound whole, so a root-only file under it is protected
 by its own mode bits, not by absence — see the netrc refusal above for the
@@ -486,12 +388,14 @@ would hand a worker whatever happens to be in it. Only a fixed allowlist
 passes through, each as the caller's own environment set it: HOME, PATH,
 TERM, LANG, LC_ALL, any LC_* variable, USER, LOGNAME, SHELL, TZ,
 COLORTERM, and NIX_REMOTE if set; TMPDIR is always set to '/tmp', the
-sandbox's own private tmpfs. The allowlist is fixed in code, not a flag: a
-variable that turns out to be needed is a code change with a reason, not a
-bypass on the command line. Git identity inside comes from the bound
-~/.gitconfig, never from a GIT_* environment variable, which the
-allowlist does not carry. See docs/allod-change-run.md for the mount
-table and what the sandbox does not do.
+sandbox's own private tmpfs, and ALLOD_CHANGE_SANDBOX is always set to
+'1' (see "Inside and outside the sandbox" above) — neither is on the
+allowlist, so only 'run' itself ever sets either one. The allowlist is
+fixed in code, not a flag: a variable that turns out to be needed is a
+code change with a reason, not a bypass on the command line. Git identity
+inside comes from the bound ~/.gitconfig, never from a GIT_* environment
+variable, which the allowlist does not carry. See docs/allod-change-run.md
+for the mount table and what the sandbox does not do.
 `
 
 const patchUsageText = `Usage: allod patch <command> [options]

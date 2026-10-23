@@ -253,6 +253,47 @@ func TestReadPRFindByHead(t *testing.T) {
 	})
 }
 
+// TestReadPRFindByHeadStateAll covers '-s all': the state comes back read
+// from the response, not assumed open.
+func TestReadPRFindByHeadStateAll(t *testing.T) {
+	srv := newRecordingServer(t, map[string]cannedResponse{
+		"/api/v1/repos/acme/widget/pulls?state=all&limit=50&page=1": {Body: `[` +
+			`{"number":10,"title":"Old topic","user":{"login":"alice"},"head":{"label":"acme:topic","ref":"topic"},"base":{"label":"master","ref":"master"},"state":"closed","merged":true,"merged_at":"2025-01-02T00:00:00Z"},` +
+			`{"number":12,"title":"Open one","user":{"login":"alice"},"head":{"label":"acme:topic","ref":"topic"},"base":{"label":"master","ref":"master"},"state":"open"},` +
+			`{"number":31,"title":"Closed, not merged","user":{"login":"alice"},"head":{"label":"acme:dropped","ref":"dropped"},"base":{"label":"master","ref":"master"},"state":"closed","merged":false},` +
+			`{"number":44,"title":"Merged","user":{"login":"alice"},"head":{"label":"acme:landed","ref":"landed"},"base":{"label":"master","ref":"master"},"state":"closed","merged":true,"merged_at":"2026-01-02T00:00:00Z"}` +
+			`]`},
+	})
+	useServer(t, srv)
+	useToken(t, fakeToken)
+	useNoInferRepo(t)
+
+	t.Run("open pull request is preferred over an earlier closed match", func(t *testing.T) {
+		out, _, code := runForge(t, "-R", "acme/widget", "pr", "find-by-head", "-s", "all", "topic")
+		if code != 0 || out != "12\topen\n" {
+			t.Errorf("got (%q, %d), want (\"12\\topen\\n\", 0)", out, code)
+		}
+	})
+	t.Run("closed, unmerged pull request prints closed", func(t *testing.T) {
+		out, _, code := runForge(t, "-R", "acme/widget", "pr", "find-by-head", "--state", "all", "dropped")
+		if code != 0 || out != "31\tclosed\n" {
+			t.Errorf("got (%q, %d), want (\"31\\tclosed\\n\", 0)", out, code)
+		}
+	})
+	t.Run("merged pull request prints merged, with no date", func(t *testing.T) {
+		out, _, code := runForge(t, "-R", "acme/widget", "pr", "find-by-head", "-s", "all", "landed")
+		if code != 0 || out != "44\tmerged\n" {
+			t.Errorf("got (%q, %d), want (\"44\\tmerged\\n\", 0)", out, code)
+		}
+	})
+	t.Run("returns nothing when no PR in any state has that head", func(t *testing.T) {
+		out, _, code := runForge(t, "-R", "acme/widget", "pr", "find-by-head", "-s", "all", "no-such-branch")
+		if code != 0 || out != "" {
+			t.Errorf("got (%q, %d), want (\"\", 0)", out, code)
+		}
+	})
+}
+
 // --- issue list ---
 
 func TestReadIssueList(t *testing.T) {
