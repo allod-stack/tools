@@ -849,9 +849,7 @@ func unpushedCommitsForClone(dir, ledgerBranch string) (unpushedResult, string) 
 		if !ok {
 			return unpushedUnknown, "refs/heads/" + ledgerBranch + " is absent on origin, and origin's default branch head could not be resolved either"
 		}
-		// The forge rebase-merges, so a merged commit's hash on the default
-		// branch differs from the local one and ancestry alone reads merged
-		// work as unpushed; judge by patch equivalence, as unpushedCommits does.
+		// A rebase-merge lands under a new hash; judge by patch, as unpushedCommits does.
 		return unpushedAgainstBase(dir, defaultSHA)
 	default:
 		return unpushedUnknown, "could not check origin for refs/heads/" + ledgerBranch + ": " + output
@@ -1335,11 +1333,9 @@ func cleanupClone(parentRepo string, entry changeLedgerEntry) {
 	if dirty != "" {
 		die(1, "clone '%s' is dirty; clean it before cleanup", entry.path)
 	}
-	// Fetch before judging: the remote's objects must exist locally for the
-	// comparison below, and a rebase-merge plus branch deletion is exactly the
-	// state a clone that never fetched cannot see. A stale local remote-tracking
-	// ref cannot make the answer wrong -- unpushedCommitsForClone asks the real
-	// remote via ls-remote -- but a missing object can.
+	// Fetch before judging: the comparison below needs the remote's objects, and
+	// a rebase-merge plus branch deletion is what an unfetched clone cannot see.
+	// A stale local ref cannot make the answer wrong; a missing object can.
 	if output, status := captureCommand(entry.path, nil, true, "git", "fetch", "--prune", "origin"); status != 0 {
 		die(1, "could not fetch origin in clone '%s': %s", entry.path, output)
 	}

@@ -833,11 +833,8 @@ assert_status 0 \
   pass "cleanup removes the clone once the real remote shows it clean" ||
   fail "cleanup removes the clone once the real remote shows it clean" "still exists: $path"
 
-# A rebase-merged PR whose branch the forge deleted: the merged commit's hash on
-# master differs from the local one and the clone never fetched the rewrite, so
-# ancestry against the default-branch head dies on a missing object unless
-# cleanup fetches first, and patch equivalence, not ancestry, sees the work as
-# merged. allod/tools#297.
+# A rebase-merged, forge-deleted branch (allod/tools#297): the merge lands under a
+# new hash the clone never fetched; cleanup must fetch and judge by patch, not hash.
 repo="$HOME/work/cleanup-rebase-merge"
 init_repo "$repo" master
 desc="${RUN_ID}-cleanup-rebase-merge"
@@ -2244,9 +2241,8 @@ git -C "$path" push -q origin HEAD
 capture "$ALLOD" change cleanup "$path"
 assert_status 0 "cleanup succeeds once '.git/shallow' is gone and the branch is pushed"
 
-# A relayed commit lands on the parent's default branch under a new hash with the same patch,
-# so the clone's own branch never pushed reads as landed: patch equivalence, not ancestry.
-# The same judgment that lets cleanup take a rebase-merged, branch-deleted clone (above).
+# A relayed commit lands on the default branch under a new hash, same patch: the
+# clone reads as landed, by the same judgment as the rebase-merge case above.
 repo="$HOME/work/cleanup-relayed"
 init_repo "$repo" master
 desc="${RUN_ID}-cleanup-relayed"
