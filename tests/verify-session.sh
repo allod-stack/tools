@@ -101,6 +101,7 @@ write_fake "$FAKE_DIR/pi" <<'SH'
 set -euo pipefail
 printf 'pi\t%s\n' "$*" >> "$FAKE_DIR/pi.log"
 printf '%s\n' "${FORGE_TOKEN_FILE:-}" > "$FAKE_DIR/pi.token-file"
+printf '%s\n' "$PWD" > "$FAKE_DIR/pi.pwd"
 prompt=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -196,7 +197,8 @@ capture() {
 
 reset_fakes() {
   rm -f "$FAKE_DIR/forge.log" "$FAKE_DIR/allod.log" "$FAKE_DIR/git.log" \
-    "$FAKE_DIR/pi.log" "$FAKE_DIR/pi.prompt" "$FAKE_DIR/pi.token-file"
+    "$FAKE_DIR/pi.log" "$FAKE_DIR/pi.prompt" "$FAKE_DIR/pi.token-file" \
+    "$FAKE_DIR/pi.pwd"
   unset FAKE_FORGE_ACCOUNT FAKE_PR_AUTHOR FAKE_HEAD_REF FAKE_HEAD_SHA \
     FAKE_CLONE_URL FAKE_CHANGE_LIST FAKE_ALLOD_LIST_FAIL FAKE_FORGE_AUTH_FAIL \
     FAKE_PI_FAIL FAKE_PROOF_URL
@@ -222,7 +224,6 @@ capture "$UNDER_TEST" acme/widget#7
 assert_status 1 "a missing token is refused"
 assert_contains "$CAPTURE_OUTPUT" "no verifier token" "the refusal names the missing token"
 
-# The author's credential must never reach the verifier.
 reset_fakes
 export FAKE_FORGE_ACCOUNT=author-agent
 export FAKE_PR_AUTHOR=author-agent
@@ -232,7 +233,6 @@ assert_contains "$CAPTURE_OUTPUT" "author" "the refusal names the author seat"
 assert_file_absent "$FAKE_DIR/pi.log" "no verifier runs on a refused seat"
 assert_file_absent "$FAKE_DIR/git.log" "no scratch clone is cut on a refused seat"
 
-# A live clone of the pull request's branch must never reach the verifier.
 reset_fakes
 export FAKE_FORGE_ACCOUNT=verifier
 export FAKE_PR_AUTHOR=author-agent
@@ -259,8 +259,6 @@ assert_status 3 "a failed auth check is refused"
 assert_contains "$CAPTURE_OUTPUT" "seat check failed: forge auth status" "the refusal names the failed auth check"
 assert_file_absent "$FAKE_DIR/pi.log" "no verifier runs when the seat cannot be confirmed"
 
-# The working path: a verifier seat, a scratch clone at the pull request's
-# head hash, a generated brief, and captured output.
 reset_fakes
 export FAKE_FORGE_ACCOUNT=verifier
 export FAKE_PR_AUTHOR=author-agent
@@ -288,6 +286,10 @@ assert_contains "$pi_log" "-p" "the verifier runs in print mode"
 assert_equal "$(cat "$FAKE_DIR/pi.token-file")" "$VERIFIER_TOKEN" \
   "the argument token file overrides the ambient one for the verifier"
 
+clone_target=$(awk -F'\t' '$2 ~ /^clone/ { n = split($2, a, " "); print a[n] }' "$FAKE_DIR/git.log")
+assert_equal "$(cat "$FAKE_DIR/pi.pwd")" "$clone_target" \
+  "the verifier runs inside the scratch clone, not the caller's directory"
+
 prompt=$(cat "$FAKE_DIR/pi.prompt")
 assert_contains "$prompt" "verify-merge" "the brief names the skill"
 assert_contains "$prompt" "acme/widget#7" "the brief names the pull request"
@@ -296,7 +298,14 @@ assert_contains "$prompt" "Validation" "the brief names the no-map validation fa
 assert_contains "$prompt" "score" "the brief names the score-first rule"
 assert_contains "$prompt" "PROOF_COMMENT" "the brief names the proof-comment contract"
 
-# A verifier that fails is reported, not swallowed.
+reset_fakes
+export FAKE_FORGE_ACCOUNT=verifier
+export FAKE_PR_AUTHOR=author-agent
+capture "$UNDER_TEST" --token-file "$VERIFIER_TOKEN" --timeout --help acme/widget#7
+assert_status 6 "an option-shaped timeout is refused, not run"
+assert_contains "$CAPTURE_OUTPUT" "verifier exited" "the refusal reports the failed timeout"
+assert_file_absent "$FAKE_DIR/pi.log" "no verifier runs with an invalid timeout"
+
 reset_fakes
 export FAKE_FORGE_ACCOUNT=verifier
 export FAKE_PR_AUTHOR=author-agent

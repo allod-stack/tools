@@ -101,9 +101,8 @@ number="${BASH_REMATCH[2]}"
 [[ -f "$token_file" ]] || die "verifier token file not found: $token_file"
 export FORGE_TOKEN_FILE="$token_file"
 
-# Seat check, author. A credential that authenticates as the pull request's
-# author is the author's seat, not the verifier's; a check that cannot run
-# refuses rather than passing.
+# The author's own credential is not the verifier's seat; a check that cannot
+# run refuses.
 auth_out=$(forge auth status) || die "seat check failed: forge auth status exited $?" 3
 account=$(printf '%s\n' "$auth_out" | sed -n 's/^Authenticated as \([^ ]*\).*$/\1/p')
 [[ -n "$account" ]] || die "seat check failed: forge auth status named no account: $auth_out" 3
@@ -119,18 +118,15 @@ if [[ "$account" == "$author" ]]; then
   die "seat check: the verifier credential authenticates as the pull request's author ($account); a session that wrote the pull request cannot verify it" 2
 fi
 
-# Seat check, live clone. Any clone this environment already holds on the
-# pull request's branch is a session that could have written it. A list that
-# cannot be read refuses rather than passing.
+# A live clone of the branch is an author seat; a list that cannot be read
+# refuses.
 list_out=$(allod change list) || die "seat check failed: allod change list exited $?" 3
 if printf '%s\n' "$list_out" | awk -F'\t' -v repo="$repo" -v ref="$head_ref" \
     'NF >= 3 && $1 == repo && $3 == ref { found = 1 } END { exit !found }'; then
   die "seat check: this environment holds a clone of $repo on $head_ref; the verifier must be a session with no live clone of the pull request's branch" 2
 fi
 
-# Scratch isolation. The clone is cut fresh, of the forge remote, with the
-# pull request's ref fetched and its head checked out by hash; it is never
-# under the work tree or ~/changes and never the author's clone.
+# Fresh scratch clone of refs/pull/<n>/head, never the author's checkout.
 snapshot=$(forge pr snapshot "$number" -R "$repo") \
   || die "cannot read the snapshot for $repo#$number" 4
 head_sha=$(printf '%s' "$snapshot" | jq -r '.head.sha // empty')
@@ -149,9 +145,7 @@ git -C "$clone_dir" checkout --quiet --detach "$head_sha" \
 
 info "scratch clone: $clone_dir at $head_sha"
 
-# The brief is generated, never remembered. It carries the skill, the pull
-# request, the ledger lookup, the no-map fallback, and the score-first rule,
-# and it tells the verifier to stop rather than merge past a stop.
+# Built here, never remembered: skill, PR, ledger lookup, no-map fallback, score-first.
 brief="$scratch/brief.md"
 cat > "$brief" <<BRIEF
 You are the cold verifier seat for $repo#$number. This session did not write
@@ -190,7 +184,10 @@ BRIEF
 
 log="$scratch/verifier.log"
 set +e
-timeout "$timeout_dur" pi --no-session -p "$(cat "$brief")" >"$log" 2>&1
+(
+  cd "$clone_dir" || exit 5
+  timeout -- "$timeout_dur" pi --no-session -p "$(cat "$brief")" >"$log" 2>&1
+)
 status=$?
 set -e
 
