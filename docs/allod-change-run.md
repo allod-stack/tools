@@ -1,11 +1,11 @@
 # allod change run
 
 Runs a command inside a bubblewrap sandbox that can reach nothing but the
-clones named on the command line, so a worker given `allod change run` and
-nothing else cannot touch a sibling's tree, a shared checkout, or the VM's
-forge and SSH credentials — only its own clone, the toolchain, and the
-network. Part of the `delegate-impl` sandbox arc (allod/strategy#69); the
-design and the mount set are specified in allod/strategy#69 itself.
+clones named on the command line, the toolchain, the network, and the VM's
+own forge identity bound in by name: a worker given `allod change run` and
+nothing else can push its own branch and open its own pull request, and
+cannot touch a sibling's tree, a shared checkout, or anything else under
+`$HOME`. The mount set is specified below.
 
 ```
 allod change run [<clone-path>...] [--memory <size>] -- <command...>
