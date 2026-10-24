@@ -20,7 +20,7 @@ a scratch clone checked out at that hash, never in a shared checkout.
 
 | Step | Command | What it proves |
 | --- | --- | --- |
-| launch | `export ALLOD_UNDER_TEST="$(nix build .#allod --print-out-paths --no-link)/bin/allod"` and `export FORGE_UNDER_TEST="$(nix build .#forge --print-out-paths --no-link)/bin/forge"`, run in the clone | the Go binaries under test are built from this tree; the shell tools (`workspace/`, `flake/`, `git-hooks/`, `pr-explain/`) need no build, the suites run them from the tree |
+| launch | `export ALLOD_UNDER_TEST="$(nix build .#allod --print-out-paths --no-link)/bin/allod"` and `export FORGE_UNDER_TEST="$(nix build .#forge --print-out-paths --no-link)/bin/forge"`, run in the clone | the Go binaries under test are built from this tree; the shell tools (`workspace/`, `flake/`, `git-hooks/`, `pr-explain/`, `verify-session/`) need no build, the suites run them from the tree |
 | health check | `test -z "$(git status --porcelain)" && test "$(git rev-parse HEAD)" = "$HEAD" && case "$ALLOD_UNDER_TEST" in /nix/store/*) "$ALLOD_UNDER_TEST" change --help \| head -1 ;; *) echo "stale: ALLOD_UNDER_TEST unset, the suites would drive $(command -v allod)"; false ;; esac` | the tree is exactly the head commit and the variable names the build from it; `command -v allod` is the deployed generation, which a suite run without the variable drives silently. A stale build is reported, not driven |
 | drive | `ALLOD_UNDER_TEST=... bash tests/<suite>.sh`, or `nix develop -c go test -count=1 -v ./cmd/forge -run '<Test>'`, or the fixture recipe a feature file gives, run against `$ALLOD_UNDER_TEST` | one entry point exercised end to end, with the expected line the feature file names |
 | inspect | the suite's `ok N - <description>` lines and its closing `All N ... passed` line; for a fixture, `git -C <bare origin> log --format=%B <branch>`, the parent's `.git/allod-changes/<description>`, `"$ALLOD_UNDER_TEST" change list <repo>`, `git ls-remote` on the forge | the observable state after a path ran, read from the authoritative copy (the origin, the ledger, the forge), never from the clone a worker could have rewritten |
@@ -83,6 +83,10 @@ rerun by the verifier, until its file lands.
 - [forge](forge.md): `forge` auth and token, pull request, issue, label and
   milestone commands; `pr merge` with its read-back; the error contract.
 - [workspace](workspace.md): `pull-all` and `work-diff` over `~/work`.
+- [verify-session](verify-session.md): the seat refusals (author credential,
+  live clone, unreadable credential or clone list), the scratch clone at
+  `refs/pull/<n>/head`, the generated brief, the headless run and the
+  proof-comment extraction; driver `tests/verify-session.sh`.
 - patch: `allod patch` send and receive, the linear-history refusal, hash
   rewriting by `git am` (no file yet).
 - git-hooks: `protected-refs-policy` cases from
