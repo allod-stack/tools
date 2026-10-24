@@ -5,8 +5,8 @@ single enforced command: it checks the seat rules, cuts a scratch clone of
 the pull request's head, writes the verifier brief, and runs the agent
 headless with its output captured. The seat refusals are the priority —
 each must stop the run before any clone is cut or any agent starts — and
-the exit code is the contract a caller reads: `1` argument and credential
-errors, `2` a refused seat, `3` a seat check that could not be answered,
+the exit code is the contract a caller reads: `1` argument and
+token-resolution errors, `2` a refused seat, `3` a seat check that could not be answered,
 `4` the pull request could not be read, `5` the scratch clone failed, `6`
 the verifier timed out or exited non-zero.
 
@@ -75,9 +75,9 @@ bash tests/verify-session.sh
 Expected: the closing `All 44 verify-session tests passed.` The refusal
 paths are driven first — that is what the ordering in the suite enforces —
 and each seat refusal is asserted to leave the fake `pi` log absent (the
-author and live-clone refusals also leave the fake `git` log absent). The
-timeout refusal cuts the scratch clone before it fails, so only its `pi`
-log is asserted absent.
+author refusal additionally asserts the fake `git` log absent; the
+live-clone refusal does not). The timeout refusal cuts the scratch clone
+before it fails, so only its `pi` log is asserted absent.
 
 | Entry point and path | Expected `ok` line |
 | --- | --- |
@@ -126,6 +126,10 @@ Expected: exit 2, a refusal naming the author seat, and no `pi` process.
   unreadable credential or clone list is refused with exit 3 by design; a
   test that reads the run as a pass when `forge` was never consulted proves
   nothing.
+- **The live-clone seat check matches the pull request's base repo.** A row
+  for a clone of the same branch under a fork's repo does not match, so a
+  verifier that holds one is not refused; a run whose head branch lives on a
+  fork is the witness.
 - **An exit status read through a pipe is the last command's.** Run the
   suite's commands directly and read `$?` or `PIPESTATUS[0]` (`shell.md` in
   allod/memory); `verify-session ... | tee log` reports `tee`'s 0 on a
