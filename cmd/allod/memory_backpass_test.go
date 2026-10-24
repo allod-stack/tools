@@ -444,6 +444,9 @@ EOF
 	if strings.Contains(string(promptReceived), "memory-backpass: 2026-09-01") {
 		t.Error("synthesis prompt must not list the merged PR as a rejected title")
 	}
+	if !strings.Contains(string(promptReceived), "Keep fixture bullets short so the index stays easy to read.") {
+		t.Error("synthesis prompt should carry the public memory.md bytes relay diffs are grounded in")
+	}
 
 	branch := backpassFindAgentBranch(t, fx.private)
 	privateClone := backpassWorktreePathForBranch(t, fx.private, branch)

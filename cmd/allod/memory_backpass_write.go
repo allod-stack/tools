@@ -118,6 +118,48 @@ func renderTopicFileIndex(publicDir, privateDir string) string {
 	return strings.Join(lines, "\n")
 }
 
+// Relay diffs are applied to the public worktree, which the synthesis seat
+// never sees, so the prompt carries the real bytes of every file a relay
+// diff can touch: the index, the ledger, and each topic file the public
+// index names. A diff grounded in anything else has invented its context
+// lines, and git apply refuses it.
+func publicRelayFileNames(publicDir string) []string {
+	names := []string{"memory.md", "ledger.md"}
+	data, err := os.ReadFile(publicDir + "/memory.md")
+	if err != nil {
+		return names
+	}
+	inSection := false
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			inSection = strings.Contains(trimmed, "Topic Files")
+			continue
+		}
+		if inSection && strings.HasPrefix(trimmed, "- `") {
+			if end := strings.Index(trimmed, "` - "); end > 3 {
+				name := trimmed[3:end]
+				if name != "memory.md" && name != "ledger.md" {
+					names = append(names, name)
+				}
+			}
+		}
+	}
+	return names
+}
+
+func renderPublicFileContents(publicDir string) string {
+	var b strings.Builder
+	for _, name := range publicRelayFileNames(publicDir) {
+		data, err := os.ReadFile(publicDir + "/" + name)
+		if err != nil {
+			continue
+		}
+		fmt.Fprintf(&b, "### %s\n\n%s\n\n", name, strings.TrimRight(string(data), "\n"))
+	}
+	return b.String()
+}
+
 func renderRejectedTitles(prs []backpassPR) string {
 	titles := rejectedEditTitles(prs)
 	if len(titles) == 0 {
@@ -290,6 +332,7 @@ func writeBackpass(cfg backpassConfig, date string, ledger *ledgerBuilder, publi
 		"PRIVATE_WORKTREE":                     privatePath,
 		"INSTRUCTION_INDEXES_WITH_BYTE_COUNTS": renderIndexesWithBudget(publicBullets, privateBullets, cfg.publicDir, cfg.privateDir, indexMax),
 		"TOPIC_FILE_INDEX":                     renderTopicFileIndex(cfg.publicDir, cfg.privateDir),
+		"PUBLIC_FILE_CONTENTS":                 renderPublicFileContents(cfg.publicDir),
 		"FOLD":                                 fold,
 		"REJECTED_EDIT_TITLES":                 renderRejectedTitles(prs),
 	}

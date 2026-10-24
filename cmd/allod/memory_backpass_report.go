@@ -390,7 +390,7 @@ var analysisKnownPlaceholders = map[string]bool{
 }
 var synthesisKnownPlaceholders = map[string]bool{
 	"PRIVATE_WORKTREE": true, "INSTRUCTION_INDEXES_WITH_BYTE_COUNTS": true,
-	"TOPIC_FILE_INDEX": true, "FOLD": true, "REJECTED_EDIT_TITLES": true,
+	"TOPIC_FILE_INDEX": true, "PUBLIC_FILE_CONTENTS": true, "FOLD": true, "REJECTED_EDIT_TITLES": true,
 }
 
 func runBackpass(cfg backpassConfig) {

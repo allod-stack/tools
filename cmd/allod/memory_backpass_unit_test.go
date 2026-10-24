@@ -21,6 +21,22 @@ func TestFillTemplateNeverRescansEmittedValues(t *testing.T) {
 	}
 }
 
+func TestRenderPublicFileContentsCarriesRealBytes(t *testing.T) {
+	out := renderPublicFileContents("testdata/backpass/public")
+	for _, want := range []string{
+		"### memory.md",
+		"Write a test before merging a change to the fixture tool.",
+		"### ledger.md",
+		"Fixture public gap entry",
+		"### topicfile.md",
+		"A small topic file fixture.",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("renderPublicFileContents missing %q, got:\n%s", want, out)
+		}
+	}
+}
+
 func TestFillTemplateUnknownPlaceholderRefuses(t *testing.T) {
 	_, err := fillTemplate("{{KNOWN}} {{MYSTERY}}", map[string]string{"KNOWN": "x"})
 	if err == nil {

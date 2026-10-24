@@ -23,6 +23,12 @@ These are the overflow tier. Each line gives a filename and the one-line descrip
 
 {{TOPIC_FILE_INDEX}}
 
+## Public memory file contents
+
+The public index, ledger, and every public topic file, exactly as they are on disk. Ground every `toRelay` diff in these bytes: the diff is applied with `git apply` against the public worktree, and one whose context these contents do not contain is dropped.
+
+{{PUBLIC_FILE_CONTENTS}}
+
 ## Folded evidence
 
 Counts include distinct source sessions. Relevance is the share of analyzed sessions in which an instruction drew any evidence.
